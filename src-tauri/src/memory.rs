@@ -55,7 +55,10 @@ fn imports(text: &str, base: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn add_file(p: &Path, label: &str, parts: &mut Vec<String>, seen: &mut HashSet<PathBuf>, total: &mut usize, depth: usize) {
+/// `limit`: imports from project files must stay inside this folder (a
+/// cloned repository must not pull ~/.ssh or ~/.aws into the prompt);
+/// `None` for the user's own memory file.
+fn add_file(p: &Path, label: &str, parts: &mut Vec<String>, seen: &mut HashSet<PathBuf>, total: &mut usize, depth: usize, limit: Option<&Path>) {
     let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     if !seen.insert(key) || *total > TOTAL {
         return;
@@ -71,7 +74,15 @@ fn add_file(p: &Path, label: &str, parts: &mut Vec<String>, seen: &mut HashSet<P
     if depth < 4 {
         let base = p.parent().unwrap_or(Path::new("."));
         for imp in imports(t, base) {
-            add_file(&imp, "imported", parts, seen, total, depth + 1);
+            if let Some(lim) = limit {
+                let canon = std::fs::canonicalize(&imp).unwrap_or_else(|_| imp.clone());
+                let lim = std::fs::canonicalize(lim).unwrap_or_else(|_| lim.to_path_buf());
+                if !canon.starts_with(&lim) {
+                    parts.push(format!("(Import of {} from {} skipped: it is outside the project folder.)", imp.display(), p.display()));
+                    continue;
+                }
+            }
+            add_file(&imp, "imported", parts, seen, total, depth + 1, limit);
         }
     }
 }
@@ -82,7 +93,7 @@ pub fn load(cwd: &Path) -> String {
     let mut seen = HashSet::new();
     let mut total = 0;
     if let Some(u) = user_file() {
-        add_file(&u, "user instructions for all projects", &mut parts, &mut seen, &mut total, 0);
+        add_file(&u, "user instructions for all projects", &mut parts, &mut seen, &mut total, 0, None);
     }
     let mut dirs_up: Vec<PathBuf> = cwd.ancestors().map(|d| d.to_path_buf()).collect();
     dirs_up.reverse();
@@ -93,7 +104,7 @@ pub fn load(cwd: &Path) -> String {
             ("AGENTS.md", "project instructions for agents"),
             ("CLAUDE.local.md", "private project instructions"),
         ] {
-            add_file(&dir.join(name), label, &mut parts, &mut seen, &mut total, 0);
+            add_file(&dir.join(name), label, &mut parts, &mut seen, &mut total, 0, Some(&dir));
         }
     }
     parts.join("\n\n")
@@ -170,6 +181,13 @@ mod tests {
         let m = load(&dir);
         assert!(m.contains("Use tabs.") && m.contains("Prefer short functions.") && m.contains("Run cargo test"), "{m}");
         assert_eq!(m.matches("Run cargo test").count(), 1, "AGENTS.md included once");
+        // imports leaving the project folder are skipped
+        let secret = std::env::temp_dir().join(format!("cr-secret-{}.txt", crate::util::new_id()));
+        std::fs::write(&secret, "TOP-SECRET").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), format!("See @{}\n", secret.display())).unwrap();
+        let m = load(&dir);
+        assert!(!m.contains("TOP-SECRET") && m.contains("skipped"), "{m}");
+        let _ = std::fs::remove_file(secret);
         let _ = std::fs::remove_dir_all(dir);
     }
 
