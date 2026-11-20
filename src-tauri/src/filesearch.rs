@@ -276,9 +276,112 @@ pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
     Some(json!({"type": "text", "text": format!("<system-reminder>The user mentioned {url}. Its content:\n{body}</system-reminder>")}))
 }
 
+// ------------------------------------------------------------ file browser
+
+/// Entries directly inside `dir` (relative to `root`; "" = the root):
+/// directories first, then files, each by name (case-insensitive).
+pub fn children(root: &Path, dir: &str) -> Vec<(String, bool)> {
+    let dir = dir.trim_matches('/');
+    let all = list(root);
+    let mut out: Vec<(String, bool)> = all
+        .iter()
+        .filter(|(p, _)| match p.rsplit_once('/') {
+            Some((parent, _)) => parent == dir,
+            None => dir.is_empty(),
+        })
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    out
+}
+
+/// Largest file shown in the viewer.
+const VIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// Lines shown (and highlighted) at most.
+const VIEW_MAX_LINES: usize = 20_000;
+
+/// A project file for the read-only viewer: highlighted HTML (or a note for
+/// binary / too-large files). `rel` must stay inside `root`.
+pub fn view_file(root: &Path, rel: &str) -> crate::error::AppResult<Value> {
+    use crate::error::AppError;
+    let root = std::fs::canonicalize(root)?;
+    let path = std::fs::canonicalize(root.join(rel.trim_start_matches('/'))).map_err(|_| AppError::msg(format!("File not found: {rel}")))?;
+    if !path.starts_with(&root) {
+        return Err(AppError::msg("That file is outside the project folder."));
+    }
+    let meta = std::fs::metadata(&path)?;
+    if !meta.is_file() {
+        return Err(AppError::msg(format!("{rel} is not a file.")));
+    }
+    let rel = path.strip_prefix(&root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    let size = meta.len();
+    let base = json!({"path": rel, "abs": path, "size": size});
+    if size > VIEW_MAX_BYTES {
+        return Ok(merge(base, json!({"too_large": true})));
+    }
+    let bytes = std::fs::read(&path)?;
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        return Ok(merge(base, json!({"binary": true})));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.lines().count();
+    let shown: String = if total > VIEW_MAX_LINES {
+        text.lines().take(VIEW_MAX_LINES).collect::<Vec<_>>().join("\n")
+    } else {
+        text.trim_end_matches('\n').to_string()
+    };
+    let ext = Path::new(&rel)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| Path::new(&rel).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+    let html = crate::highlight::highlight(&shown, &ext);
+    Ok(merge(base, json!({"lines": total, "shown": total.min(VIEW_MAX_LINES), "html": html, "lang": crate::highlight::language_label(&ext)})))
+}
+
+fn merge(mut a: Value, b: Value) -> Value {
+    if let (Some(a), Some(b)) = (a.as_object_mut(), b.as_object()) {
+        for (k, v) in b {
+            a.insert(k.clone(), v.clone());
+        }
+    }
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browse_and_view() {
+        let d = std::env::temp_dir().join(format!("cr-browse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src/inner")).unwrap();
+        std::fs::create_dir_all(d.join("Docs")).unwrap();
+        std::fs::write(d.join("src/main.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        std::fs::write(d.join("src/inner/a.rs"), "").unwrap();
+        std::fs::write(d.join("b.txt"), "x").unwrap();
+        std::fs::write(d.join("A.md"), "# t").unwrap();
+        std::fs::write(d.join("blob.bin"), [0u8, 1, 2, 0]).unwrap();
+        let names = |dir: &str| children(&d, dir).into_iter().map(|(p, isd)| format!("{p}{}", if isd { "/" } else { "" })).collect::<Vec<_>>();
+        assert_eq!(names(""), vec!["Docs/", "src/", "A.md", "b.txt", "blob.bin"]);
+        assert_eq!(names("src"), vec!["src/inner/", "src/main.rs"]);
+        assert_eq!(names("src/inner/"), vec!["src/inner/a.rs"]);
+
+        let v = view_file(&d, "src/main.rs").unwrap();
+        assert_eq!(v["lines"], 3);
+        assert_eq!(v["path"], "src/main.rs");
+        assert!(v["html"].as_str().unwrap().contains("println"));
+        assert_eq!(view_file(&d, "blob.bin").unwrap()["binary"], true);
+        assert!(view_file(&d, "../../etc/passwd").is_err() || !d.join("../../etc/passwd").exists());
+        assert!(view_file(&d, "src").is_err());
+        assert!(view_file(&d, "nope.rs").is_err());
+        let outside = std::env::temp_dir().join(format!("cr-outside-{}.txt", std::process::id()));
+        std::fs::write(&outside, "secret").unwrap();
+        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        assert!(view_file(&d, &rel).is_err());
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn fuzzy_prefers_file_names_and_consecutive_runs() {

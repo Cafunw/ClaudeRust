@@ -374,6 +374,8 @@ pub fn run() {
             commands::worktree_commit,
             commands::file_search,
             commands::symbol_search,
+            commands::project_dir,
+            commands::project_file,
             commands::slash_list,
             commands::slash_expand,
             commands::slash_save,

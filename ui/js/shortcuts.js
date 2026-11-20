@@ -8,7 +8,7 @@ import { registerCommand } from './slash.js';
 import * as workspace from './workspace.js';
 
 const MOD = isMac ? '⌘' : 'Ctrl';
-const PANES = ['changes', 'history', 'plan', 'terminal', 'tasks', 'preview', 'map'];
+const PANES = ['changes', 'history', 'plan', 'terminal', 'tasks', 'preview', 'map', 'files'];
 
 // most recently used conversations, newest first
 const mru = [];
@@ -34,8 +34,8 @@ window.addEventListener('keydown', (e) => {
     emit('navigate', { name: 'chat', params: { id: mru[cycle.index] } });
     return;
   }
-  // Alt+1..7: side-panel panes of a code session
-  if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-7]$/.test(e.key) && workspace.context()) {
+  // Alt+1..8: side-panel panes of a code session
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-8]$/.test(e.key) && workspace.context()) {
     e.preventDefault();
     workspace.toggle(PANES[+e.key - 1]);
     return;
@@ -53,7 +53,7 @@ export function openShortcuts() {
     [t('sc_sidebar'), `${MOD}+B`],
     [t('settings'), `${MOD}+,`],
     [t('ws_toggle'), `${MOD}+\``],
-    [t('sc_panes'), 'Alt+1 … Alt+7'],
+    [t('sc_panes'), 'Alt+1 … Alt+8'],
     [t('sc_send'), 'Enter'],
     [t('sc_newline'), 'Shift+Enter'],
     [t('sc_queue'), t('sc_queue_k')],

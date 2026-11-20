@@ -29,6 +29,7 @@ import './panes/tasks.js';
 import './panes/preview.js';
 import './panes/map.js';
 import './panes/history.js';
+import './panes/files.js';
 import * as artifacts from './artifacts.js';
 import { renderProjects, renderProject, refreshProjects } from './projects.js';
 import { renderCode, renderChats } from './code.js';

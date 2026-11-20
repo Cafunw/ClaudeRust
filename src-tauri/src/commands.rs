@@ -1205,6 +1205,26 @@ pub async fn file_search(state: St<'_>, conversation_id: Option<String>, cwd: Op
     Ok(json!(r))
 }
 
+/// One level of the project's file tree (for the Files pane).
+#[tauri::command]
+pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let dir = dir.unwrap_or_default();
+    let r = tokio::task::spawn_blocking(move || crate::filesearch::children(&root, &dir))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?;
+    Ok(json!(r.into_iter().map(|(p, d)| json!({"path": p, "dir": d})).collect::<Vec<_>>()))
+}
+
+/// A project file for the read-only viewer, highlighted.
+#[tauri::command]
+pub async fn project_file(state: St<'_>, conversation_id: String, path: String) -> AppResult<Value> {
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    tokio::task::spawn_blocking(move || crate::filesearch::view_file(&root, &path))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+}
+
 #[tauri::command]
 pub async fn symbol_search(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, query: String) -> AppResult<Value> {
     let Some(root) = root_of(&state, conversation_id.as_deref(), cwd) else { return Ok(json!([])) };

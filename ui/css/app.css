@@ -1041,3 +1041,27 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 mark.find-hit { background: rgba(255, 196, 0, .35); color: inherit; border-radius: 2px; }
 mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .att-digest { color: var(--accent, #c96442); cursor: help; }
+
+/* Files pane */
+.files-pane { overflow: hidden; }
+.fb-head { gap: 6px; }
+.fb-head .fb-filter { flex: 1; min-width: 0; height: 28px; font-size: 12.5px; }
+.fb-tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 12px; }
+.fb-row { display: flex; align-items: center; gap: 6px; height: 26px; padding-right: 8px; font-size: 13px; color: var(--text-1); cursor: pointer; user-select: none; }
+.fb-row:hover { background: var(--bg-3); }
+.fb-row .tw { width: 12px; display: inline-flex; color: var(--text-3); }
+.fb-row svg { flex: none; color: var(--text-2); }
+.fb-row .nm { flex: 1; min-width: 0; }
+.fb-row .fb-at { visibility: hidden; font-weight: 600; font-size: 12px; }
+.fb-row:hover .fb-at { visibility: visible; }
+.fv-head { gap: 6px; }
+.fv-path { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; }
+.fv-path .sep { color: var(--text-3); margin: 0 2px; }
+.fv-head .icon-btn { font-weight: 600; }
+.fv-body { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start; background: var(--bg-1); }
+.fv-body pre { margin: 0; padding: 8px 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; }
+.fv-gutter { flex: none; position: sticky; left: 0; padding: 8px 8px 8px 10px !important; text-align: right; color: var(--text-3); background: var(--bg-1); border-right: 1px solid var(--border); user-select: none; cursor: pointer; }
+.fv-gutter span:hover { color: var(--accent); }
+.fv-code { flex: 1; padding-left: 10px !important; padding-right: 12px !important; }
+.fv-code code { font-family: inherit; white-space: pre; background: none; padding: 0; }
+.fv-more { padding: 6px 12px; border-top: 1px solid var(--border); }

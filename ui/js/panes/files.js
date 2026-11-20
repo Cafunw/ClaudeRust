@@ -1,0 +1,158 @@
+// Files pane: the session folder's file tree (.gitignore-aware) and a
+// read-only, highlighted viewer. Files and lines can be @mentioned.
+import { t } from '../i18n.js';
+import { icon } from '../icons.js';
+import { call, on } from '../api.js';
+import { h, esc, errorToast, humanSize, debounce } from '../util.js';
+import { registerPane, context, refresh, show } from '../workspace.js';
+
+const state = new Map(); // convId -> { open: Set<dir>, file: path|null, filter: '' }
+
+function st(convId) {
+  if (!state.has(convId)) state.set(convId, { open: new Set(), file: null, filter: '', scroll: 0 });
+  return state.get(convId);
+}
+
+async function composer() {
+  const chat = await import('../chat.js');
+  const c = chat.current();
+  return c && c.composer;
+}
+
+async function mention(path, line) {
+  const c = await composer();
+  if (!c) return;
+  const p = /\s/.test(path) ? `"${path}"` : path;
+  c.insertText(`@${p}${line ? `#L${line}` : ''} `);
+}
+
+const base = (p) => p.split('/').pop();
+
+async function drawTree(el, ctx) {
+  const s = st(ctx.convId);
+  el.innerHTML = '';
+  const head = h(`<div class="pane-head fb-head"><input class="input sm fb-filter" placeholder="${esc(t('files_filter'))}" spellcheck="false"><button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>`);
+  const list = h('<div class="fb-tree"></div>');
+  el.append(head, list);
+  const input = head.querySelector('input');
+  input.value = s.filter;
+  head.querySelector('[data-a=refresh]').onclick = () => drawTree(el, ctx);
+  const run = debounce(() => { s.filter = input.value.trim(); fill(list, ctx); }, 150);
+  input.addEventListener('input', run);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { const first = list.querySelector('.fb-row.file'); if (first) first.click(); }
+  });
+  await fill(list, ctx);
+  list.scrollTop = s.scroll;
+  list.addEventListener('scroll', () => { s.scroll = list.scrollTop; });
+}
+
+function row(entry, depth, ctx, el) {
+  const s = st(ctx.convId);
+  const open = entry.dir && s.open.has(entry.path);
+  const r = h(`<div class="fb-row ${entry.dir ? 'dir' : 'file'}" style="padding-left:${8 + depth * 14}px" title="${esc(entry.path)}">
+    <span class="tw">${entry.dir ? icon(open ? 'chevDown' : 'chevRight', 12) : ''}</span>${icon(entry.dir ? 'folder' : 'file', 14)}<span class="nm ellipsis">${esc(entry.label || base(entry.path))}</span>
+    ${entry.dir ? '' : `<button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}">@</button>`}</div>`);
+  if (entry.dir) {
+    r.onclick = () => {
+      if (open) s.open.delete(entry.path); else s.open.add(entry.path);
+      fill(el.querySelector('.fb-tree'), ctx);
+    };
+  } else {
+    r.onclick = (e) => {
+      if (e.target.closest('.fb-at')) { mention(entry.path); return; }
+      s.file = entry.path;
+      draw(el, ctx);
+    };
+  }
+  return r;
+}
+
+async function fill(list, ctx) {
+  const s = st(ctx.convId);
+  const el = list.closest('.ws-pane');
+  if (s.filter) {
+    let hits = [];
+    try { hits = await call('file_search', { conversationId: ctx.convId, query: s.filter }); } catch { hits = []; }
+    list.innerHTML = '';
+    if (!hits.length) { list.appendChild(h(`<div class="pane-empty">${esc(t('no_results'))}</div>`)); return; }
+    for (const f of hits) {
+      const r = row({ path: f.path, dir: !!f.dir, label: f.path }, 0, ctx, el);
+      if (f.dir) r.onclick = () => { s.filter = ''; let p = ''; for (const part of f.path.split('/')) { p = p ? `${p}/${part}` : part; s.open.add(p); } drawTree(el, ctx); };
+      list.appendChild(r);
+    }
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  const walk = async (dir, depth) => {
+    let items;
+    try { items = await call('project_dir', { conversationId: ctx.convId, dir }); } catch (e) { frag.appendChild(h(`<div class="pane-empty">${esc(e.message || String(e))}</div>`)); return; }
+    for (const it of items) {
+      frag.appendChild(row(it, depth, ctx, el));
+      if (it.dir && s.open.has(it.path)) await walk(it.path, depth + 1);
+    }
+  };
+  await walk('', 0);
+  list.innerHTML = '';
+  if (!frag.childNodes.length) list.appendChild(h(`<div class="pane-empty">${esc(t('files_empty'))}</div>`));
+  list.appendChild(frag);
+}
+
+async function drawFile(el, ctx) {
+  const s = st(ctx.convId);
+  el.innerHTML = `<div class="pane-empty"><span class="spinner"></span></div>`;
+  let f;
+  try { f = await call('project_file', { conversationId: ctx.convId, path: s.file }); } catch (e) { s.file = null; errorToast(e); drawTree(el, ctx); return; }
+  el.innerHTML = '';
+  const crumbs = f.path.split('/').map((p) => esc(p)).join('<span class="sep">/</span>');
+  const head = h(`<div class="pane-head fv-head"><button class="icon-btn" data-a="back" title="${t('back')}">${icon('arrowLeft', 14)}</button>
+    <div class="fv-path ellipsis" title="${esc(f.path)}">${crumbs}</div>
+    <span class="muted small">${f.lines != null ? `${f.lines} ${esc(t('files_lines'))} · ` : ''}${esc(humanSize(f.size))}</span>
+    <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}">@</button>
+    <button class="icon-btn" data-a="edit" title="${esc(t('open_in_editor'))}">${icon('external', 14)}</button></div>`);
+  head.querySelector('[data-a=back]').onclick = () => { s.file = null; drawTree(el, ctx); };
+  head.querySelector('[data-a=at]').onclick = () => mention(f.path);
+  head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: null }).catch(errorToast);
+  el.appendChild(head);
+  if (f.binary || f.too_large) {
+    el.appendChild(h(`<div class="pane-empty">${icon('file', 22)}<div>${esc(f.binary ? t('files_binary') : t('files_too_large'))}</div></div>`));
+    return;
+  }
+  const n = f.shown || 0;
+  let gutter = '';
+  for (let i = 1; i <= n; i++) gutter += `<span>${i}</span>\n`;
+  const body = h(`<div class="fv-body"><pre class="fv-gutter" title="${esc(t('files_line_tip'))}">${gutter}</pre><pre class="fv-code"><code>${f.html}</code></pre></div>`);
+  body.querySelector('.fv-gutter').onclick = (e) => {
+    const sp = e.target.closest('span');
+    if (sp) mention(f.path, Number(sp.textContent));
+  };
+  el.appendChild(body);
+  if (f.lines > n) el.appendChild(h(`<div class="muted small fv-more">${esc(t('files_truncated', { n, total: f.lines }))}</div>`));
+}
+
+function draw(el, ctx) {
+  return st(ctx.convId).file ? drawFile(el, ctx) : drawTree(el, ctx);
+}
+
+/** Show a project file in the Files pane. */
+export function showFile(path) {
+  const ctx = context();
+  if (!ctx) return;
+  st(ctx.convId).file = path;
+  show('files');
+  refresh('files');
+}
+
+registerPane({
+  id: 'files',
+  order: 65,
+  icon: 'folder',
+  label: () => t('ws_files'),
+  mount: (el, ctx) => { el.classList.add('files-pane'); draw(el, ctx); },
+  show: (el, ctx) => draw(el, ctx),
+});
+
+on('files-changed', ({ conversation_id }) => {
+  const c = context();
+  if (c && c.convId === conversation_id && !st(conversation_id).file) refresh('files');
+});
