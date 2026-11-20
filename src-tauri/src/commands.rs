@@ -2257,3 +2257,74 @@ pub async fn git_revert(app: AppHandle, state: St<'_>, conversation_id: String, 
     let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
     Ok(format!("Reverted in a new commit {}.", head.trim()))
 }
+
+// ------------------------------------------------------------- /context
+
+/// What fills the context window of a conversation, by category (token
+/// estimates from text length, scaled to the last real count when known).
+#[tauri::command]
+pub async fn context_breakdown(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let conv = st.db.conv_get(&conversation_id)?;
+    let settings = st.settings.read().clone();
+    let path = match &conv.current_leaf {
+        Some(l) => st.db.path_to(l)?,
+        None => vec![],
+    };
+    let est = |s: &str| (s.chars().count() as f64 / 3.6).ceil() as u64;
+    let mut cats: Vec<(String, u64)> = vec![];
+    if conv.model.starts_with(crate::oai::PREFIX) || conv.options["engine"] == crate::claudecode::ENGINE {
+        // not built by us; only the totals are known
+    } else {
+        let rc = engine::build_request_context(&st, &conv, &settings).await?;
+        let memory = conv.options["memory"].as_str().unwrap_or("");
+        let sys_total = est(&rc.system);
+        let mem = est(memory).min(sys_total);
+        cats.push(("system".into(), sys_total - mem));
+        if mem > 0 {
+            cats.push(("memory".into(), mem));
+        }
+        let mcp: u64 = rc.tools.iter().filter(|t| rc.mcp_names.contains_key(t["name"].as_str().unwrap_or(""))).map(|t| est(&t.to_string())).sum();
+        let all_tools: u64 = rc.tools.iter().map(|t| est(&t.to_string())).sum();
+        cats.push(("tools".into(), all_tools - mcp));
+        if mcp > 0 {
+            cats.push(("mcp_tools".into(), mcp));
+        }
+        let msgs = crate::compact::apply(&path);
+        let (mut conv_t, mut tool_t, mut summary_t) = (0u64, 0u64, 0u64);
+        for m in &msgs {
+            if let Some(sm) = m.meta["compact_summary"].as_str() {
+                summary_t += est(sm);
+            }
+            for b in m.content.as_array().into_iter().flatten() {
+                let n = est(&b.to_string());
+                match b["type"].as_str() {
+                    Some("tool_use") | Some("tool_result") | Some("server_tool_use") | Some("web_search_tool_result") => tool_t += n,
+                    Some("image") => conv_t += 1600,
+                    _ => conv_t += n,
+                }
+            }
+        }
+        cats.push(("messages".into(), conv_t));
+        cats.push(("tool_calls".into(), tool_t));
+        if summary_t > 0 {
+            cats.push(("summary".into(), summary_t));
+        }
+    }
+    let estimated: u64 = cats.iter().map(|c| c.1).sum();
+    let start = crate::compact::start_index(&path).unwrap_or(0);
+    let actual = crate::compact::context_tokens(&path[start..]);
+    // scale estimates to the real count of the last response when we have it
+    let scale = match actual {
+        Some(a) if estimated > 0 => a as f64 / estimated as f64,
+        _ => 1.0,
+    };
+    let window = models::info(&conv.model).context as u64;
+    Ok(json!({
+        "categories": cats.iter().map(|(k, v)| json!({"name": k, "tokens": ((*v as f64) * scale).round() as u64})).collect::<Vec<_>>(),
+        "used": actual.unwrap_or(estimated),
+        "measured": actual.is_some(),
+        "window": window,
+        "auto_compact_pct": settings.auto_compact_pct,
+    }))
+}

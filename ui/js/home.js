@@ -3,7 +3,7 @@ import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, displayName } from './store.js';
-import { $, esc, h } from './util.js';
+import { $, esc } from './util.js';
 import { createComposer } from './composer.js';
 
 function greeting() {

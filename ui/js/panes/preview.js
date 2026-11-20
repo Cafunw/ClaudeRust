@@ -3,7 +3,7 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast } from '../util.js';
+import { esc, errorToast } from '../util.js';
 import { registerPane, context, updateTabs, show } from '../workspace.js';
 
 const state = new Map(); // convId -> { url, found: [] }

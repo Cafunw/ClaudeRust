@@ -22,4 +22,8 @@ jobs:
         timeout-minutes: 5
         run: cargo test -p clauderust --lib -- --test-threads=2
       - name: Check UI modules parse
-        run: for f in ui/js/*.js; do node --experimental-default-type=module --check "$f"; done
+        run: for f in ui/js/*.js ui/js/panes/*.js; do node --experimental-default-type=module --check "$f"; done
+      - name: Lint UI (undefined names, duplicate keys)
+        run: npm ci --ignore-scripts && npx eslint ui/js
+      - name: Clippy
+        run: cargo clippy -p clauderust --lib -- -D warnings

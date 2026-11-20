@@ -2,7 +2,7 @@
 // summarized" divider.
 import { t } from './i18n.js';
 import { call, on } from './api.js';
-import { h, esc, toast, errorToast, fmtTokens } from './util.js';
+import { h, esc, toast, errorToast, fmtTokens, modal } from './util.js';
 import { registerCommand } from './slash.js';
 
 /** A topbar element showing context use and cost; refreshes itself. */
@@ -75,3 +75,24 @@ on('compacted', ({ error, auto }) => {
   refreshMeters();
 });
 on('generation-state', ({ running }) => { if (!running) refreshMeters(); });
+
+const CTX_COLORS = { system: '#8e5cc2', memory: '#2f8a8a', tools: '#4a7bd0', mcp_tools: '#5a6b8c', messages: '#c96442', tool_calls: '#b07a10', summary: '#3a9a5b' };
+
+async function openContext(ctx) {
+  if (!ctx.conversationId) return;
+  let d;
+  try { d = await call('context_breakdown', { conversationId: ctx.conversationId }); } catch (e) { errorToast(e); return; }
+  const win = d.window || 1;
+  const pct = (n) => Math.max(0, (n / win) * 100);
+  const free = Math.max(0, win - d.used);
+  const bar = d.categories.map((c) => `<span style="width:${pct(c.tokens).toFixed(2)}%;background:${CTX_COLORS[c.name] || '#999'}" title="${esc(t('ctx_' + c.name))}: ${fmtTokens(c.tokens)}"></span>`).join('');
+  const body = h(`<div class="ctx-view">
+    <div class="ctx-total"><b>${fmtTokens(d.used)}</b> / ${fmtTokens(win)} ${esc(t('ctx_tokens'))} · ${pct(d.used).toFixed(1)}%${d.measured ? '' : ` · <span class="muted">${esc(t('ctx_estimated'))}</span>`}</div>
+    <div class="ctx-bar">${bar}</div>
+    <table class="kv">${d.categories.map((c) => `<tr><td><i class="ctx-dot" style="background:${CTX_COLORS[c.name] || '#999'}"></i>${esc(t('ctx_' + c.name))}</td><td>${fmtTokens(c.tokens)} · ${pct(c.tokens).toFixed(1)}%</td></tr>`).join('')}
+      <tr><td><i class="ctx-dot" style="background:var(--border)"></i>${esc(t('ctx_free'))}</td><td>${fmtTokens(free)} · ${pct(free).toFixed(1)}%</td></tr></table>
+    <p class="muted small">${esc(d.auto_compact_pct ? t('ctx_autocompact', { n: d.auto_compact_pct }) : t('ctx_no_autocompact'))}</p></div>`);
+  modal({ title: t('ctx_title'), body });
+}
+
+registerCommand({ name: 'context', description: () => t('cmd_context'), engines: ['builtin'], run: (_a, ctx) => openContext(ctx) });

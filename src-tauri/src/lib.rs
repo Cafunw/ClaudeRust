@@ -333,6 +333,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::context_breakdown,
             commands::git_log,
             commands::git_show,
             commands::git_revert,

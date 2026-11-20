@@ -1023,3 +1023,8 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .q-item button { border: 0; background: none; color: var(--text-3); cursor: pointer; display: inline-flex; }
 .send-btn.queue { background: var(--text-1); }
 .shortcuts kbd { font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: var(--bg-1); }
+.ctx-view { display: flex; flex-direction: column; gap: 12px; }
+.ctx-total { font-size: 14px; }
+.ctx-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--bg-2); }
+.ctx-bar span { height: 100%; min-width: 1px; }
+.ctx-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; }

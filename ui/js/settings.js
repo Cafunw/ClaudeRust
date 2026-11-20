@@ -202,7 +202,7 @@ const RENDER = {
     body.appendChild(row(t('title_model'), '', select('title_model', modelOptions())));
     const mt = textField('max_tokens', { type: 'number' });
     mt.style.width = '140px';
-    body.appendChild(row(t('max_tokens'), '', mt));
+    body.appendChild(row(t('max_tokens_setting'), '', mt));
   },
 
   features(body) {
