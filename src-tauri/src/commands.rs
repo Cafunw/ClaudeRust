@@ -553,6 +553,9 @@ pub async fn export_conversation(state: St<'_>, id: String, format: String) -> A
     if format == "json" {
         return Ok(serde_json::to_string_pretty(&json!({"conversation": conv, "messages": path}))?);
     }
+    if format == "html" {
+        return Ok(export_html(&st, &conv, &path).await);
+    }
     let mut md = format!("# {}\n\n", if conv.title.is_empty() { "Conversation" } else { &conv.title });
     for m in &path {
         if render::is_tool_result_msg(m) {
@@ -2025,4 +2028,129 @@ mod usage_tests {
         let cached = serde_json::json!({"cache_read_input_tokens": 1_000_000});
         assert!((super::usage_cost("claude-opus-5-5", &cached) - p.0 * 0.1).abs() < 1e-9);
     }
+}
+
+// ------------------------------------------------------------- HTML report
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A self-contained HTML report of a conversation: messages rendered as
+/// Markdown, tool calls summarized, and for code sessions the changed files
+/// and the cost.
+pub async fn export_html(st: &AppState, conv: &crate::db::Conversation, path: &[crate::db::Message]) -> String {
+    let opts = || crate::markdown::Opts { math: false, breaks: false };
+    let title = if conv.title.is_empty() { "Conversation".to_string() } else { conv.title.clone() };
+    let mut body = String::new();
+    let mut tools = 0usize;
+    let mut cost = 0.0f64;
+    for m in path {
+        if m.role == "assistant" {
+            for key in ["usage", "subagent_usage"] {
+                if m.meta[key].is_object() {
+                    cost += usage_cost(m.meta["model"].as_str().unwrap_or(&conv.model), &m.meta[key]);
+                }
+            }
+        }
+        if render::is_tool_result_msg(m) {
+            continue;
+        }
+        let blocks = m.content.as_array().cloned().unwrap_or_default();
+        if m.role == "user" {
+            let text: String = blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .filter(|t| !t.starts_with("<system-reminder>"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if text.trim().is_empty() {
+                continue;
+            }
+            body.push_str(&format!("<section class=\"user\"><div class=\"who\">You</div><div class=\"bubble\">{}</div></section>\n", html_escape(text.trim()).replace('\n', "<br>")));
+            continue;
+        }
+        let mut parts = String::new();
+        for b in &blocks {
+            match b["type"].as_str() {
+                Some("text") => parts.push_str(&crate::markdown::render(b["text"].as_str().unwrap_or(""), opts())),
+                Some("tool_use") | Some("server_tool_use") => {
+                    tools += 1;
+                    let name = b["name"].as_str().unwrap_or("tool");
+                    let input = &b["input"];
+                    let arg = input["command"].as_str().or(input["file_path"].as_str()).or(input["pattern"].as_str()).or(input["query"].as_str()).or(input["description"].as_str()).unwrap_or("");
+                    parts.push_str(&format!(
+                        "<details class=\"tool\"><summary><b>{}</b> <code>{}</code></summary><pre>{}</pre></details>",
+                        html_escape(name),
+                        html_escape(&arg.chars().take(160).collect::<String>()),
+                        html_escape(&crate::util::truncate_middle(&serde_json::to_string_pretty(input).unwrap_or_default(), 4000))
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if !parts.trim().is_empty() {
+            body.push_str(&format!("<section class=\"assistant\"><div class=\"who\">Claude</div>{parts}</section>\n"));
+        }
+    }
+    let mut meta = vec![
+        format!("Model: {}", html_escape(&models::info(&conv.model).name)),
+        format!("{} messages", path.iter().filter(|m| !render::is_tool_result_msg(m)).count()),
+    ];
+    if tools > 0 {
+        meta.push(format!("{tools} tool calls"));
+    }
+    if cost > 0.0 {
+        meta.push(format!("estimated cost ${cost:.2}"));
+    }
+    let mut changes = String::new();
+    if conv.kind == "code" {
+        if let Some(cwd) = &conv.cwd {
+            meta.push(format!("Folder: <code>{}</code>", html_escape(cwd)));
+            let s = crate::codetools::CodeSession::new(std::path::PathBuf::from(cwd));
+            if let Ok(c) = crate::gitops::changes(&s).await {
+                let files = c["files"].as_array().cloned().unwrap_or_default();
+                if !files.is_empty() {
+                    changes.push_str("<h2>Uncommitted changes</h2><ul class=\"changes\">");
+                    for f in files.iter().take(200) {
+                        changes.push_str(&format!(
+                            "<li><span class=\"st\">{}</span> <code>{}</code> <span class=\"add\">+{}</span> <span class=\"del\">-{}</span></li>",
+                            html_escape(f["status"].as_str().unwrap_or("")),
+                            html_escape(f["path"].as_str().unwrap_or("")),
+                            f["added"].as_u64().unwrap_or(0),
+                            f["removed"].as_u64().unwrap_or(0)
+                        ));
+                    }
+                    changes.push_str("</ul>");
+                }
+            }
+        }
+    }
+    let _ = st;
+    let date = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    format!(r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{t}</title>
+<style>
+:root {{ --bg:#faf9f5; --fg:#1f1e1d; --muted:#6b6a68; --border:#e5e2d9; --accent:#c96442; --code:#f0eee6; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1f1e1d; --fg:#ecebe6; --muted:#a3a19c; --border:#3a3936; --code:#2a2927; }} }}
+body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif; }}
+main {{ max-width:820px; margin:0 auto; padding:32px 20px 60px; }}
+h1 {{ font-size:24px; margin:0 0 6px; }} h2 {{ font-size:17px; margin-top:28px; }}
+.meta {{ color:var(--muted); font-size:13px; margin-bottom:24px; }} .meta span+span:before {{ content:" · "; }}
+section {{ margin:18px 0; }} .who {{ font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }}
+.user .bubble {{ background:var(--code); border-radius:12px; padding:10px 14px; display:inline-block; max-width:100%; }}
+pre {{ background:var(--code); padding:10px 12px; border-radius:8px; overflow:auto; font-size:12.5px; }}
+code {{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9em; }}
+details.tool {{ border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin:8px 0; font-size:13px; }}
+details.tool summary {{ cursor:pointer; }} table {{ border-collapse:collapse; }} td,th {{ border:1px solid var(--border); padding:4px 8px; }}
+.changes {{ list-style:none; padding:0; font-size:13px; }} .changes .st {{ display:inline-block; width:14px; font-weight:600; color:var(--accent); }}
+.add {{ color:#3a9a5b; }} .del {{ color:#c0453a; }} a {{ color:var(--accent); }}
+footer {{ color:var(--muted); font-size:12px; margin-top:40px; }}
+button {{ display:none; }} .code-block .lang {{ font-size:12px; color:var(--muted); }}
+{hl}
+</style></head>
+<body><main><h1>{t}</h1><div class="meta">{m}</div>{body}{changes}<footer>Exported from ClaudeRust · {date}</footer></main></body></html>
+"#, hl = crate::highlight::theme_css(), t = html_escape(&title), m = meta.into_iter().map(|x| format!("<span>{x}</span>")).collect::<String>())
 }

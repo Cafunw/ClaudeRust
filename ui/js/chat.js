@@ -160,6 +160,7 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
     { sep: true },
     { label: t('export_md'), icon: 'download', onClick: () => exportConv(c, 'md') },
     { label: t('export_json'), icon: 'download', onClick: () => exportConv(c, 'json') },
+    { label: t('export_html'), icon: 'download', onClick: () => exportConv(c, 'html') },
     { sep: true },
     { label: t('delete'), icon: 'trash', danger: true, onClick: async () => {
       if (!(await confirmDialog(t('confirm_delete_chat')))) return;
@@ -174,7 +175,7 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
 
 async function exportConv(c, fmt) {
   try {
-    const content = await call('export_conversation', { id: c.id, format: fmt === 'json' ? 'json' : 'md' });
+    const content = await call('export_conversation', { id: c.id, format: fmt === 'json' || fmt === 'html' ? fmt : 'md' });
     const base = (c.title || 'conversation').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80);
     await call('save_text_file', { name: `${base}.${fmt}`, content });
   } catch (e) { errorToast(e); }

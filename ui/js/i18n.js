@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  export_html: "Export as HTML report",
   usage_title: "Usage",
   usage_days: "{n} days",
   usage_responses: "Responses",
@@ -348,6 +349,7 @@ const en = {
 };
 
 const tr = {
+  export_html: "HTML rapor olarak dışa aktar",
   usage_title: "Kullanım",
   usage_days: "{n} gün",
   usage_responses: "Yanıt",
