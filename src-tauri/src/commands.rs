@@ -115,6 +115,12 @@ async fn models_view(st: &AppState) -> Value {
         v["available"] = json!(avail);
         out.push(v);
     }
+    for id in st.oai_models.lock().iter() {
+        out.push(json!({
+            "id": format!("{}{id}", crate::oai::PREFIX), "name": id, "description": "OpenAI-compatible endpoint",
+            "thinking": "none", "efforts": [], "featured": true, "available": true, "provider": "oai",
+        }));
+    }
     if let Some(list) = &api {
         for m in list {
             let id = m["id"].as_str().unwrap_or("");
@@ -1903,4 +1909,30 @@ pub async fn slash_save(state: St<'_>, conversation_id: Option<String>, cwd: Opt
         None => None,
     };
     crate::slash::save(root.as_deref(), &scope, &name, &description, &body, overwrite).map(|p| p.to_string_lossy().to_string())
+}
+
+// ------------------------------------------------------------- OpenAI-compatible endpoint
+
+/// Load the model list from the configured endpoint (empty when off).
+#[tauri::command]
+pub async fn oai_refresh(state: St<'_>) -> AppResult<Value> {
+    let (base, key) = {
+        let s = state.settings.read();
+        (s.oai_base_url.trim().to_string(), s.oai_api_key.clone())
+    };
+    if base.is_empty() {
+        state.oai_models.lock().clear();
+        return Ok(json!([]));
+    }
+    let list = crate::oai::list_models(&base, &key).await;
+    match list {
+        Ok(l) => {
+            *state.oai_models.lock() = l.clone();
+            Ok(json!(l))
+        }
+        Err(e) => {
+            state.oai_models.lock().clear();
+            Err(e)
+        }
+    }
 }

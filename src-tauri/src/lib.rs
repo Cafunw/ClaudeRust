@@ -24,6 +24,7 @@ pub mod markdown;
 pub mod mcp;
 pub mod memory;
 pub mod models;
+pub mod oai;
 pub mod prompts;
 pub mod render;
 pub mod routines;
@@ -332,6 +333,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::oai_refresh,
             commands::arch_map,
             commands::commit_message_suggest,
             commands::git_commit,

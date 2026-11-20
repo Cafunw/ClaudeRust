@@ -781,6 +781,9 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
     auto_compact(app, st, conv_id, &parent).await;
     {
         let conv = st.db.conv_get(conv_id)?;
+        if conv.model.starts_with(crate::oai::PREFIX) {
+            return run_oai(app, st, conv_id, parent, cancel).await;
+        }
         if conv.kind == "code" && conv.options["engine"] == crate::claudecode::ENGINE {
             return crate::claudecode::run(app, st, conv_id, parent, cancel).await;
         }
@@ -1116,6 +1119,87 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             return Ok(());
         }
         parent = tr.id;
+    }
+}
+
+/// A chat turn with a model from the OpenAI-compatible endpoint (text only).
+async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: String, cancel: &CancellationToken) -> AppResult<()> {
+    let conv = st.db.conv_get(conv_id)?;
+    let settings = st.settings.read().clone();
+    let model = conv.model.trim_start_matches(crate::oai::PREFIX).to_string();
+    let path = crate::compact::apply(&st.db.path_to(&parent)?);
+    let rc = build_request_context(st, &conv, &settings).await?;
+    let am_id = new_id();
+    let mut am = Message {
+        id: am_id.clone(),
+        conversation_id: conv_id.to_string(),
+        parent_id: Some(parent.clone()),
+        role: "assistant".into(),
+        content: json!([]),
+        meta: json!({"model": conv.model, "provider": "oai"}),
+        created_at: now_ms(),
+    };
+    st.db.msg_insert(&am)?;
+    st.db.conv_set_leaf(conv_id, Some(&am_id))?;
+    let nodes = st.db.tree_nodes(conv_id)?;
+    let renderer = TurnRenderer {
+        first_id: None,
+        siblings: view::siblings_of(&nodes, &am_id),
+        tracker: view::tracker_for(&path),
+        prefix: vec![],
+        mcp_names: HashMap::new(),
+        math: settings.latex_enabled,
+    };
+    let mut live = LiveRun { msg_id: am_id.clone(), content: json!([]), ..Default::default() };
+    st.live.lock().insert(conv_id.to_string(), live.clone());
+    emit_turn(app, conv_id, &renderer.render(&am, &live));
+    if conv.kind == "code" {
+        am.meta["error"] = json!({"message": "Models from an OpenAI-compatible endpoint can chat but can't run the coding agent. Pick a Claude model for code sessions.", "kind": "error"});
+        st.db.msg_update(&am_id, &am.content, &am.meta)?;
+        emit_turn(app, conv_id, &renderer.render(&am, &live));
+        return Ok(());
+    }
+    let messages = crate::oai::to_messages(&rc.system, &path);
+    let started = Instant::now();
+    let mut last = Instant::now() - Duration::from_secs(1);
+    let res = crate::oai::stream(&settings.oai_base_url, &settings.oai_api_key, &model, messages, settings.max_tokens, cancel, |text| {
+        if last.elapsed() < Duration::from_millis(45) {
+            return;
+        }
+        last = Instant::now();
+        let mut cur = am.clone();
+        cur.content = json!([{"type": "text", "text": text}]);
+        let mut l = live.clone();
+        l.content = cur.content.clone();
+        emit_turn(app, conv_id, &renderer.render(&cur, &l));
+    })
+    .await;
+    am.meta["duration_ms"] = json!(started.elapsed().as_millis() as u64);
+    let err = match res {
+        Ok(o) => {
+            am.content = json!([{"type": "text", "text": o.text}]);
+            am.meta["usage"] = o.usage;
+            am.meta["stop_reason"] = json!(match o.finish.as_deref() { Some("length") => "max_tokens", _ => "end_turn" });
+            if o.cancelled {
+                am.meta["stopped"] = json!(true);
+            }
+            None
+        }
+        Err(e) => {
+            am.meta["error"] = serde_json::to_value(&e)?;
+            Some(e)
+        }
+    };
+    st.db.msg_update(&am_id, &am.content, &am.meta)?;
+    let text = render::plain_text(&am.content);
+    let _ = st.db.fts_index(conv_id, &am_id, &text);
+    save_artifacts(st, conv_id, &am_id, &text);
+    live.content = am.content.clone();
+    st.live.lock().insert(conv_id.to_string(), live.clone());
+    emit_turn(app, conv_id, &renderer.render(&am, &live));
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 

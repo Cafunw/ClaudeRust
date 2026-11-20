@@ -48,6 +48,7 @@ pub struct AppState {
     pub terminals: crate::terminal::Terminals,
     pub subagents: crate::subagent::Registry,
     pub watches: crate::watch::Watches,
+    pub oai_models: Mutex<Vec<String>>,
     pub models: Mutex<Option<Vec<Value>>>,
     /// Set when the configured endpoint rejected optional request features.
     pub degraded: AtomicBool,
@@ -75,6 +76,7 @@ impl AppState {
             terminals: crate::terminal::Terminals::default(),
             subagents: crate::subagent::Registry::default(),
             watches: crate::watch::Watches::default(),
+            oai_models: Mutex::new(Vec::new()),
             models: Mutex::new(None),
             degraded: AtomicBool::new(false),
             data_dir,

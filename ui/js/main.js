@@ -115,7 +115,10 @@ async function reloadSettings() {
   else refreshModels();
 }
 
+let oaiLoaded = false;
 async function refreshModels() {
+  // models of the OpenAI-compatible endpoint, once per start
+  if (!oaiLoaded && store.settings.oai_base_url) { oaiLoaded = true; await call('oai_refresh').catch(() => {}); }
   try { store.models = await call('get_models', { refresh: true }); emit('models-changed'); } catch { /* offline */ }
 }
 
@@ -231,6 +234,7 @@ async function init() {
 
   on('navigate', navigate);
   on('open-settings', (tab) => openSettings(tab));
+  on('refresh-models', () => refreshModels());
   on('save-settings', saveSettings);
   on('reload-settings', reloadSettings);
   on('set-zoom', setZoom);

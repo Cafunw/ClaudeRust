@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  oai_title: "Local and other models (OpenAI-compatible)",
+  oai_url: "Endpoint URL",
+  oai_url_help: "Chat with models served by Ollama (http://localhost:11434/v1), LM Studio (http://localhost:1234/v1), llama.cpp, vLLM, OpenRouter… They appear in the model menu. These chats are text and images only — no tools or coding agent.",
+  oai_key: "API key",
+  oai_load: "Load models",
+  oai_found: "{n} models: {list}",
+  oai_off: "No endpoint set.",
+  optional: "optional",
   sc_title: "Save as a command",
   sc_action: "Save as /command",
   sc_name: "Command name",
@@ -332,6 +340,14 @@ const en = {
 };
 
 const tr = {
+  oai_title: "Yerel ve diğer modeller (OpenAI uyumlu)",
+  oai_url: "Uç nokta adresi",
+  oai_url_help: "Ollama (http://localhost:11434/v1), LM Studio (http://localhost:1234/v1), llama.cpp, vLLM, OpenRouter… ile sunulan modellerle sohbet edin. Model menüsünde görünürler. Bu sohbetler yalnızca metin ve görsel içindir — araç ya da kod ajanı yoktur.",
+  oai_key: "API anahtarı",
+  oai_load: "Modelleri yükle",
+  oai_found: "{n} model: {list}",
+  oai_off: "Uç nokta ayarlanmadı.",
+  optional: "isteğe bağlı",
   sc_title: "Komut olarak kaydet",
   sc_action: "/komut olarak kaydet",
   sc_name: "Komut adı",

@@ -177,6 +177,26 @@ const RENDER = {
     f.appendChild(actions);
     body.appendChild(f);
     body.appendChild(field(t('base_url'), textField('base_url', { placeholder: 'https://api.anthropic.com' }), t('base_url_help')));
+    {
+      const sec = h(`<div class="section-title" style="margin-top:22px">${esc(t('oai_title'))}</div>`);
+      body.appendChild(sec);
+      body.appendChild(field(t('oai_url'), textField('oai_base_url', { placeholder: 'http://localhost:11434/v1' }), t('oai_url_help')));
+      body.appendChild(field(t('oai_key'), textField('oai_api_key', { type: 'password', placeholder: t('optional') })));
+      const st = h('<div class="row-inline" style="gap:10px;align-items:center"></div>');
+      const btn = h(`<button class="btn sm">${esc(t('oai_load'))}</button>`);
+      const out = h('<span class="muted small"></span>');
+      btn.onclick = async () => {
+        out.textContent = '…';
+        try {
+          await new Promise((r) => setTimeout(r, 150)); // let a just-edited field save
+          const list = await call('oai_refresh');
+          out.textContent = list.length ? t('oai_found', { n: list.length, list: list.slice(0, 6).join(', ') }) : t('oai_off');
+          emit('refresh-models');
+        } catch (e) { out.textContent = e.message || String(e); }
+      };
+      st.append(btn, out);
+      body.appendChild(st);
+    }
     body.appendChild(h(`<h4>${t('model')}</h4>`));
     body.appendChild(row(t('default_model'), '', select('default_model', modelOptions())));
     body.appendChild(row(t('title_model'), '', select('title_model', modelOptions())));

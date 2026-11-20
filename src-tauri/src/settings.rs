@@ -79,6 +79,9 @@ pub struct Settings {
     pub tool_policies: serde_json::Map<String, Value>,
     /// Project folders whose hook configuration the user trusted: root -> hash
     pub trusted_hooks: serde_json::Map<String, Value>,
+    /// OpenAI-compatible endpoint for local / other models ("" = off), e.g. http://localhost:11434/v1
+    pub oai_base_url: String,
+    pub oai_api_key: String,
     pub disabled_mcp_servers: Vec<String>,
 
     pub onboarded: bool,
@@ -128,6 +131,8 @@ impl Default for Settings {
             auto_compact_pct: 85,
             tool_policies: Default::default(),
             trusted_hooks: Default::default(),
+            oai_base_url: String::new(),
+            oai_api_key: String::new(),
             disabled_mcp_servers: vec![],
             onboarded: false,
         }
