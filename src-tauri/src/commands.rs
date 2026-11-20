@@ -284,6 +284,14 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     if !req.text.trim().is_empty() {
         content.push(json!({"type": "text", "text": req.text}));
     }
+    // @mentions: include the files' contents (the Claude Code CLI expands
+    // them itself).
+    if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE && req.text.contains('@') {
+        if let Some(cwd) = &conv.cwd {
+            let session = st.code_session(&conv.id, cwd);
+            content.extend(crate::filesearch::expand(&req.text, &session));
+        }
+    }
     let plan = conv.kind == "code"
         && conv.options["permission_mode"] == "plan"
         && conv.options["engine"] != crate::claudecode::ENGINE;
@@ -1062,4 +1070,34 @@ pub async fn change_revert(app: AppHandle, state: St<'_>, conversation_id: Strin
     }
     let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
     Ok(())
+}
+
+// ------------------------------------------------------------- @ mentions and / commands
+
+fn root_of(st: &AppState, conversation_id: Option<&str>, cwd: Option<String>) -> Option<std::path::PathBuf> {
+    cwd.filter(|c| !c.is_empty())
+        .or_else(|| conversation_id.and_then(|id| st.db.conv_get(id).ok()).and_then(|c| c.cwd))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+}
+
+#[tauri::command]
+pub async fn file_search(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, query: String) -> AppResult<Value> {
+    let Some(root) = root_of(&state, conversation_id.as_deref(), cwd) else { return Ok(json!([])) };
+    let r = tokio::task::spawn_blocking(move || crate::filesearch::search(&root, &query, 30))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?;
+    Ok(json!(r))
+}
+
+#[tauri::command]
+pub async fn slash_list(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>) -> AppResult<Value> {
+    let root = root_of(&state, conversation_id.as_deref(), cwd);
+    Ok(crate::slash::to_json(&crate::slash::list(root.as_deref())))
+}
+
+#[tauri::command]
+pub async fn slash_expand(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, name: String, args: String) -> AppResult<Option<String>> {
+    let root = root_of(&state, conversation_id.as_deref(), cwd);
+    Ok(crate::slash::expand(root.as_deref(), &name, &args))
 }

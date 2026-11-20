@@ -8,6 +8,7 @@ import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
 import { setToolProgress } from './parts.js';
 import * as workspace from './workspace.js';
+import './commands_builtin.js';
 import './panes/changes.js';
 import './panes/terminal.js';
 import './panes/tasks.js';

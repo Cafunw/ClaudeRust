@@ -92,6 +92,7 @@ export async function renderCode(view) {
     placeholder: t('code_placeholder'),
     draftKey: 'code-new',
     initial: { model: store.settings.code_model || store.settings.default_model, thinking: true, permission_mode: store.settings.code_permission_mode || 'default' },
+    context: () => ({ cwd: folder, engine }),
     onSend: async (text, atts, st) => {
       if (!folder) { toast(t('folder_missing'), 'error'); return false; }
       return startConversation({ text, atts, st, kind: 'code', cwd: folder, engine });

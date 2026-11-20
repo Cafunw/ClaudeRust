@@ -62,6 +62,7 @@ export async function openConversation(id, { focus = true } = {}) {
     onStop: () => call('stop_generation', { conversationId: id }).catch(errorToast),
     onOptions: (patch) => persistOptions(patch),
     onEditLast: () => editLastUserMessage(),
+    context: () => ({ conversationId: id, cwd: cur && cur.conv.cwd, engine: (cur && cur.conv.options && cur.conv.options.engine) || 'builtin', conv: cur && cur.conv }),
   });
   cur.composer = composer;
   $('.composer-slot', bottom).appendChild(composer.el);

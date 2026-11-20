@@ -12,6 +12,7 @@ pub mod display;
 pub mod engine;
 pub mod error;
 pub mod extensions;
+pub mod filesearch;
 pub mod gitops;
 pub mod highlight;
 pub mod import;
@@ -22,6 +23,7 @@ pub mod prompts;
 pub mod render;
 pub mod settings;
 pub mod shellenv;
+pub mod slash;
 pub mod shells;
 pub mod state;
 pub mod terminal;
@@ -319,6 +321,9 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::file_search,
+            commands::slash_list,
+            commands::slash_expand,
             commands::changes_list,
             commands::change_diff,
             commands::change_revert,

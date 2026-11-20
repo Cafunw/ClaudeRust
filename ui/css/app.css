@@ -818,3 +818,17 @@ tr.dv-add td.code { background: rgba(58, 154, 91, 0.13); }
 tr.dv-del td.code { background: rgba(192, 69, 58, 0.12); }
 tr.dv-hunk td { color: var(--text-2); background: var(--bg-1); padding: 3px 8px; }
 .icon-btn.sm { width: 24px; height: 24px; }
+
+/* composer suggestions (@ files, / commands) */
+.composer { position: relative; }
+.suggest-pop { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); max-height: 300px; overflow-y: auto; background: var(--bg-0); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .14); padding: 4px; z-index: 40; }
+.sg-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; min-width: 0; }
+.sg-item.on { background: var(--bg-2); }
+.sg-label { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-0); white-space: nowrap; }
+.sg-hint { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); white-space: nowrap; }
+.sg-sub { color: var(--text-2); font-size: 12px; flex: 1; min-width: 0; text-align: right; }
+.cmd-help .cmd-row { display: flex; gap: 10px; padding: 5px 0; font-size: 13px; align-items: baseline; }
+.cmd-help code { font-size: 12.5px; min-width: 150px; }
+table.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.kv td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
+table.kv td:last-child { text-align: right; font-variant-numeric: tabular-nums; }

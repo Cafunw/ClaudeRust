@@ -1,4 +1,6 @@
 // The message composer: text input, attachments, model / tools menus.
+import * as slash from './slash.js';
+import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
@@ -152,13 +154,27 @@ export function createComposer(opts) {
 
   function addStaged(a) { attachments.push(a); renderAttachments(); }
 
+  function cmdContext() {
+    const c = (opts.context && opts.context()) || {};
+    return { kind: mode, composer: api, ...c };
+  }
+
   async function send() {
     if (running) { opts.onStop && opts.onStop(); return; }
-    const text = ta.value;
+    let text = ta.value;
     if ((!text.trim() && !attachments.length) || busy || attachments.some((a) => a.loading)) return;
     busy = true; updateSend();
     const atts = attachments.slice();
     try {
+      if (text.trim().startsWith('/') && !atts.length) {
+        const r = await slash.handle(text, cmdContext());
+        if (r && r.handled) {
+          ta.value = ''; autoGrow(ta);
+          if (opts.draftKey) store.drafts.delete(opts.draftKey);
+          return;
+        }
+        if (r && r.prompt) text = r.prompt;
+      }
       const ok = await opts.onSend(text, atts, { ...st });
       if (ok !== false) {
         ta.value = '';
@@ -297,6 +313,7 @@ export function createComposer(opts) {
     updateSend();
     if (opts.draftKey) store.drafts.set(opts.draftKey, ta.value);
   });
+  attachSuggest(ta, { context: cmdContext, anchor: el, onPick: (p) => { if (p.type === '/' && p.item.kind === 'builtin' && !p.item.hint) send(); } });
   ta.addEventListener('keydown', (e) => {
     if (e.isComposing || e.keyCode === 229) return;
     const sendOnEnter = store.settings.send_on_enter !== false;
@@ -349,6 +366,9 @@ export function createComposer(opts) {
     addPaths,
     addStaged,
     setDrag(on) { el.classList.toggle('drag', on); },
+    openModelMenu() { modelMenu($('[data-act=model]', el)); },
+    openModeMenu() { const b = $('[data-act=mode]', el); if (b) modeMenu(b); },
+    insertText(s) { const p = ta.selectionStart; ta.value = ta.value.slice(0, p) + s + ta.value.slice(ta.selectionEnd); ta.setSelectionRange(p + s.length, p + s.length); autoGrow(ta); updateSend(); ta.focus(); },
     send,
     refresh: refreshBar,
   };
