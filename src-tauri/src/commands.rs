@@ -761,6 +761,36 @@ pub async fn mcp_read_resource(state: St<'_>, server: String, uri: String) -> Ap
     Ok(v)
 }
 
+// ---------------------------------------------------------------- extensions
+
+#[tauri::command]
+pub async fn pick_extension(app: AppHandle) -> AppResult<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Desktop Extension", &["mcpb", "dxt"])
+        .pick_file(move |f| {
+            let _ = tx.send(f.and_then(|p| p.into_path().ok()).map(|p| p.display().to_string()));
+        });
+    Ok(rx.await.unwrap_or(None))
+}
+
+#[tauri::command]
+pub async fn extension_inspect(path: String) -> AppResult<Value> {
+    crate::extensions::inspect(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn extension_install(app: AppHandle, state: St<'_>, path: String, values: Value) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let dir = st.data_dir.join("extensions");
+    std::fs::create_dir_all(&dir)?;
+    let name = crate::extensions::install(std::path::Path::new(&path), &dir, &st.mcp.config_path, &values)?;
+    let mut status = mcp_reload(app, state).await?;
+    status["installed"] = json!(name);
+    Ok(status)
+}
+
 // ---------------------------------------------------------------------- misc
 
 #[tauri::command]

@@ -130,6 +130,9 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         if web {
             tools.extend(models::web_tools(&model));
         }
+        if settings.chat_search {
+            tools.extend(memory_tools(eager));
+        }
         let date = opts["date"].as_str().map(|s| s.to_string()).unwrap_or_else(today);
         prompts::chat_system(&prompts::ChatPromptInput {
             settings,
@@ -175,6 +178,93 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         mcp_names,
         first_party,
     })
+}
+
+pub const MEMORY_TOOLS: [&str; 2] = ["conversation_search", "recent_chats"];
+
+fn memory_tools(eager: bool) -> Vec<Value> {
+    let mut v = vec![
+        json!({
+            "name": "conversation_search",
+            "description": "Search the user's past conversations in this app by keywords. Use it when the user refers to something discussed before (for example \"as we discussed\", \"my project from last week\", \"what did you tell me about X\") or when earlier context would clearly help.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords to search for (names, topics, distinctive words)."},
+                    "max_results": {"type": "integer", "description": "Maximum number of results (default 5, max 10)."}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "recent_chats",
+            "description": "List the user's most recent conversations with an excerpt of how each started. Use it when the user asks about their recent or previous chats without giving specific keywords.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "n": {"type": "integer", "description": "How many chats to list (default 5, max 20)."}
+                }
+            }
+        }),
+    ];
+    if eager {
+        for t in v.iter_mut() {
+            t["eager_input_streaming"] = json!(true);
+        }
+    }
+    v
+}
+
+fn run_memory_tool(st: &AppState, conv_id: &str, name: &str, input: &Value) -> (Vec<Value>, bool) {
+    let fmt_date = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    };
+    if name == "recent_chats" {
+        let n = input["n"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
+        return match st.db.recent_with_first_message(conv_id, n) {
+            Ok(rows) if !rows.is_empty() => {
+                let mut out = String::new();
+                for (_, title, updated, first) in rows {
+                    let first_text = serde_json::from_str::<Value>(&first)
+                        .map(|v| render::plain_text(&v))
+                        .unwrap_or(first);
+                    out.push_str(&format!(
+                        "<chat title=\"{}\" updated=\"{}\">\n{}\n</chat>\n",
+                        if title.is_empty() { "Untitled" } else { &title },
+                        fmt_date(updated),
+                        crate::util::truncate_chars(first_text.trim(), 600)
+                    ));
+                }
+                (text_block(out), false)
+            }
+            Ok(_) => (text_block("No previous chats found."), false),
+            Err(e) => (text_block(e.to_string()), true),
+        };
+    }
+    let q = input["query"].as_str().unwrap_or("").trim();
+    if q.is_empty() {
+        return (text_block("query is required"), true);
+    }
+    let n = input["max_results"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
+    match st.db.search_messages(q, conv_id, n) {
+        Ok(rows) if !rows.is_empty() => {
+            let mut out = String::new();
+            for (_, title, at, role, text) in rows {
+                out.push_str(&format!(
+                    "<result chat=\"{}\" date=\"{}\" from=\"{}\">\n{}\n</result>\n",
+                    if title.is_empty() { "Untitled" } else { &title },
+                    fmt_date(at),
+                    if role == "user" { "user" } else { "assistant" },
+                    crate::util::truncate_chars(text.trim(), 1500)
+                ));
+            }
+            (text_block(out), false)
+        }
+        Ok(_) => (text_block(format!("No past conversations matched \"{q}\".")), false),
+        Err(e) => (text_block(e.to_string()), true),
+    }
 }
 
 pub fn today() -> String {
@@ -525,6 +615,7 @@ pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str
         }
         emit_state(&app, &conv_id, false, err);
         emit_conv_updated(&app, &conv_id);
+        notify_done(&app, &st, &conv_id, err.is_some());
         if res.is_ok() {
             let needs_title = st.db.conv_get(&conv_id).map(|c| c.title.is_empty()).unwrap_or(false);
             if needs_title {
@@ -533,6 +624,32 @@ pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str
         }
     });
     Ok(())
+}
+
+fn notify_done(app: &AppHandle, st: &AppState, conv_id: &str, failed: bool) {
+    if !st.settings.read().notifications {
+        return;
+    }
+    use tauri::Manager;
+    let focused = app
+        .get_webview_window("main")
+        .map(|w| w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if focused {
+        return;
+    }
+    let title = st
+        .db
+        .conv_get(conv_id)
+        .map(|c| if c.title.is_empty() { "ClaudeRust".to_string() } else { c.title })
+        .unwrap_or_else(|_| "ClaudeRust".into());
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(if failed { "The response failed. Open ClaudeRust to retry." } else { "Claude finished responding." })
+        .show();
 }
 
 pub fn stop(st: &AppState, conv_id: &str) {
@@ -994,6 +1111,10 @@ async fn execute_tool(
         let timeout = Duration::from_secs(settings.bash_timeout_secs);
         let out = codetools::execute(session, name, input, cancel, timeout).await;
         return (out.content, out.is_error);
+    }
+
+    if MEMORY_TOOLS.contains(&name) && conv.kind != "code" {
+        return run_memory_tool(st, conv_id, name, input);
     }
 
     // MCP tool

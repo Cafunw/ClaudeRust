@@ -354,7 +354,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
     #[cfg(windows)]
     let (mut cmd, pwd_file): (tokio::process::Command, Option<PathBuf>) = {
         let mut c = tokio::process::Command::new("powershell");
-        c.args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        c.args(["-NoProfile", "-NonInteractive", "-Command", command.as_str()])
             .current_dir(&cwd)
             .env("PATH", crate::shellenv::path());
         c.creation_flags(0x0800_0000);

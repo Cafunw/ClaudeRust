@@ -139,7 +139,7 @@ function diffStat(rows) {
   return `<span class="diff-stat"><span class="a">+${a}</span> <span class="d">-${d}</span></span>`;
 }
 
-const TOOL_ICONS = { Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
+const TOOL_ICONS = { conversation_search: 'history', recent_chats: 'history', Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
 
 function toolSummary(p) {
   const i = p.input || {};
@@ -152,6 +152,8 @@ function toolSummary(p) {
     case 'Grep': return { name: 'Grep', arg: `"${i.pattern || ''}"` + (i.path ? ` in ${shortPath(i.path)}` : '') };
     case 'TodoWrite': return { name: t('todos'), arg: '' };
     case 'ExitPlanMode': return { name: t('plan_ready'), arg: '' };
+    case 'conversation_search': return { name: t('searched_chats'), arg: i.query || '' };
+    case 'recent_chats': return { name: t('recent_chats_tool'), arg: '' };
     default:
       if (p.server && p.server !== 'anthropic') return { name: p.tool, arg: p.server };
       return { name: p.tool || p.name, arg: '' };

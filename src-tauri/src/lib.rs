@@ -8,6 +8,7 @@ pub mod commands;
 pub mod db;
 pub mod engine;
 pub mod error;
+pub mod extensions;
 pub mod highlight;
 pub mod markdown;
 pub mod mcp;
@@ -53,16 +54,19 @@ fn toggle_quick_entry(app: &AppHandle) {
         let _ = w.emit("quick-entry-shown", ());
         return;
     }
-    let built = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("quick.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("quick.html".into()))
         .title("Quick Entry")
-        .inner_size(680.0, 132.0)
+        .inner_size(700.0, 104.0)
         .resizable(false)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)
+        .shadow(false)
         .center()
-        .focused(true)
-        .build();
+        .focused(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.transparent(true);
+    let built = builder.build();
     match built {
         Ok(w) => {
             let w2 = w.clone();
@@ -162,6 +166,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -185,6 +190,7 @@ pub fn run() {
             let mcp_path = config_dir.join("claude_desktop_config.json");
             let _ = mcp::ensure_config(&mcp_path);
             let db = db::Db::open(&data_dir.join("clauderust.db")).map_err(|e| e.to_string())?;
+            let _ = db.mark_interrupted();
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             app.manage(st.clone());
 
@@ -277,6 +283,9 @@ pub fn run() {
             commands::mcp_list_prompts,
             commands::mcp_get_prompt,
             commands::mcp_read_resource,
+            commands::pick_extension,
+            commands::extension_inspect,
+            commands::extension_install,
             commands::open_external,
             commands::open_path,
             commands::reveal_path,

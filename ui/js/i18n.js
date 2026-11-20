@@ -88,6 +88,10 @@ const en = {
   folder_missing: 'Choose a folder first', suggestions_write: 'Write', suggestions_learn: 'Learn', suggestions_code: 'Code', suggestions_life: 'Life stuff', suggestions_choice: 'Claude’s choice',
   prompts_resources: 'Prompts & resources', nothing_here: 'Nothing here yet',
   current_dir: 'Working directory', claude_md: 'CLAUDE.md loaded',
+  chat_search_toggle: 'Search and reference chats', chat_search_toggle_d: 'Let Claude search your past conversations in this app when it\u2019s helpful.',
+  notifications_toggle: 'Notifications', notifications_toggle_d: 'Notify me when Claude finishes responding while the app is in the background.',
+  searched_chats: 'Searched past chats', recent_chats_tool: 'Looked at recent chats',
+  install_extension: 'Install extension…', install: 'Install', extension_installed: 'Installed {name}',
 };
 
 const tr = {
@@ -179,6 +183,10 @@ const tr = {
   folder_missing: 'Önce bir klasör seç', suggestions_write: 'Yaz', suggestions_learn: 'Öğren', suggestions_code: 'Kod', suggestions_life: 'Hayat', suggestions_choice: 'Claude’un seçimi',
   prompts_resources: 'İstemler ve kaynaklar', nothing_here: 'Burada henüz bir şey yok',
   current_dir: 'Çalışma dizini', claude_md: 'CLAUDE.md yüklendi',
+  chat_search_toggle: 'Sohbetleri ara ve referans ver', chat_search_toggle_d: 'Faydalı olduğunda Claude\u2019un bu uygulamadaki geçmiş sohbetlerinde arama yapmasına izin ver.',
+  notifications_toggle: 'Bildirimler', notifications_toggle_d: 'Uygulama arka plandayken Claude yanıtını bitirdiğinde bildir.',
+  searched_chats: 'Geçmiş sohbetlerde arandı', recent_chats_tool: 'Son sohbetlere bakıldı',
+  install_extension: 'Eklenti yükle…', install: 'Yükle', extension_installed: '{name} yüklendi',
 };
 
 const dicts = { en, tr };

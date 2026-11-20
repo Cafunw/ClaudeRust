@@ -697,9 +697,9 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 .logo-mark { width: 52px; height: 52px; border-radius: 14px; }
 
 /* quick entry window */
-body.quick { background: transparent; }
+html:has(body.quick), body.quick { background: transparent !important; overflow: hidden; }
 .quick-box {
-  margin: 10px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 18px;
+  margin: 12px 14px 6px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 18px;
   box-shadow: var(--shadow-lg); display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px;
 }
 .quick-box textarea { flex: 1; border: none; outline: none; resize: none; background: transparent; font-size: 16px; line-height: 1.5; max-height: 80px; }

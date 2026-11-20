@@ -47,6 +47,10 @@ pub struct Settings {
     pub prompt_caching: bool,
     pub custom_styles: Vec<CustomStyle>,
     pub send_on_enter: bool,
+    /// Let Claude search and reference past chats (memory).
+    pub chat_search: bool,
+    /// Desktop notification when a response finishes in the background.
+    pub notifications: bool,
 
     // Desktop
     pub quick_entry_enabled: bool,
@@ -89,6 +93,8 @@ impl Default for Settings {
             prompt_caching: true,
             custom_styles: vec![],
             send_on_enter: true,
+            chat_search: true,
+            notifications: true,
             quick_entry_enabled: true,
             quick_entry_shortcut: if cfg!(target_os = "macos") {
                 "Alt+Space".into()

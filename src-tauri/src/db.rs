@@ -458,6 +458,19 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Mark assistant messages left unfinished by a previous crash/quit as stopped.
+    pub fn mark_interrupted(&self) -> AppResult<usize> {
+        let c = self.conn.lock();
+        Ok(c.execute(
+            "UPDATE messages SET meta = json_set(meta, '$.stopped', json('true'))
+             WHERE role = 'assistant'
+               AND json_extract(meta, '$.stop_reason') IS NULL
+               AND json_extract(meta, '$.error') IS NULL
+               AND json_extract(meta, '$.stopped') IS NULL",
+            [],
+        )?)
+    }
+
     pub fn fts_index(&self, conv_id: &str, msg_id: &str, text: &str) -> AppResult<()> {
         if !self.fts {
             return Ok(());
@@ -562,6 +575,47 @@ impl Db {
         }
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Full-text search over past messages (for the conversation_search tool).
+    pub fn search_messages(&self, query: &str, exclude_conv: &str, limit: usize) -> AppResult<Vec<(String, String, i64, String, String)>> {
+        let c = self.conn.lock();
+        let mut out = vec![];
+        if self.fts {
+            let fq = fts_query(query);
+            if fq.is_empty() {
+                return Ok(out);
+            }
+            let mut st = c.prepare(
+                "SELECT f.conversation_id, c.title, m.created_at, m.role, f.text
+                 FROM messages_fts f JOIN conversations c ON c.id = f.conversation_id
+                 JOIN messages m ON m.id = f.message_id
+                 WHERE messages_fts MATCH ?1 AND f.conversation_id != ?2 ORDER BY rank LIMIT ?3",
+            )?;
+            let rows = st.query_map(params![fq, exclude_conv, limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            for r in rows.flatten() {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Most recent conversations with their first user message.
+    pub fn recent_with_first_message(&self, exclude_conv: &str, limit: usize) -> AppResult<Vec<(String, String, i64, String)>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare(
+            "SELECT c.id, c.title, c.updated_at,
+                    (SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user'
+                     ORDER BY m.created_at ASC LIMIT 1)
+             FROM conversations c WHERE c.id != ?1 AND c.kind = 'chat' ORDER BY c.updated_at DESC LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![exclude_conv, limit as i64], |r| {
+            let content: Option<String> = r.get(3)?;
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, content.unwrap_or_default()))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ---------------------------------------------------------------- projects
@@ -731,12 +785,21 @@ mod tests {
         db.msg_insert(&mk("a1", Some("u1"), "assistant", 2)).unwrap();
         db.msg_insert(&mk("a1b", Some("u1"), "assistant", 3)).unwrap();
         db.msg_insert(&mk("u2", Some("a1b"), "user", 4)).unwrap();
+        assert_eq!(db.mark_interrupted().unwrap(), 2);
+        assert_eq!(db.msg_get("a1").unwrap().meta["stopped"], true);
+        assert_eq!(db.mark_interrupted().unwrap(), 0);
         let p: Vec<String> = db.path_to("u2").unwrap().into_iter().map(|m| m.id).collect();
         assert_eq!(p, vec!["u1", "a1b", "u2"]);
         assert_eq!(db.tree_nodes(&conv.id).unwrap().len(), 4);
         db.fts_index(&conv.id, "u2", "hello rust world").unwrap();
         let hits = db.search("rust", 10).unwrap();
         assert_eq!(hits.len(), 1);
+        let other = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        assert_eq!(db.search_messages("rust", &other.id, 5).unwrap().len(), 1);
+        assert_eq!(db.search_messages("rust", &conv.id, 5).unwrap().len(), 0);
+        let recent = db.recent_with_first_message(&other.id, 5).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].3.contains("u1"));
         db.conv_delete(&conv.id).unwrap();
         assert!(db.msg_get("u1").is_err());
     }

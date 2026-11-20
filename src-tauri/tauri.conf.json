@@ -32,7 +32,6 @@
     "category": "Productivity",
     "shortDescription": "Lightweight Claude desktop client written in Rust",
     "longDescription": "ClaudeRust is a fast, lightweight desktop client for Claude, written in Rust with Tauri. Chats, projects, artifacts, MCP servers and an agentic coding mode.",
-    "copyright": "MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

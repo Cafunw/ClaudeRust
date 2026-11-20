@@ -186,6 +186,7 @@ const RENDER = {
     body.appendChild(row(t('latex_toggle'), t('latex_toggle_d'), toggle('latex_enabled')));
     body.appendChild(row(t('websearch_default'), t('websearch_default_d'), toggle('web_search_default')));
     body.appendChild(row(t('thinking_default'), t('thinking_default_d'), toggle('thinking_default')));
+    body.appendChild(row(t('chat_search_toggle'), t('chat_search_toggle_d'), toggle('chat_search')));
     body.appendChild(row(t('send_enter'), t('send_enter_d'), toggle('send_on_enter')));
     body.appendChild(h(`<h4>API</h4>`));
     body.appendChild(row(t('fallbacks_toggle'), t('fallbacks_toggle_d'), toggle('refusal_fallbacks')));
@@ -209,6 +210,7 @@ const RENDER = {
       actions.appendChild(button(t('edit_config'), 'primary', () => editConfig(status, draw)));
       actions.appendChild(button(t('open_file'), '', () => call('open_path', { path: status.config_path }).catch(errorToast)));
       actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
+      actions.appendChild(button(t('install_extension'), '', () => installExtension(draw)));
       if (status.claude_desktop_config) {
         actions.appendChild(button(t('import_claude'), '', async () => {
           try { const r = await call('mcp_import_claude_desktop'); toast(t('imported', { n: r.imported })); draw(r); } catch (e) { errorToast(e); }
@@ -237,6 +239,7 @@ const RENDER = {
     body.appendChild(row(t('shortcut'), '', sc));
     body.appendChild(row(t('keep_tray'), t('keep_tray_d'), toggle('keep_in_tray')));
     body.appendChild(row(t('launch_login'), '', toggle('launch_at_login')));
+    body.appendChild(row(t('notifications_toggle'), t('notifications_toggle_d'), toggle('notifications')));
   },
 
   shortcuts(body) {
@@ -298,6 +301,55 @@ function serverCard(s, redraw) {
     card.append(lb, logs);
   }
   return card;
+}
+
+async function installExtension(redraw) {
+  let path;
+  try { path = await call('pick_extension'); } catch (e) { errorToast(e); return; }
+  if (!path) return;
+  let info;
+  try { info = await call('extension_inspect', { path }); } catch (e) { errorToast(e); return; }
+  const spec = info.user_config || {};
+  const body = h(`<div><p style="margin:0 0 4px;font-weight:600">${esc(info.display_name || info.name)} <span class="muted small">${esc(info.version || '')}</span></p>
+    ${info.author ? `<p class="small muted" style="margin:0 0 10px">${esc(info.author)}</p>` : ''}
+    ${info.description ? `<p class="small" style="margin:0 0 14px">${esc(info.description)}</p>` : ''}</div>`);
+  const inputs = {};
+  for (const [key, def] of Object.entries(spec)) {
+    const type = def.type || 'string';
+    let el;
+    if (type === 'boolean') {
+      el = h(`<label class="switch"><input type="checkbox" ${def.default ? 'checked' : ''}><span class="track"></span></label>`);
+      inputs[key] = () => el.querySelector('input').checked;
+    } else {
+      const dflt = Array.isArray(def.default) ? def.default.join('\n') : (def.default ?? '');
+      el = def.multiple
+        ? h(`<textarea class="textarea mono" rows="3" placeholder="one per line"></textarea>`)
+        : h(`<input class="input ${def.sensitive ? 'mono' : ''}" type="${def.sensitive ? 'password' : type === 'number' ? 'number' : 'text'}">`);
+      el.value = dflt;
+      inputs[key] = () => {
+        const v = el.value.trim();
+        if (def.multiple) return v ? v.split('\n').map((x) => x.trim()).filter(Boolean) : null;
+        if (type === 'number') return v === '' ? null : Number(v);
+        return v === '' ? null : v;
+      };
+    }
+    const f = h(`<div class="field"><label class="label">${esc(def.title || key)}${def.required ? ' *' : ''}</label></div>`);
+    f.appendChild(el);
+    if (def.description) f.appendChild(h(`<div class="help">${esc(def.description)}</div>`));
+    body.appendChild(f);
+  }
+  const install = button(t('install'), 'primary', async () => {
+    const values = {};
+    for (const [k, get] of Object.entries(inputs)) values[k] = get();
+    install.disabled = true;
+    try {
+      const r = await call('extension_install', { path, values });
+      toast(t('extension_installed', { name: r.installed }));
+      m.close();
+      redraw(r);
+    } catch (e) { errorToast(e); install.disabled = false; }
+  });
+  const m = modal({ title: t('install_extension'), body, footer: [button(t('cancel'), '', () => m.close()), install] });
 }
 
 function editConfig(status, redraw) {
