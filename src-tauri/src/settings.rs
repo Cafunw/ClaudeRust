@@ -56,6 +56,8 @@ pub struct Settings {
     pub quick_entry_enabled: bool,
     pub quick_entry_shortcut: String,
     pub keep_in_tray: bool,
+    /// auto | on | off; read before the window opens (see display.rs)
+    pub hardware_acceleration: String,
     pub launch_at_login: bool,
 
     // Code
@@ -106,6 +108,7 @@ impl Default for Settings {
                 "CommandOrControl+Alt+Space".into()
             },
             keep_in_tray: true,
+            hardware_acceleration: "auto".into(),
             launch_at_login: false,
             code_permission_mode: "default".into(),
             code_model: DEFAULT_MODEL.into(),

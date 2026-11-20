@@ -41,7 +41,13 @@ pub async fn bootstrap(app: AppHandle, state: St<'_>) -> AppResult<Value> {
         "mcp_config_path": st.mcp.config_path.display().to_string(),
         "home": dirs::home_dir().map(|h| h.display().to_string()),
         "window": app.get_webview_window("main").map(|_| "main"),
+        "render": crate::display::info(),
     }))
+}
+
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 // ---------------------------------------------------------------- settings
@@ -67,6 +73,9 @@ pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppRe
         use tauri_plugin_autostart::ManagerExt;
         let m = app.autolaunch();
         let _ = if new.launch_at_login { m.enable() } else { m.disable() };
+    }
+    if old.hardware_acceleration != new.hardware_acceleration {
+        let _ = crate::display::write_mode(&new.hardware_acceleration);
     }
     if old.disabled_mcp_servers != new.disabled_mcp_servers {
         reload_mcp_in_background(&app, &st);

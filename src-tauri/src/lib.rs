@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod codetools;
 pub mod commands;
 pub mod db;
+pub mod display;
 pub mod engine;
 pub mod error;
 pub mod extensions;
@@ -30,10 +31,16 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+/// False when the system has no tray (some Linux desktops): then closing the
+/// window must quit, or the app would keep running with no way back.
+static TRAY_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
+        display::ensure_on_screen(&w);
         let _ = w.show();
+        display::ensure_on_screen_soon(&w);
         let _ = w.set_focus();
     }
 }
@@ -158,6 +165,7 @@ fn artifact_protocol(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> ta
 }
 
 pub fn run() {
+    display::prepare();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(
@@ -208,8 +216,9 @@ pub fn run() {
                 });
             }
 
-            if let Err(e) = build_tray(&handle) {
-                log::warn!("tray unavailable: {e}");
+            match build_tray(&handle) {
+                Ok(()) => TRAY_OK.store(true, std::sync::atomic::Ordering::SeqCst),
+                Err(e) => log::warn!("tray unavailable: {e}"),
             }
             let s = st.settings.read().clone();
             register_shortcut(&handle, &s);
@@ -217,8 +226,10 @@ pub fn run() {
                 if (s.zoom - 1.0).abs() > 0.01 {
                     let _ = w.set_zoom(s.zoom);
                 }
+                display::ensure_on_screen(&w);
                 let _ = w.show();
                 let _ = w.set_focus();
+                display::ensure_on_screen_soon(&w);
             }
             Ok(())
         })
@@ -232,14 +243,20 @@ pub fn run() {
                     .try_state::<Arc<AppState>>()
                     .map(|s| s.settings.read().keep_in_tray)
                     .unwrap_or(false);
-                if keep || cfg!(target_os = "macos") {
+                let tray = TRAY_OK.load(std::sync::atomic::Ordering::SeqCst);
+                if (keep && tray) || cfg!(target_os = "macos") {
                     api.prevent_close();
                     let _ = window.hide();
+                } else {
+                    // A hidden Quick Entry window would otherwise keep the
+                    // process alive with nothing on screen.
+                    window.app_handle().exit(0);
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
+            commands::restart_app,
             commands::save_settings,
             commands::set_api_key,
             commands::test_connection,

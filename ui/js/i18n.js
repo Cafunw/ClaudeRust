@@ -115,6 +115,9 @@ const en = {
   imp_cc_mcp: 'Claude Code MCP servers', imp_cc_mcp_d: 'User-level servers from ~/.claude.json.',
   imp_progress: 'Importing… {done}/{total}', imp_scanning: 'Looking for Claude data…',
   imp_result: 'Imported {n}. Skipped {s} already here.', imp_result_proj: 'Imported {n} conversation(s) and {p} project(s). Skipped {s} already here or empty.',
+  hw_accel: 'Hardware acceleration', hw_auto: 'Automatic', hw_on: 'On', hw_off: 'Off (software rendering)',
+  hw_desc: 'Turn off if the window is blank, black or flickers, for example over Remote Desktop. Applies after a restart.',
+  hw_remote: 'A remote session was detected.', hw_now_soft: 'Now using software rendering.', hw_now_gpu: 'Now using the GPU.', restart_now: 'Restart now',
   att_missing: 'Not in export', imp_cc_btn: 'Import from Claude Code', imp_cc_btn: 'Import from Claude Code', imp_prompts: '{n} prompts', imp_prompt_one: '1 prompt', imp_errors: '{n} could not be imported:', imp_menu: 'Import from Claude…',
   imp_servers_added: 'Added {n} servers.', imp_ext_added: 'Installed {n} extensions.', imp_all_added: 'Everything here is already added.',
 };
@@ -235,6 +238,9 @@ const tr = {
   imp_cc_mcp: 'Claude Code MCP sunucuları', imp_cc_mcp_d: '~/.claude.json içindeki kullanıcı düzeyi sunucular.',
   imp_progress: 'İçe aktarılıyor… {done}/{total}', imp_scanning: 'Claude verileri aranıyor…',
   imp_result: '{n} tanesi içe aktarıldı. Zaten olan {s} tanesi atlandı.', imp_result_proj: '{n} konuşma ve {p} proje içe aktarıldı. Zaten olan ya da boş {s} tanesi atlandı.',
+  hw_accel: 'Donanım hızlandırma', hw_auto: 'Otomatik', hw_on: 'Açık', hw_off: 'Kapalı (yazılımla çizim)',
+  hw_desc: 'Pencere boş, siyah görünüyor ya da titriyorsa kapatın (örneğin Uzak Masaüstü\u2019nde). Yeniden başlatınca geçerli olur.',
+  hw_remote: 'Uzak oturum algılandı.', hw_now_soft: 'Şu an yazılımla çizim kullanılıyor.', hw_now_gpu: 'Şu an GPU kullanılıyor.', restart_now: 'Şimdi yeniden başlat',
   att_missing: 'Dışa aktarımda yok', imp_cc_btn: 'Claude Code’dan içe aktar', imp_cc_btn: 'Claude Code’dan içe aktar', imp_prompts: '{n} istem', imp_prompt_one: '1 istem', imp_errors: '{n} tanesi içe aktarılamadı:', imp_menu: 'Claude’dan içe aktar…',
   imp_servers_added: '{n} sunucu eklendi.', imp_ext_added: '{n} uzantı kuruldu.', imp_all_added: 'Buradakilerin hepsi zaten ekli.',
 };

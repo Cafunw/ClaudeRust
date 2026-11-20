@@ -192,6 +192,7 @@ async function init() {
   store.models = boot.models;
   store.platform = boot.platform;
   store.version = boot.version;
+  store.render = boot.render || {};
   store.dataDir = boot.data_dir;
   store.mcpConfigPath = boot.mcp_config_path;
   const style = document.createElement('style');

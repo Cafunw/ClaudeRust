@@ -265,6 +265,19 @@ const RENDER = {
     body.appendChild(row(t('keep_tray'), t('keep_tray_d'), toggle('keep_in_tray')));
     body.appendChild(row(t('launch_login'), '', toggle('launch_at_login')));
     body.appendChild(row(t('notifications_toggle'), t('notifications_toggle_d'), toggle('notifications')));
+
+    // Rendering: matters for Remote Desktop, VNC, VMs and some GPU drivers.
+    const r = store.render || {};
+    const ha = select('hardware_acceleration', [['auto', t('hw_auto')], ['on', t('hw_on')], ['off', t('hw_off')]]);
+    const box = h('<div class="engine-status" style="justify-content:flex-end"></div>');
+    box.appendChild(ha);
+    const status = h(`<div class="d">${esc(t('hw_desc'))}${r.remote ? ' ' + esc(t('hw_remote')) : ''} ${esc(r.software ? t('hw_now_soft') : t('hw_now_gpu'))}</div>`);
+    const restart = button(t('restart_now'), 'sm hidden', () => call('restart_app').catch(errorToast));
+    ha.addEventListener('change', () => restart.classList.remove('hidden'));
+    box.appendChild(restart);
+    const hwRow = row(t('hw_accel'), '', box);
+    hwRow.querySelector('.txt').appendChild(status);
+    body.appendChild(hwRow);
   },
 
   shortcuts(body) {
