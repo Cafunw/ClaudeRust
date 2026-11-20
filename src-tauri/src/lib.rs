@@ -25,6 +25,7 @@ pub mod memory;
 pub mod models;
 pub mod prompts;
 pub mod render;
+pub mod routines;
 pub mod settings;
 pub mod shellenv;
 pub mod slash;
@@ -225,6 +226,7 @@ pub fn run() {
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             st.shells.set_app(app.handle().clone());
             devtools::start(app.handle());
+            commands::start_routine_scheduler(app.handle().clone(), st.clone());
             app.manage(st.clone());
 
             // Resolve the login-shell PATH, then start MCP servers.
@@ -327,6 +329,10 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::routines_list,
+            commands::routine_save,
+            commands::routine_delete,
+            commands::routine_run,
             commands::preview_urls,
             commands::doctor,
             commands::subagents_list,

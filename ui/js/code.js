@@ -1,4 +1,5 @@
 // Code page: start coding sessions in a local folder and list past ones.
+import { openRoutines } from './routines.js';
 import * as workspace from './workspace.js';
 import { icon } from './icons.js';
 import { t } from './i18n.js';
@@ -23,9 +24,10 @@ export async function renderCode(view) {
       <div class="folder-pick"></div>
       <div class="composer-slot"></div>
     </div>
-    <div class="section-title sessions-head" style="padding-left:2px"><span>${t('sessions')}</span><button class="btn sm ghost" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button></div>
+    <div class="section-title sessions-head" style="padding-left:2px"><span>${t('sessions')}</span><span class="grow"></span><button class="btn sm ghost" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button><button class="btn sm ghost" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button></div>
     <div class="sessions"></div></div></div>`;
   $('[data-act=import]', view).onclick = () => emit('open-settings', 'import');
+  $('[data-act=routines]', view).onclick = () => openRoutines();
 
   const pick = $('.folder-pick', view);
   const drawFolder = () => {

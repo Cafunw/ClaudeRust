@@ -928,3 +928,22 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .pv-empty { position: absolute; inset: 0; background: var(--bg-0); }
 .workspace-panel { container-type: inline-size; }
 @container (max-width: 560px) { .ws-tab:not(.on) > span:not(.ws-badge) { display: none; } .ws-tab { padding: 7px 8px; } }
+
+/* routines */
+.rt-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+.rt-head p { flex: 1; margin: 0; font-size: 13px; }
+.rt-row { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+.rt-row.off .rt-main { opacity: .55; }
+.rt-main { flex: 1; min-width: 0; }
+.rt-name { font-weight: 600; font-size: 14px; }
+.rt-sub { font-size: 12px; margin-top: 2px; }
+.rt-form { display: flex; flex-direction: column; gap: 12px; }
+.rt-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-1); }
+.rt-form .row-inline { display: flex; gap: 6px; }
+.rt-form .row-inline .input { flex: 1; }
+.rt-sched { display: flex; gap: 12px; flex-wrap: wrap; }
+.rt-sched label { flex: 1; min-width: 160px; }
+.rt-days { display: flex; gap: 10px; flex-wrap: wrap; }
+.rt-form label.day, .rt-days label.day { flex-direction: row; align-items: center; gap: 5px; font-size: 13px; }
+.rt-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.hidden { display: none !important; }

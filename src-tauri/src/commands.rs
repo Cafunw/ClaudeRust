@@ -280,7 +280,11 @@ pub struct SendReq {
 
 #[tauri::command]
 pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppResult<Value> {
-    let st = state.inner().clone();
+    send_message_inner(&app, state.inner().clone(), req).await
+}
+
+pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq) -> AppResult<Value> {
+    let app = app.clone();
     let conv = match (&req.conversation_id, req.new_conversation) {
         (Some(id), _) => st.db.conv_get(id)?,
         (None, Some(nc)) => {
@@ -1621,4 +1625,86 @@ mod preview_tests {
         let t = "  VITE v5  ready\n  ➜  Local:   http://localhost:5173/\n Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...\nsee https://example.com:443 too";
         assert_eq!(super::find_local_urls(t), vec!["http://localhost:5173/".to_string(), "http://localhost:8000/".to_string()]);
     }
+}
+
+// ------------------------------------------------------------- routines
+
+/// Start a routine now: a new code session in its folder with its prompt.
+pub async fn run_routine(app: &AppHandle, st: &Arc<AppState>, r: &crate::routines::Routine) -> AppResult<String> {
+    let mut options = json!({"permission_mode": r.permission_mode, "routine_id": r.id, "worktree": r.worktree});
+    if !r.engine.is_empty() {
+        options["engine"] = json!(r.engine);
+    }
+    let req = SendReq {
+        conversation_id: None,
+        new_conversation: Some(NewConversation {
+            kind: Some("code".into()),
+            model: r.model.clone(),
+            project_id: None,
+            cwd: Some(r.cwd.clone()),
+            options,
+        }),
+        text: r.prompt.clone(),
+        attachment_ids: vec![],
+        parent_id: None,
+        edit: false,
+    };
+    let v = send_message_inner(app, st.clone(), req).await?;
+    let id = v["conversation_id"].as_str().unwrap_or_default().to_string();
+    let when = chrono::Local::now().format("%b %-d, %H:%M").to_string();
+    let _ = st.db.conv_set_title(&id, &format!("{} · {when}", r.name));
+    engine::emit_conv_updated(app, &id);
+    Ok(id)
+}
+
+/// Check for due routines every 30 seconds.
+pub fn start_routine_scheduler(app: AppHandle, st: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        loop {
+            let list = crate::routines::load(&st.db);
+            for r in crate::routines::due(&list, now_ms()) {
+                // one run at a time per routine
+                let busy = r.last_conversation_id.as_deref().map(|c| st.runs.lock().contains_key(c)).unwrap_or(false);
+                if busy {
+                    continue;
+                }
+                match run_routine(&app, &st, &r).await {
+                    Ok(conv) => crate::routines::mark_run(&st.db, &r.id, Some(conv), None),
+                    Err(e) => crate::routines::mark_run(&st.db, &r.id, None, Some(e.to_string())),
+                }
+                let _ = app.emit("routines-changed", json!({}));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn routines_list(state: St<'_>) -> AppResult<Value> {
+    Ok(json!(crate::routines::load(&state.db).iter().map(crate::routines::to_json).collect::<Vec<_>>()))
+}
+
+#[tauri::command]
+pub async fn routine_save(state: St<'_>, routine: crate::routines::Routine) -> AppResult<Value> {
+    let r = crate::routines::upsert(&state.db, routine)?;
+    Ok(crate::routines::to_json(&r))
+}
+
+#[tauri::command]
+pub async fn routine_delete(state: St<'_>, id: String) -> AppResult<()> {
+    crate::routines::delete(&state.db, &id)
+}
+
+#[tauri::command]
+pub async fn routine_run(app: AppHandle, state: St<'_>, id: String) -> AppResult<String> {
+    let st = state.inner().clone();
+    let r = crate::routines::load(&st.db).into_iter().find(|r| r.id == id).ok_or_else(|| AppError::msg("Routine not found."))?;
+    let res = run_routine(&app, &st, &r).await;
+    match &res {
+        Ok(c) => crate::routines::mark_run(&st.db, &id, Some(c.clone()), None),
+        Err(e) => crate::routines::mark_run(&st.db, &id, None, Some(e.to_string())),
+    }
+    let _ = app.emit("routines-changed", json!({}));
+    res
 }

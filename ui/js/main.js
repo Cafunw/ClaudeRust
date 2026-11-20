@@ -14,6 +14,7 @@ import './memory_ui.js';
 import './context_ui.js';
 import './hooks_ui.js';
 import './commands_agent.js';
+import './routines.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';
