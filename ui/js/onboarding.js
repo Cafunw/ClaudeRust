@@ -19,6 +19,7 @@ export function renderOnboarding(view, done) {
     </details>
     <div class="notice error hidden" data-f="err"></div>
     <button class="btn accent lg" data-f="go" style="width:100%">${t('continue_btn')}</button>
+    <button class="btn ghost" data-f="cc" style="width:100%;margin-top:8px">${icon('terminal', 15)} ${t('skip_key_cc')}</button>
   </div></div>`;
   const go = $('[data-f=go]', view);
   const err = $('[data-f=err]', view);
@@ -51,6 +52,11 @@ export function renderOnboarding(view, done) {
     }
   };
   go.onclick = submit;
+  $('[data-f=cc]', view).onclick = async () => {
+    const name = $('[data-f=name]', view).value.trim();
+    await call('save_settings', { patch: { nickname: name, onboarded: true, code_engine: 'claude-code' } }).catch(errorToast);
+    done('code');
+  };
   view.querySelectorAll('input').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); }));
   $('[data-f=key]', view).focus();
 }

@@ -136,7 +136,7 @@ function diffStat(rows) {
   return `<span class="diff-stat"><span class="a">+${a}</span> <span class="d">-${d}</span></span>`;
 }
 
-const TOOL_ICONS = { conversation_search: 'history', recent_chats: 'history', Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
+const TOOL_ICONS = { MultiEdit: 'edit', NotebookEdit: 'edit', LS: 'folder', WebFetch: 'globe', WebSearch: 'globe', Task: 'sparkle', Agent: 'sparkle', conversation_search: 'history', recent_chats: 'history', Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
 
 function toolSummary(p) {
   const i = p.input || {};
@@ -150,6 +150,12 @@ function toolSummary(p) {
     case 'TodoWrite': return { name: t('todos'), arg: '' };
     case 'ExitPlanMode': return { name: t('plan_ready'), arg: '' };
     case 'conversation_search': return { name: t('searched_chats'), arg: i.query || '' };
+    case 'MultiEdit': return { name: 'Edit', arg: shortPath(i.file_path) + (i.edits ? ` (${i.edits.length})` : '') };
+    case 'NotebookEdit': return { name: 'Notebook', arg: shortPath(i.notebook_path) };
+    case 'LS': return { name: 'List', arg: shortPath(i.path) };
+    case 'WebFetch': return { name: 'Fetch', arg: i.url || '' };
+    case 'WebSearch': return { name: t('searched_web'), arg: i.query || '' };
+    case 'Task': case 'Agent': return { name: i.subagent_type || 'Agent', arg: i.description || '' };
     case 'recent_chats': return { name: t('recent_chats_tool'), arg: '' };
     default:
       if (p.server && p.server !== 'anthropic') return { name: p.tool, arg: p.server };
@@ -183,6 +189,8 @@ function toolBody(p) {
   switch (p.tool) {
     case 'Bash':
       return `<div class="tool-section"><pre>$ ${esc(i.command || '')}</pre></div>${resultSection(p)}`;
+    case 'MultiEdit':
+      return (i.edits || []).map((ed) => diffHtml(lineDiff(ed.old_string, ed.new_string))).join('') + (p.status === 'error' ? resultSection(p) : '');
     case 'Edit': {
       const rows = lineDiff(i.old_string, i.new_string);
       return diffHtml(rows) + (p.status === 'error' ? resultSection(p) : '');

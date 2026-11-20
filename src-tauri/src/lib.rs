@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod artifacts;
+pub mod claudecode;
 pub mod attachments;
 pub mod codetools;
 pub mod commands;
@@ -284,6 +285,8 @@ pub fn run() {
             commands::mcp_get_prompt,
             commands::mcp_read_resource,
             commands::pick_extension,
+            commands::claude_code_info,
+            commands::claude_code_login,
             commands::extension_inspect,
             commands::extension_install,
             commands::open_external,

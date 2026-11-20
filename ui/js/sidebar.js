@@ -51,7 +51,7 @@ function renderUserCard() {
   const card = $('#sidebar .user-card');
   if (!card) return;
   const name = displayName() || 'You';
-  card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><div class="name ellipsis">${esc(store.settings.full_name || name)}</div><div class="plan">${store.settings.has_api_key ? t('api_plan') : t('no_key')}</div></span><span class="chev muted">${icon('chevUp', 14)}</span>`;
+  card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><div class="name ellipsis">${esc(store.settings.full_name || name)}</div><div class="plan">${store.settings.has_api_key ? t('api_plan') : store.settings.code_engine === 'claude-code' ? 'Claude Code' : t('no_key')}</div></span><span class="chev muted">${icon('chevUp', 14)}</span>`;
 }
 
 function accountMenu(anchor) {

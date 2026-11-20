@@ -18,6 +18,7 @@ export async function renderCode(view) {
     <div class="page-head"><h1>${t('code_title')}</h1></div>
     <p class="muted" style="margin:-10px 0 22px">${t('code_desc')}</p>
     <div class="code-hero">
+      <div class="engine-pick"></div>
       <div class="folder-pick"></div>
       <div class="composer-slot"></div>
     </div>
@@ -58,6 +59,32 @@ export async function renderCode(view) {
       pick.appendChild(r);
     }
   };
+  // Engine: the official Claude Code CLI (signs in with your Claude account) or the built-in agent (API key).
+  const cc = await call('claude_code_info', {}).catch(() => ({ found: false }));
+  const defEngine = store.settings.code_engine === 'builtin' ? 'builtin'
+    : store.settings.code_engine === 'claude-code' ? 'claude-code' : (cc.found ? 'claude-code' : 'builtin');
+  let engine = loadLocal().codeEngine || defEngine;
+  const ep = $('.engine-pick', view);
+  const drawEngine = () => {
+    ep.innerHTML = `<div class="segmented"><button data-e="claude-code" class="${engine === 'claude-code' ? 'on' : ''}">${icon('terminal', 13)} ${t('engine_cc')}</button><button data-e="builtin" class="${engine === 'builtin' ? 'on' : ''}">${icon('key', 13)} ${t('engine_builtin')}</button></div><span class="engine-status small"></span>`;
+    ep.querySelectorAll('[data-e]').forEach((b) => b.onclick = () => { engine = b.dataset.e; saveLocal({ codeEngine: engine }); drawEngine(); });
+    const stEl = $('.engine-status', ep);
+    if (engine === 'claude-code') {
+      if (cc.found) {
+        stEl.innerHTML = `<span class="muted">${esc(t('cc_found', { v: cc.version || 'claude' }))}</span> <button class="btn sm ghost" data-a="login">${t('cc_login')}</button>`;
+        stEl.querySelector('[data-a=login]').onclick = () => call('claude_code_login').catch(errorToast);
+      } else {
+        stEl.innerHTML = `<span style="color:var(--danger)">${esc(t('cc_missing'))}</span> <button class="btn sm" data-a="install">${t('cc_install')} ${icon('external', 12)}</button>`;
+        stEl.querySelector('[data-a=install]').onclick = () => call('open_external', { url: 'https://docs.claude.com/en/docs/claude-code/setup' }).catch(errorToast);
+      }
+    } else if (!store.settings.has_api_key) {
+      stEl.innerHTML = `<span style="color:var(--danger)">${esc(t('no_key'))}</span> <button class="btn sm ghost" data-a="key">${t('open_settings')}</button>`;
+      stEl.querySelector('[data-a=key]').onclick = () => emit('open-settings', 'account');
+    } else {
+      stEl.innerHTML = `<span class="muted">${esc(t('engine_builtin_d'))}</span>`;
+    }
+  };
+  drawEngine();
   const composer = createComposer({
     mode: 'code',
     placeholder: t('code_placeholder'),
@@ -65,7 +92,7 @@ export async function renderCode(view) {
     initial: { model: store.settings.code_model || store.settings.default_model, thinking: true, permission_mode: store.settings.code_permission_mode || 'default' },
     onSend: async (text, atts, st) => {
       if (!folder) { toast(t('folder_missing'), 'error'); return false; }
-      return startConversation({ text, atts, st, kind: 'code', cwd: folder });
+      return startConversation({ text, atts, st, kind: 'code', cwd: folder, engine });
     },
   });
   drawFolder();
@@ -74,7 +101,7 @@ export async function renderCode(view) {
   const list = $('.sessions', view);
   if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
   for (const s of sessions) {
-    const row = h(`<button class="list-item">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${esc(s.cwd || '')} · ${relTime(s.updated_at)}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+    const row = h(`<button class="list-item">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${esc(s.cwd || '')} · ${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
     row.addEventListener('click', (e) => {
       if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderCode(view), onDelete: () => renderCode(view) }); return; }
       emit('navigate', { name: 'chat', params: { id: s.id } });

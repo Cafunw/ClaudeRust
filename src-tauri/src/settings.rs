@@ -62,6 +62,10 @@ pub struct Settings {
     pub code_permission_mode: String, // default | acceptEdits | plan | bypassPermissions
     pub code_model: String,
     pub bash_timeout_secs: u64,
+    /// auto | claude-code | builtin
+    pub code_engine: String,
+    /// Optional path to the `claude` executable.
+    pub claude_code_path: String,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -106,6 +110,8 @@ impl Default for Settings {
             code_permission_mode: "default".into(),
             code_model: DEFAULT_MODEL.into(),
             bash_timeout_secs: 120,
+            code_engine: "auto".into(),
+            claude_code_path: String::new(),
             tool_policies: Default::default(),
             disabled_mcp_servers: vec![],
             onboarded: false,

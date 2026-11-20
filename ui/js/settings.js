@@ -221,8 +221,28 @@ const RENDER = {
     await draw();
   },
 
-  code(body) {
+  async code(body) {
     body.appendChild(h(`<h3>${t('s_code')}</h3>`));
+    body.appendChild(row(t('code_engine'), t('code_engine_d'), select('code_engine', [['auto', t('engine_auto')], ['claude-code', t('engine_cc')], ['builtin', t('engine_builtin')]])));
+    const pathIn = textField('claude_code_path', { placeholder: t('cc_path_help') });
+    pathIn.classList.add('mono');
+    const ccRow = row(t('cc_path'), '', pathIn);
+    body.appendChild(ccRow);
+    const status = h('<div class="row" style="padding:4px 0 14px;flex-wrap:wrap"></div>');
+    body.appendChild(status);
+    const drawStatus = async () => {
+      status.innerHTML = `<span class="spinner"></span>`;
+      const info = await call('claude_code_info', {}).catch(() => ({ found: false }));
+      status.innerHTML = info.found
+        ? `<span class="small">${icon('check', 13)} ${esc(info.version || 'claude')} · <span class="mono muted">${esc(info.path)}</span></span>`
+        : `<span class="small" style="color:var(--danger)">${esc(t('cc_missing'))}</span>`;
+      const login = button(t('cc_login'), 'sm', () => call('claude_code_login').catch(errorToast));
+      const detect = button(t('cc_detect'), 'sm ghost', drawStatus);
+      const install = button(t('cc_install'), 'sm ghost', () => call('open_external', { url: 'https://docs.claude.com/en/docs/claude-code/setup' }));
+      if (info.found) status.append(login, detect); else status.append(install, detect);
+    };
+    drawStatus();
+    body.appendChild(h(`<p class="help" style="margin:-6px 0 18px">${esc(t('cc_explain'))}</p>`));
     const modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'].map((m) => [m, t('mode_' + m)]);
     body.appendChild(row(t('default_mode'), '', select('code_permission_mode', modes)));
     body.appendChild(row(t('code_model'), '', select('code_model', modelOptions())));

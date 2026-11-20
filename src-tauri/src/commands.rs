@@ -163,6 +163,7 @@ pub async fn list_conversations(state: St<'_>, kind: Option<String>, project_id:
                 "project_id": c.project_id, "cwd": c.cwd, "starred": c.starred,
                 "created_at": c.created_at, "updated_at": c.updated_at,
                 "running": running.contains(&c.id),
+                "engine": c.options["engine"],
             })
         })
         .collect();
@@ -192,6 +193,20 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
     let mut options = if req.options.is_object() { req.options } else { json!({}) };
     options["date"] = json!(engine::today());
     if kind == "code" {
+        if options["engine"].as_str().map(|e| e.is_empty() || e == "auto").unwrap_or(true) {
+            let engine = match s.code_engine.as_str() {
+                "builtin" => "builtin",
+                "claude-code" => crate::claudecode::ENGINE,
+                _ => {
+                    if crate::claudecode::find_cli(&s.claude_code_path).is_some() {
+                        crate::claudecode::ENGINE
+                    } else {
+                        "builtin"
+                    }
+                }
+            };
+            options["engine"] = json!(engine);
+        }
         let cwd = req.cwd.clone().ok_or_else(|| AppError::msg("Choose a folder for the coding session."))?;
         let p = std::path::PathBuf::from(&cwd);
         if !p.is_dir() {
@@ -267,7 +282,9 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     if !req.text.trim().is_empty() {
         content.push(json!({"type": "text", "text": req.text}));
     }
-    let plan = conv.kind == "code" && conv.options["permission_mode"] == "plan";
+    let plan = conv.kind == "code"
+        && conv.options["permission_mode"] == "plan"
+        && conv.options["engine"] != crate::claudecode::ENGINE;
     if plan {
         content.push(json!({"type": "text", "text": crate::prompts::PLAN_MODE_REMINDER}));
     }
@@ -778,6 +795,22 @@ pub async fn mcp_read_resource(state: St<'_>, server: String, uri: String) -> Ap
     let v = serde_json::to_value(&a)?;
     st.staged.lock().insert(a.id.clone(), a);
     Ok(v)
+}
+
+// ------------------------------------------------------------- Claude Code
+
+#[tauri::command]
+pub async fn claude_code_info(state: St<'_>, path: Option<String>) -> AppResult<Value> {
+    let p = path.unwrap_or_else(|| state.settings.read().claude_code_path.clone());
+    Ok(crate::claudecode::cli_info(&p).await)
+}
+
+#[tauri::command]
+pub async fn claude_code_login(state: St<'_>) -> AppResult<()> {
+    let p = state.settings.read().claude_code_path.clone();
+    let cli = crate::claudecode::find_cli(&p)
+        .ok_or_else(|| AppError::msg("Claude Code isn't installed. Install it from claude.com/claude-code first."))?;
+    crate::claudecode::open_login_terminal(&cli)
 }
 
 // ---------------------------------------------------------------- extensions

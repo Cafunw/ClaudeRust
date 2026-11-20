@@ -93,6 +93,14 @@ const en = {
   searched_chats: 'Searched past chats', recent_chats_tool: 'Looked at recent chats',
   install_extension: 'Install extension…', install: 'Install', extension_installed: 'Installed {name}',
   st_connected: 'connected', st_failed: 'failed', st_disabled: 'disabled', st_starting: 'starting',
+  engine_cc: 'Claude Code', engine_builtin: 'API key', engine_auto: 'Automatic (Claude Code if installed)',
+  engine_builtin_d: 'Built-in agent using your Anthropic API key.',
+  cc_found: '{v} · uses your Claude Code sign-in',
+  cc_missing: 'Claude Code isn\u2019t installed.', cc_install: 'Install Claude Code', cc_login: 'Sign in to Claude Code',
+  cc_detect: 'Detect again', cc_path: 'Claude Code path', cc_path_help: 'Leave empty to detect automatically',
+  code_engine: 'Engine for new sessions', code_engine_d: 'Claude Code is the official CLI (signs in with your Claude subscription); the API key engine is ClaudeRust\u2019s built-in agent.',
+  cc_explain: 'Sign in opens a terminal running Claude Code; type /login there and choose your Claude account. ClaudeRust never sees your login.',
+  skip_key_cc: 'Use my Claude subscription with Claude Code (skip API key)',
 };
 
 const tr = {
@@ -189,6 +197,14 @@ const tr = {
   searched_chats: 'Geçmiş sohbetlerde arandı', recent_chats_tool: 'Son sohbetlere bakıldı',
   install_extension: 'Eklenti yükle…', install: 'Yükle', extension_installed: '{name} yüklendi',
   st_connected: 'bağlı', st_failed: 'başarısız', st_disabled: 'devre dışı', st_starting: 'başlatılıyor',
+  engine_cc: 'Claude Code', engine_builtin: 'API anahtarı', engine_auto: 'Otomatik (kuruluysa Claude Code)',
+  engine_builtin_d: 'Anthropic API anahtarını kullanan yerleşik ajan.',
+  cc_found: '{v} · Claude Code girişini kullanır',
+  cc_missing: 'Claude Code kurulu değil.', cc_install: 'Claude Code\u2019u kur', cc_login: 'Claude Code\u2019a giriş yap',
+  cc_detect: 'Yeniden algıla', cc_path: 'Claude Code yolu', cc_path_help: 'Otomatik algılama için boş bırak',
+  code_engine: 'Yeni oturumlar için motor', code_engine_d: 'Claude Code resmî CLI\u2019dır (Claude üyeliğinle giriş yapar); API anahtarı motoru ClaudeRust\u2019ın yerleşik ajanıdır.',
+  cc_explain: 'Giriş düğmesi Claude Code\u2019u çalıştıran bir terminal açar; orada /login yazıp Claude hesabını seç. ClaudeRust giriş bilgilerini hiçbir zaman görmez.',
+  skip_key_cc: 'Claude üyeliğimi Claude Code ile kullan (API anahtarını atla)',
 };
 
 const dicts = { en, tr };

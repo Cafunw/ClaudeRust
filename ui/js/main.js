@@ -104,14 +104,14 @@ async function refreshMcp() {
 
 function startOnboarding() {
   $('#sidebar').classList.add('hidden');
-  renderOnboarding($('#view'), () => {
+  renderOnboarding($('#view'), (target) => {
     $('#sidebar').classList.remove('hidden');
     call('bootstrap').then((b) => {
       store.settings = b.settings;
       store.models = b.models;
       mountSidebar();
       refreshModels();
-      navigate({ name: 'new' });
+      navigate({ name: target === 'code' ? 'code' : 'new' });
     });
   });
 }

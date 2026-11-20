@@ -123,10 +123,15 @@ class H(BaseHTTPRequestHandler):
         self.send_header("content-type", "text/event-stream")
         self.send_header("transfer-encoding", "chunked")
         self.end_headers()
-        self.sse({"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model, "content": [],
+        self.sse({"type": "message_start", "message": {"id": "msg_" + str(time.time_ns()), "type": "message", "role": "assistant", "model": model, "content": [],
                                                        "usage": {"input_tokens": 1200, "output_tokens": 1, "cache_read_input_tokens": 800}}})
         idx = 0
-        has_tools = any(t.get("name") == "Glob" for t in body.get("tools", []))
+        tool_names = [t.get("name") for t in body.get("tools", [])]
+        has_tools = "Glob" in tool_names or "Bash" in tool_names
+        import re as _re
+        all_text = json.dumps(body.get("messages", [])[-1:])
+        mwd = _re.search(r"Primary working directory: ([^\\]+?)\\n", all_text)
+        workdir = mwd.group(1) if mwd else ""
 
         def stream_text(s, chunk=12, delay=0.02):
             nonlocal idx
@@ -157,6 +162,20 @@ class H(BaseHTTPRequestHandler):
                 self.sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": f"word{i} "}})
                 time.sleep(0.05)
             self.sse({"type": "content_block_stop", "index": 0})
+        elif has_tools and "Glob" not in tool_names and "list the files" in text.lower():
+            stream_text("Let me list the files.")
+            self.sse({"type": "content_block_start", "index": idx, "content_block": {"type": "tool_use", "id": "toolu_ls1", "name": "Bash", "input": {}}})
+            self.sse({"type": "content_block_delta", "index": idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"command": "ls", "description": "List files"})}})
+            self.sse({"type": "content_block_stop", "index": idx})
+            idx += 1
+            stop = "tool_use"
+        elif has_tools and "Glob" not in tool_names and "please edit" in text.lower():
+            stream_text("I'll create the file now.")
+            self.sse({"type": "content_block_start", "index": idx, "content_block": {"type": "tool_use", "id": "toolu_w2", "name": "Write", "input": {}}})
+            self.sse({"type": "content_block_delta", "index": idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"file_path": (workdir + "/hello.txt") if workdir else "hello.txt", "content": "hello from claude code\n"})}})
+            self.sse({"type": "content_block_stop", "index": idx})
+            idx += 1
+            stop = "tool_use"
         elif has_tools and ("list" in text.lower() or "files" in text.lower()):
             thinking("The user wants to see the files. I'll use Glob to list them.")
             stream_text("Let me look at the project files.")

@@ -663,6 +663,12 @@ pub fn stop(st: &AppState, conv_id: &str) {
 }
 
 async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
+    {
+        let conv = st.db.conv_get(conv_id)?;
+        if conv.kind == "code" && conv.options["engine"] == crate::claudecode::ENGINE {
+            return crate::claudecode::run(app, st, conv_id, parent, cancel).await;
+        }
+    }
     let mut steps = 0usize;
     loop {
         steps += 1;
@@ -1020,7 +1026,7 @@ fn denial(reply: &Option<PermissionReply>) -> Vec<Value> {
     }
 }
 
-fn update_conv_options(st: &AppState, conv_id: &str, f: impl FnOnce(&mut Value)) {
+pub(crate) fn update_conv_options(st: &AppState, conv_id: &str, f: impl FnOnce(&mut Value)) {
     if let Ok(c) = st.db.conv_get(conv_id) {
         let mut o = c.options;
         if !o.is_object() {

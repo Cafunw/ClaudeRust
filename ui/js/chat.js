@@ -93,6 +93,7 @@ function renderTopbar() {
     const chip = h(`<button class="crumb" title="${esc(c.cwd)}">${icon('terminal', 15)}<span class="code-topinfo ellipsis" style="max-width:260px">${esc(c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd)}</span></button>`);
     chip.onclick = () => call('reveal_path', { path: c.cwd }).catch(errorToast);
     cur.topEl.append(chip, h(`<span class="muted">/</span>`));
+    if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool" title="${esc(t('engine_cc'))}">${icon('terminal', 12)} Claude Code</span>`));
   }
   const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
@@ -532,6 +533,11 @@ function showPermission(p) {
       title = `${icon('terminal', 17)} ${t('run_command')}`;
       desc = input.description || '';
       detail = `<pre>${esc(input.command || '')}</pre>`;
+    } else if (!['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(p.tool)) {
+      title = `${icon('wrench', 17)} ${t('wants_to_use')} <span class="mono" style="font-size:13px">${esc(p.tool)}</span>`;
+      desc = p.description || '';
+      const j = JSON.stringify(input, null, 2);
+      detail = j && j !== '{}' ? `<pre>${esc(j)}</pre>` : '';
     } else {
       title = `${icon(p.tool === 'Write' ? 'file' : 'edit', 17)} ${p.tool === 'Write' ? t('write_file') : t('make_edit')}`;
       desc = input.file_path || '';
