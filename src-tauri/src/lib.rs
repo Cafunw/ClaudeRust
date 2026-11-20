@@ -20,6 +20,7 @@ pub mod gitops;
 pub mod highlight;
 pub mod hooks;
 pub mod import;
+pub mod logdigest;
 pub mod markdown;
 pub mod mcp;
 pub mod memory;

@@ -8,7 +8,7 @@ import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call, on } from './api.js';
 import { store, emit, modelInfo, displayName } from './store.js';
-import { $, esc, h, showMenu, toast, errorToast, initials, humanSize, lightbox, confirmDialog, promptDialog, fmtTokens } from './util.js';
+import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens } from './util.js';
 import { createComposer } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
 import * as artifacts from './artifacts.js';
@@ -326,7 +326,7 @@ function upsertTurn(turn, live = true) {
 function attachmentsHtml(items) {
   return `<div class="user-atts">${items.map((a) => a.src && a.kind === 'image'
     ? `<img src="${esc(a.src)}" alt="${esc(a.name)}" data-zoom>`
-    : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : humanSize(a.size || 0)}</div></div></div>`).join('')}</div>`;
+    : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : attachmentSub(a)}</div></div></div>`).join('')}</div>`;
 }
 
 function branchNav(turn) {

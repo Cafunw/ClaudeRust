@@ -5,7 +5,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, modelInfo, emit } from './store.js';
-import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, humanSize, errorToast, toast } from './util.js';
+import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast } from './util.js';
 
 const PASTE_AS_FILE = 6000;
 
@@ -119,7 +119,7 @@ export function createComposer(opts) {
       const ext = (a.name.split('.').pop() || '').slice(0, 4);
       const chip = h(`<div class="att ${a.loading ? 'loading' : ''}" title="${esc(a.name)}">
         ${a.preview ? `<img class="thumb" src="${esc(a.preview)}" alt="">` : `<div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc(ext || 'TXT')}</div>`}
-        <div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.loading ? '…' : humanSize(a.size || 0)}</div></div>
+        <div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.loading ? '…' : attachmentSub(a)}</div></div>
         <button class="x" aria-label="remove">${icon('x', 12)}</button></div>`);
       chip.querySelector('.x').onclick = () => {
         attachments = attachments.filter((x) => x !== a);

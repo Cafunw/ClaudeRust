@@ -127,6 +127,7 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
                 kind: f.kind.clone(),
                 data: f.data.clone(),
                 preview: None,
+                digest: None,
             };
             prefix_blocks.push(attachments::to_block(&a));
         }

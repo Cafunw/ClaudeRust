@@ -1037,3 +1037,4 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .find-bar .fb-count { min-width: 44px; text-align: right; padding-right: 4px; }
 mark.find-hit { background: rgba(255, 196, 0, .35); color: inherit; border-radius: 2px; }
 mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
+.att-digest { color: var(--accent, #c96442); cursor: help; }

@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  att_digest: "digest",
+  att_digest_tip: "Too large to send whole: Claude gets a digest of its {lines} lines — overview, {errors} errors and {warnings} warnings grouped with context, and the start and end of the file.",
   fork_here: "Continue in a new conversation from here",
   forked: "Forked into a new conversation.",
   find_in_chat: "Find in conversation",
@@ -402,6 +404,8 @@ const en = {
 };
 
 const tr = {
+  att_digest: "özet",
+  att_digest_tip: "Tamamı gönderilemeyecek kadar büyük: Claude {lines} satırın özetini alır — genel bakış, bağlamıyla gruplanmış {errors} hata ve {warnings} uyarı, dosyanın başı ve sonu.",
   fork_here: "Buradan yeni bir sohbette devam et",
   forked: "Yeni bir sohbete dallandı.",
   find_in_chat: "Sohbette bul",

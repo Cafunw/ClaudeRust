@@ -39,6 +39,13 @@ export function relTime(ms) {
   return d.toLocaleDateString(loc, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
+/** Size line for an attachment chip; notes when a large file was digested. */
+export function attachmentSub(a) {
+  const size = humanSize(a.size || 0);
+  if (!a.digest) return esc(size);
+  return `${esc(size)} · <span class="att-digest" title="${esc(t('att_digest_tip', { lines: a.digest.lines, errors: a.digest.errors, warnings: a.digest.warnings }))}">${esc(t('att_digest'))}</span>`;
+}
+
 export function humanSize(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
