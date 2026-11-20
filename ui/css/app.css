@@ -963,3 +963,5 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .watch-res .task-out { margin: 0; max-height: 300px; }
 .commit-dlg { display: flex; flex-direction: column; gap: 8px; }
 .commit-dlg textarea { width: 100%; }
+.palette .pal-hint { padding: 8px 14px; border-top: 1px solid var(--border); }
+.main { min-width: 320px; }

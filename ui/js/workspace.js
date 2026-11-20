@@ -104,7 +104,10 @@ function render() {
   const el = aside();
   if (!el) return;
   const visible = isOpen();
+  const wasHidden = el.classList.contains('hidden');
   el.classList.toggle('hidden', !visible);
+  // one side panel at a time: the artifact panel closes when this opens
+  if (visible && wasHidden) window.dispatchEvent(new Event('workspace-opened'));
   document.querySelectorAll('.ws-toggle').forEach((b) => b.classList.toggle('on', visible));
   // hide every pane element; show the active one
   for (const [, pe] of els) pe.classList.add('hidden');
@@ -170,6 +173,8 @@ export function toggleButton() {
   b.onclick = () => toggle();
   return b;
 }
+
+window.addEventListener('artifact-opened', () => { if (open) { open = false; render(); } });
 
 window.addEventListener('keydown', (e) => {
   if (!ctx) return;

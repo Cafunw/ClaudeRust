@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  pal_new_code: "New code session",
+  pal_appearance: "Appearance",
+  pal_import: "Import from Claude",
+  pal_routines: "Routines",
+  pal_toggle_theme: "Toggle light / dark theme",
+  pal_command: "command",
+  pal_mention: "mention",
+  pal_hint: "Type > for commands · @ for files of this session · ↑↓ to move · Enter to open",
   commit_title: "Commit changes",
   commit_btn: "Commit",
   commit_files: "{n} changed file(s) on {branch}",
@@ -305,6 +313,14 @@ const en = {
 };
 
 const tr = {
+  pal_new_code: "Yeni kod oturumu",
+  pal_appearance: "Görünüm",
+  pal_import: "Claude'dan içe aktar",
+  pal_routines: "Rutinler",
+  pal_toggle_theme: "Açık / koyu temayı değiştir",
+  pal_command: "komut",
+  pal_mention: "etiketle",
+  pal_hint: "Komutlar için > · bu oturumun dosyaları için @ · gezinmek için ↑↓ · açmak için Enter",
   commit_title: "Değişiklikleri commit et",
   commit_btn: "Commit",
   commit_files: "{branch} dalında {n} değişen dosya",

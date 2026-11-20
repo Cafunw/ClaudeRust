@@ -40,6 +40,7 @@ export function open(convId, map, identifier, version, { streaming = false } = {
   panel = { convId, map, identifier, version, view: null, followLatest, lastDocKey: null };
   const el = aside();
   const wasHidden = el.classList.contains('hidden');
+  if (el.classList.contains('hidden')) window.dispatchEvent(new Event('artifact-opened'));
   el.classList.remove('hidden');
   if (wasHidden && window.innerWidth < 1500 && !store.sidebarCollapsed) emit('collapse-sidebar');
   const w = loadLocal().artifactWidth;
@@ -220,3 +221,6 @@ export function openLatestByIdentifier(convId, map, identifier) {
 }
 
 export { store };
+
+// one side panel at a time
+window.addEventListener('workspace-opened', () => { if (panel) close(); });
