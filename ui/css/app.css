@@ -1022,3 +1022,4 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .q-item span { flex: 1; min-width: 0; }
 .q-item button { border: 0; background: none; color: var(--text-3); cursor: pointer; display: inline-flex; }
 .send-btn.queue { background: var(--text-1); }
+.shortcuts kbd { font-family: var(--font-mono); font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: var(--bg-1); }

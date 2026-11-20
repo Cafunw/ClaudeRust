@@ -17,6 +17,7 @@ import './commands_agent.js';
 import './routines.js';
 import './watch_ui.js';
 import './usage_ui.js';
+import './shortcuts.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';
