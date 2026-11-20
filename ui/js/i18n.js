@@ -1,5 +1,12 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_history: "History",
+  hist_commits: "commits",
+  hist_empty: "No commits yet.",
+  hist_explain: "Ask Claude to explain this commit",
+  hist_revert: "Revert",
+  hist_explain_p: "Explain commit {sha} (\"{subject}\"): run `git show {sha}` and describe what it changes, why, and anything risky about it.",
+  hist_revert_confirm: "Revert commit {sha} (\"{subject}\")? This adds a new commit that undoes it.",
   ask_claude: "Ask Claude about this change",
   ask_review: "Review this change",
   ask_explain: "Explain this change",
@@ -357,6 +364,13 @@ const en = {
 };
 
 const tr = {
+  ws_history: "Geçmiş",
+  hist_commits: "commit",
+  hist_empty: "Henüz commit yok.",
+  hist_explain: "Bu commit'i Claude'a açıklat",
+  hist_revert: "Geri al",
+  hist_explain_p: "{sha} commit'ini (\"{subject}\") açıkla: `git show {sha}` çalıştır ve neyi, neden değiştirdiğini ve riskli bir yanı olup olmadığını anlat.",
+  hist_revert_confirm: "{sha} commit'i (\"{subject}\") geri alınsın mı? Bunu geri alan yeni bir commit eklenir.",
   ask_claude: "Bu değişikliği Claude'a sor",
   ask_review: "Bu değişikliği incele",
   ask_explain: "Bu değişikliği açıkla",

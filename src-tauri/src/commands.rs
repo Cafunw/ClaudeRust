@@ -2154,3 +2154,79 @@ button {{ display:none; }} .code-block .lang {{ font-size:12px; color:var(--mute
 <body><main><h1>{t}</h1><div class="meta">{m}</div>{body}{changes}<footer>Exported from ClaudeRust · {date}</footer></main></body></html>
 "#, hl = crate::highlight::theme_css(), t = html_escape(&title), m = meta.into_iter().map(|x| format!("<span>{x}</span>")).collect::<String>())
 }
+
+// ------------------------------------------------------------- git history
+
+/// Recent commits of the session's repository.
+#[tauri::command]
+pub async fn git_log(state: St<'_>, conversation_id: String, limit: Option<u32>) -> AppResult<Value> {
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let n = limit.unwrap_or(60).clamp(1, 500).to_string();
+    let out = crate::gitops::git(&root, &["log", "-n", &n, "--date=unix", "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e"]).await.unwrap_or_default();
+    let commits: Vec<Value> = out
+        .split('\x1e')
+        .filter_map(|rec| {
+            let f: Vec<&str> = rec.trim_matches(['\n', '\r']).split('\x1f').collect();
+            (f.len() >= 5).then(|| json!({
+                "sha": f[0], "short": f[1], "author": f[2], "time": f[3].parse::<i64>().unwrap_or(0) * 1000,
+                "subject": f[4], "refs": f.get(5).copied().unwrap_or(""),
+            }))
+        })
+        .collect();
+    let branch = crate::gitops::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).await.unwrap_or_default();
+    Ok(json!({"branch": branch.trim(), "commits": commits}))
+}
+
+fn valid_sha(sha: &str) -> bool {
+    (4..=64).contains(&sha.len()) && sha.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// One commit's patch, split per file.
+#[tauri::command]
+pub async fn git_show(state: St<'_>, conversation_id: String, sha: String) -> AppResult<Value> {
+    if !valid_sha(&sha) {
+        return Err(AppError::msg("Invalid commit id."));
+    }
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let body = crate::gitops::git(&root, &["show", "-s", "--format=%B", &sha]).await.unwrap_or_default();
+    let patch = crate::gitops::git(&root, &["show", "--format=", "--no-color", "--no-ext-diff", "--patch", &sha]).await?;
+    let patch = crate::util::truncate_middle(&patch, 400_000);
+    let mut files: Vec<Value> = vec![];
+    for chunk in patch.split("\ndiff --git ").enumerate().map(|(i, c)| if i == 0 { c.trim_start_matches("diff --git ").to_string() } else { c.to_string() }) {
+        if chunk.trim().is_empty() {
+            continue;
+        }
+        let first = chunk.lines().next().unwrap_or("");
+        let path = first.rsplit(" b/").next().unwrap_or(first).to_string();
+        let (mut add, mut del) = (0, 0);
+        for l in chunk.lines() {
+            if l.starts_with('+') && !l.starts_with("+++") {
+                add += 1;
+            } else if l.starts_with('-') && !l.starts_with("---") {
+                del += 1;
+            }
+        }
+        files.push(json!({"path": path, "added": add, "removed": del, "diff": chunk}));
+    }
+    Ok(json!({"sha": sha, "message": body.trim(), "files": files}))
+}
+
+/// Revert a commit with a new commit.
+#[tauri::command]
+pub async fn git_revert(app: AppHandle, state: St<'_>, conversation_id: String, sha: String) -> AppResult<String> {
+    if !valid_sha(&sha) {
+        return Err(AppError::msg("Invalid commit id."));
+    }
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let r = crate::gitops::git(&root, &["revert", "--no-edit", &sha]).await;
+    if r.is_err() {
+        let _ = crate::gitops::git(&root, &["revert", "--abort"]).await;
+    }
+    r?;
+    let head = crate::gitops::git(&root, &["rev-parse", "--short", "HEAD"]).await.unwrap_or_default();
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(format!("Reverted in a new commit {}.", head.trim()))
+}
