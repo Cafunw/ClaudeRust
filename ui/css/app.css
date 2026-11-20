@@ -1065,3 +1065,11 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .fv-code { flex: 1; padding-left: 10px !important; padding-right: 12px !important; }
 .fv-code code { font-family: inherit; white-space: pre; background: none; padding: 0; }
 .fv-more { padding: 6px 12px; border-top: 1px solid var(--border); }
+
+/* Pull request dialog */
+.pr-dlg { display: flex; flex-direction: column; gap: 10px; }
+.pr-meta code { font-size: 12px; }
+.pr-commits pre { margin: 6px 0 0; max-height: 120px; overflow: auto; font-size: 12px; }
+.pr-note { font-size: 12.5px; padding: 6px 10px; border-radius: 8px; background: var(--bg-2); }
+.pr-note.warn { background: rgba(176, 122, 16, .12); }
+.pr-field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-2); }

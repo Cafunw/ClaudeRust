@@ -27,6 +27,7 @@ pub mod memory;
 pub mod models;
 pub mod oai;
 pub mod prompts;
+pub mod pullrequest;
 pub mod render;
 pub mod routines;
 pub mod settings;
@@ -376,6 +377,9 @@ pub fn run() {
             commands::symbol_search,
             commands::project_dir,
             commands::project_file,
+            commands::pr_info,
+            commands::pr_suggest,
+            commands::pr_create,
             commands::slash_list,
             commands::slash_expand,
             commands::slash_save,

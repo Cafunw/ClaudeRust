@@ -1928,6 +1928,58 @@ pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, 
     Ok(msg)
 }
 
+// ------------------------------------------------------------- pull requests
+
+async fn session_repo(st: &AppState, conversation_id: &str) -> AppResult<std::path::PathBuf> {
+    let cwd = conv_cwd(st, conversation_id)?;
+    crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))
+}
+
+/// What a pull request from the session's branch would contain.
+#[tauri::command]
+pub async fn pr_info(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let root = session_repo(&state, &conversation_id).await?;
+    crate::pullrequest::info(&root).await
+}
+
+/// Title and description for the pull request, drafted by Claude.
+#[tauri::command]
+pub async fn pr_suggest(state: St<'_>, conversation_id: String, base: String) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let root = session_repo(&st, &conversation_id).await?;
+    let input = crate::pullrequest::draft_input(&root, &base).await;
+    let client = st.client()?;
+    let model_id = st.settings.read().title_model.clone();
+    let model = models::info(&model_id);
+    let mut body = json!({
+        "model": model_id,
+        "max_tokens": 2048,
+        "system": crate::pullrequest::PR_PROMPT,
+        "messages": [{"role": "user", "content": input}],
+    });
+    match model.thinking {
+        models::Thinking::Disableable => body["thinking"] = json!({"type": "disabled"}),
+        models::Thinking::BetweenTools => body["thinking"] = json!({"type": "between_tools"}),
+        _ => {}
+    }
+    let v = tokio::time::timeout(std::time::Duration::from_secs(60), client.create(&body, &[]))
+        .await
+        .map_err(|_| AppError::msg("Drafting the description took too long."))??;
+    let text: String = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+    let (title, body) = crate::pullrequest::split_draft(&text);
+    Ok(json!({"title": title, "body": body}))
+}
+
+/// Push and open the pull request (or return the host's compare page).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn pr_create(app: AppHandle, state: St<'_>, conversation_id: String, title: String, body: String, base: String, draft: bool, new_branch: Option<String>) -> AppResult<Value> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let r = crate::pullrequest::create(&root, &title, &body, &base, draft, new_branch.as_deref()).await;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    r
+}
+
 // ------------------------------------------------------------- architecture map
 
 #[tauri::command]
