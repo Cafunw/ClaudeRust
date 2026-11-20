@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod checkpoints;
 pub mod codetools;
 pub mod commands;
+pub mod compact;
 pub mod db;
 pub mod devtools;
 pub mod display;
@@ -324,6 +325,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::compact_conversation,
             commands::memory_files,
             commands::memory_save,
             commands::memory_append,

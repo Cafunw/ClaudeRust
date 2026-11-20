@@ -1,9 +1,10 @@
 // Conversation view: turns, streaming updates, branching, permissions.
+import { contextMeter, compactDivider } from './context_ui.js';
 import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
-import { call } from './api.js';
+import { call, on } from './api.js';
 import { store, emit, modelInfo, displayName } from './store.js';
 import { $, esc, h, showMenu, toast, errorToast, initials, humanSize, lightbox, confirmDialog, promptDialog, fmtTokens } from './util.js';
 import { createComposer } from './composer.js';
@@ -103,6 +104,7 @@ function renderTopbar() {
   const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
   cur.topEl.append(tb, h('<div class="spacer"></div>'));
+  cur.topEl.append(contextMeter(cur.id, () => { cur.composer.setText('/cost'); cur.composer.send(); }));
   const usage = h(`<button class="icon-btn" title="${t('usage')}">${icon('info', 17)}</button>`);
   usage.onclick = () => showUsage(usage);
   cur.topEl.append(usage);
@@ -219,6 +221,7 @@ function appendOptimisticUser(text, atts) {
 }
 
 export async function reload() {
+  if (cur) cur.colEl.querySelectorAll('.compact-divider.pending').forEach((x) => x.remove());
   if (!cur) return;
   const id = cur.id;
   const data = await call('get_conversation', { id });
@@ -325,10 +328,12 @@ function renderUserTurn(el, turn) {
   const text = (turn.parts.find((p) => p.kind === 'user_text') || {}).text || '';
   const atts = turn.parts.find((p) => p.kind === 'attachments');
   const name = displayName();
-  el.innerHTML = `${atts ? attachmentsHtml(atts.items) : ''}
+  el.innerHTML = `${turn.meta && turn.meta.compact_summary ? '<div class="cd-slot"></div>' : ''}${atts ? attachmentsHtml(atts.items) : ''}
     ${text ? `<div class="user-bubble"><span class="avatar">${esc(initials(name))}</span><div class="user-text">${esc(text)}</div></div>` : ''}
     <div class="turn-actions"></div>`;
   el.querySelectorAll('[data-zoom]').forEach((img) => img.addEventListener('click', () => lightbox(img.src)));
+  const cds = el.querySelector('.cd-slot');
+  if (cds) cds.replaceWith(compactDivider(turn.meta.compact_summary, turn.meta.compact_auto));
   const ut = el.querySelector('.user-text');
   if (ut && text.length > 1500) {
     ut.classList.add('clamped');
@@ -350,6 +355,16 @@ function renderUserTurn(el, turn) {
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
     actions.append(eb, cb);
   }
+}
+
+/** After /compact: show where the summary will start. */
+export function showPendingCompact() {
+  if (!cur) return;
+  cur.colEl.querySelectorAll('.compact-divider.pending').forEach((x) => x.remove());
+  const d = compactDivider(t('compact_pending_d'), false);
+  d.classList.add('pending');
+  cur.colEl.appendChild(d);
+  scrollToBottom(true);
 }
 
 function rewindTo(turn, text) {
@@ -623,3 +638,5 @@ function showPermission(p) {
 }
 
 export function closeCurrent() { cur = null; }
+
+on('compacted', ({ conversation_id, auto, error }) => { if (auto && !error && cur && cur.id === conversation_id) reload(); });

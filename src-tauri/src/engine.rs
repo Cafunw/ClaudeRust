@@ -354,6 +354,8 @@ fn tool_result_ids(m: &Message) -> HashSet<String> {
 
 /// Convert the stored branch into the API `messages` array.
 pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
+    let compacted = crate::compact::apply(path);
+    let path: &[Message] = &compacted;
     // Thinking blocks produced under a different system prompt / tool set must
     // go: remove the leading run of blocks up to the last mismatching one so
     // the remaining blocks stay valid for preserved thinking.
@@ -691,8 +693,49 @@ async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
     }
 }
 
+/// Before a turn of the built-in engine: if the context is nearly full,
+/// summarize everything before the new user message.
+async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: &str) {
+    let pct = st.settings.read().auto_compact_pct;
+    if pct == 0 {
+        return;
+    }
+    let Ok(conv) = st.db.conv_get(conv_id) else { return };
+    if conv.options["engine"] == crate::claudecode::ENGINE {
+        return;
+    }
+    let Ok(path) = st.db.path_to(parent) else { return };
+    let Some(ui) = path.iter().rposition(|m| m.role == "user" && !render::is_tool_result_msg(m)) else { return };
+    if ui + 1 != path.len() || path[ui].meta["compact_summary"].is_string() {
+        return; // only at the start of a turn
+    }
+    let before = &path[..ui];
+    let start = crate::compact::start_index(before).unwrap_or(0);
+    let Some(used) = crate::compact::context_tokens(&before[start..]) else { return };
+    let window = models::info(&conv.model).context as u64;
+    if used * 100 < window * pct as u64 {
+        return;
+    }
+    let _ = app.emit("compacting", json!({"conversation_id": conv_id, "auto": true}));
+    match crate::compact::summarize(st, &conv.model, before, None).await {
+        Ok(summary) => {
+            let user = &path[ui];
+            let mut meta = user.meta.clone();
+            meta["compact_summary"] = json!(summary);
+            meta["compact_auto"] = json!(true);
+            let _ = st.db.msg_update(&user.id, &user.content, &meta);
+            let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true}));
+        }
+        Err(e) => {
+            log::warn!("auto-compaction failed: {e}");
+            let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true, "error": e.to_string()}));
+        }
+    }
+}
+
 async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
     checkpoint_turn(st, conv_id, &parent).await;
+    auto_compact(app, st, conv_id, &parent).await;
     {
         let conv = st.db.conv_get(conv_id)?;
         if conv.kind == "code" && conv.options["engine"] == crate::claudecode::ENGINE {

@@ -886,3 +886,21 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .mem-main { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .mem-main textarea { flex: 1; min-height: 300px; font-family: var(--font-mono); font-size: 12.5px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-0); color: var(--text-0); resize: vertical; }
 .mem-foot { display: flex; align-items: center; gap: 8px; }
+
+/* context meter + compaction divider */
+.ctx-meter { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--text-2); font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.ctx-meter:hover { background: var(--bg-2); color: var(--text-0); }
+.ctx-meter circle { fill: none; stroke-width: 2.6; }
+.ctx-meter .trk { stroke: var(--border); }
+.ctx-meter .val { stroke: var(--text-2); stroke-linecap: round; }
+.ctx-meter.warn .val { stroke: #c08a1e; }
+.ctx-meter.full .val { stroke: var(--danger); }
+.ctx-meter.empty { display: none; }
+.ctx-meter .cost { color: var(--text-3); }
+.compact-divider { margin: 6px 0 14px; }
+.compact-divider .cd-head { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; cursor: pointer; color: var(--text-2); font-size: 12px; padding: 4px 0; }
+.compact-divider .cd-head .line { flex: 1; height: 1px; background: var(--border); }
+.compact-divider .cd-head:hover { color: var(--text-0); }
+.compact-divider .cd-body { margin-top: 8px; padding: 12px 14px; background: var(--bg-1); border-radius: 10px; font-size: 13px; max-height: 360px; overflow: auto; }
+.compact-divider.pending .cd-head .lab { color: var(--accent); }
+.compact-divider { align-self: stretch; width: 100%; }

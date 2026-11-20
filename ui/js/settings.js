@@ -228,6 +228,12 @@ const RENDER = {
     body.appendChild(h(`<h3>${t('s_code')}</h3>`));
     body.appendChild(row(t('code_engine'), t('code_engine_d'), select('code_engine', [['auto', t('engine_auto')], ['claude-code', t('engine_cc')], ['builtin', t('engine_builtin')]])));
     body.appendChild(row(t('checkpoints_setting'), t('checkpoints_setting_d'), toggle('code_checkpoints')));
+    {
+      const cur = Number(store.settings.auto_compact_pct ?? 85);
+      const ac = h(`<select class="select" style="width:auto;min-width:200px">${[[0, t('worktree_never')], [70, '70%'], [85, '85%'], [95, '95%']].map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${esc(String(l))}</option>`).join('')}</select>`);
+      ac.addEventListener('change', () => save({ auto_compact_pct: Number(ac.value) }));
+      body.appendChild(row(t('auto_compact_setting'), t('auto_compact_setting_d'), ac));
+    }
     body.appendChild(row(t('worktree_setting'), t('worktree_setting_d'), select('code_worktree', [['parallel', t('worktree_parallel')], ['always', t('worktree_always')], ['off', t('worktree_never')]])));
     const pathIn = textField('claude_code_path', { placeholder: t('cc_path_help') });
     pathIn.classList.add('mono');

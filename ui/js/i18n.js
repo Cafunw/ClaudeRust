@@ -1,5 +1,17 @@
 // UI strings: English and Turkish.
 const en = {
+  cmd_compact: "Summarize the conversation so far to free up context",
+  compact_divider: "Earlier conversation summarized",
+  compact_divider_auto: "Earlier conversation summarized automatically (context was nearly full)",
+  compact_pending: "the next message starts from a summary",
+  compact_pending_d: "Your next message continues from a summary of everything above.",
+  compacting: "Summarizing the conversation…",
+  compacting_auto: "Context is nearly full — summarizing earlier messages…",
+  compacted: "Conversation compacted. Your next message continues from the summary.",
+  compacted_auto: "Earlier messages were summarized to free up context.",
+  compact_failed: "Couldn't compact",
+  auto_compact_setting: "Auto-compact",
+  auto_compact_setting_d: "When the context window is this full, summarize older messages before the next turn (built-in agent).",
   cmd_memory: "Edit memory files (CLAUDE.md, AGENTS.md)",
   memory_title: "Memory",
   memory_hint: "Claude reads these at the start of every turn. Use @path to import other files.",
@@ -207,6 +219,18 @@ const en = {
 };
 
 const tr = {
+  cmd_compact: "Bağlamı boşaltmak için şimdiye kadarki sohbeti özetle",
+  compact_divider: "Önceki sohbet özetlendi",
+  compact_divider_auto: "Önceki sohbet otomatik özetlendi (bağlam neredeyse dolmuştu)",
+  compact_pending: "sonraki mesaj bir özetten başlar",
+  compact_pending_d: "Sonraki mesajınız yukarıdakilerin özetinden devam eder.",
+  compacting: "Sohbet özetleniyor…",
+  compacting_auto: "Bağlam neredeyse dolu — önceki mesajlar özetleniyor…",
+  compacted: "Sohbet sıkıştırıldı. Sonraki mesajınız özetten devam eder.",
+  compacted_auto: "Bağlamı boşaltmak için önceki mesajlar özetlendi.",
+  compact_failed: "Sıkıştırılamadı",
+  auto_compact_setting: "Otomatik sıkıştırma",
+  auto_compact_setting_d: "Bağlam penceresi bu kadar dolduğunda, sonraki turdan önce eski mesajları özetle (yerleşik ajan).",
   cmd_memory: "Hafıza dosyalarını düzenle (CLAUDE.md, AGENTS.md)",
   memory_title: "Hafıza",
   memory_hint: "Claude bunları her turun başında okur. Başka dosyaları eklemek için @yol kullanın.",

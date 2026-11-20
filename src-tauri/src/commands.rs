@@ -341,16 +341,29 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     } else {
         conv.current_leaf.clone()
     };
+    let mut meta = json!({
+        "attachments": atts.iter().map(attachments::display_meta).collect::<Vec<_>>(),
+        "plan_mode": plan,
+    });
+    // A /compact summary made at this point of the conversation applies to
+    // the message that follows it.
+    if let Some(pc) = conv.options["pending_compact"].as_object() {
+        if pc.get("upto").and_then(|v| v.as_str()) == parent.as_deref() {
+            meta["compact_summary"] = pc.get("summary").cloned().unwrap_or(Value::Null);
+        }
+        engine::update_conv_options(&st, &conv.id, |o| {
+            if let Some(m) = o.as_object_mut() {
+                m.remove("pending_compact");
+            }
+        });
+    }
     let msg = Message {
         id: new_id(),
         conversation_id: conv.id.clone(),
         parent_id: parent,
         role: "user".into(),
         content: Value::Array(content),
-        meta: json!({
-            "attachments": atts.iter().map(attachments::display_meta).collect::<Vec<_>>(),
-            "plan_mode": plan,
-        }),
+        meta,
         created_at: now_ms(),
     };
     st.db.msg_insert(&msg)?;
@@ -1000,7 +1013,12 @@ pub async fn usage_stats(state: St<'_>, conversation_id: String) -> AppResult<Va
         tot.3 += cw;
         tot.4 += (i as f64 * model.price.0 + o as f64 * model.price.1 + cr as f64 * model.price.0 * 0.1 + cw as f64 * model.price.0 * 1.25) / 1_000_000.0;
     }
-    Ok(json!({"input_tokens": tot.0, "output_tokens": tot.1, "cache_read_input_tokens": tot.2, "cache_creation_input_tokens": tot.3, "cost_usd": tot.4}))
+    let start = crate::compact::start_index(&path).unwrap_or(0);
+    let context = crate::compact::context_tokens(&path[start..]);
+    let window = models::info(&conv.model).context;
+    Ok(json!({"input_tokens": tot.0, "output_tokens": tot.1, "cache_read_input_tokens": tot.2, "cache_creation_input_tokens": tot.3, "cost_usd": tot.4,
+              "context_tokens": context, "context_window": window, "auto_compact_pct": st.settings.read().auto_compact_pct,
+              "pending_compact": conv.options["pending_compact"].is_object()}))
 }
 
 #[tauri::command]
@@ -1363,4 +1381,33 @@ pub async fn memory_save(state: St<'_>, conversation_id: String, path: String, c
 pub async fn memory_append(state: St<'_>, conversation_id: String, scope: String, note: String) -> AppResult<String> {
     let p = crate::memory::append(&conv_cwd(&state, &conversation_id)?, &scope, &note)?;
     Ok(p.to_string_lossy().to_string())
+}
+
+// ------------------------------------------------------------- compaction
+
+/// Summarize the conversation so far; the summary replaces it for the next
+/// message (built-in engine).
+#[tauri::command]
+pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id: String, instructions: Option<String>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    if st.runs.lock().contains_key(&conversation_id) {
+        return Err(AppError::msg("Wait for the current response to finish before compacting."));
+    }
+    let conv = st.db.conv_get(&conversation_id)?;
+    let leaf = conv.current_leaf.clone().ok_or_else(|| AppError::msg("There is nothing to compact yet."))?;
+    let path = st.db.path_to(&leaf)?;
+    let before = crate::compact::context_tokens(&path[crate::compact::start_index(&path).unwrap_or(0)..]);
+    let _ = app.emit("compacting", json!({"conversation_id": conversation_id, "auto": false}));
+    let summary = crate::compact::summarize(&st, &conv.model, &path, instructions.as_deref()).await;
+    let summary = match summary {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = app.emit("compacted", json!({"conversation_id": conversation_id, "error": e.to_string()}));
+            return Err(e);
+        }
+    };
+    let s2 = summary.clone();
+    engine::update_conv_options(&st, &conversation_id, |o| o["pending_compact"] = json!({"summary": s2, "upto": leaf}));
+    let _ = app.emit("compacted", json!({"conversation_id": conversation_id, "auto": false}));
+    Ok(json!({"summary": summary, "context_before": before}))
 }

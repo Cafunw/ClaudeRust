@@ -72,6 +72,8 @@ pub struct Settings {
     pub code_worktree: String,
     /// Snapshot project files before each turn (for rewind).
     pub code_checkpoints: bool,
+    /// Summarize older messages when the context window is this full (percent; 0 = never).
+    pub auto_compact_pct: u32,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -121,6 +123,7 @@ impl Default for Settings {
             claude_code_path: String::new(),
             code_worktree: "parallel".into(),
             code_checkpoints: true,
+            auto_compact_pct: 85,
             tool_policies: Default::default(),
             disabled_mcp_servers: vec![],
             onboarded: false,

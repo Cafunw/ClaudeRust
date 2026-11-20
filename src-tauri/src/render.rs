@@ -420,7 +420,8 @@ fn user_turn(m: &Message) -> Value {
         "parent_id": m.parent_id,
         "parts": user_parts(m),
         "created_at": m.created_at,
-        "meta": {"plan_mode": m.meta["plan_mode"], "checkpoint": m.meta["checkpoint"].is_string()},
+        "meta": {"plan_mode": m.meta["plan_mode"], "checkpoint": m.meta["checkpoint"].is_string(),
+                 "compact_summary": m.meta["compact_summary"], "compact_auto": m.meta["compact_auto"]},
     })
 }
 
