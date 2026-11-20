@@ -1,5 +1,11 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_preview: "Preview",
+  preview_empty: "Start a dev server (or ask Claude to) and its local address appears here. You can also type a port or http://localhost address above.",
+  preview_none: "No local addresses found in this session's background commands",
+  preview_detected: "Addresses found in command output",
+  preview_local_only: "The preview shows local addresses only (localhost / 127.0.0.1).",
+  open_browser: "Open in browser",
   cmd_review: "Review the current changes for bugs and risks",
   cmd_init: "Create a CLAUDE.md that describes this codebase",
   cmd_doctor: "Check the app's setup (API, Claude Code, git, MCP, hooks…)",
@@ -240,6 +246,12 @@ const en = {
 };
 
 const tr = {
+  ws_preview: "Önizleme",
+  preview_empty: "Bir geliştirme sunucusu başlatın (ya da Claude'dan isteyin), yerel adresi burada görünür. Yukarıya bir port ya da http://localhost adresi de yazabilirsiniz.",
+  preview_none: "Bu oturumun arka plan komutlarında yerel adres bulunamadı",
+  preview_detected: "Komut çıktısında bulunan adresler",
+  preview_local_only: "Önizleme yalnızca yerel adresleri gösterir (localhost / 127.0.0.1).",
+  open_browser: "Tarayıcıda aç",
   cmd_review: "Mevcut değişiklikleri hata ve risk için incele",
   cmd_init: "Bu kod tabanını anlatan bir CLAUDE.md oluştur",
   cmd_doctor: "Uygulama kurulumunu denetle (API, Claude Code, git, MCP, kancalar…)",

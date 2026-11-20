@@ -1583,3 +1583,42 @@ pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult
     }
     Ok(json!(checks))
 }
+
+// ------------------------------------------------------------- preview
+
+/// Local web addresses mentioned in a session's command output (dev servers).
+pub fn find_local_urls(text: &str) -> Vec<String> {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}(?:/[^\s'\x22<>)\x1b]*)?").unwrap()
+    });
+    let mut out: Vec<String> = vec![];
+    for m in RE.find_iter(text) {
+        let u = m.as_str().replace("0.0.0.0", "localhost").trim_end_matches(['.', ',', ';']).to_string();
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub async fn preview_urls(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let mut urls: Vec<Value> = vec![];
+    for sh in state.shells.list(Some(&conversation_id)) {
+        for u in find_local_urls(&sh.tail(200_000)) {
+            if !urls.iter().any(|x| x["url"] == u.as_str()) {
+                urls.push(json!({"url": u, "source": sh.description.clone(), "running": sh.running()}));
+            }
+        }
+    }
+    Ok(json!(urls))
+}
+
+#[cfg(test)]
+mod preview_tests {
+    #[test]
+    fn finds_dev_server_urls() {
+        let t = "  VITE v5  ready\n  ➜  Local:   http://localhost:5173/\n Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...\nsee https://example.com:443 too";
+        assert_eq!(super::find_local_urls(t), vec!["http://localhost:5173/".to_string(), "http://localhost:8000/".to_string()]);
+    }
+}

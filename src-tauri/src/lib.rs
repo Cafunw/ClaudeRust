@@ -327,6 +327,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::preview_urls,
             commands::doctor,
             commands::subagents_list,
             commands::subagent_output,

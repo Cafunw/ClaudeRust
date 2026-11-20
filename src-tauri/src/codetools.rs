@@ -780,6 +780,8 @@ pub(crate) fn shell_command(cwd: &Path, command: &str) -> (tokio::process::Comma
             .env("PATH", crate::shellenv::path())
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("CLAUDECODE", "1")
+            // show output as it happens instead of when buffers fill
+            .env("PYTHONUNBUFFERED", "1")
             .process_group(0);
         (c, Some(pwd_file))
     };
@@ -788,7 +790,8 @@ pub(crate) fn shell_command(cwd: &Path, command: &str) -> (tokio::process::Comma
         let mut c = tokio::process::Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", command])
             .current_dir(cwd)
-            .env("PATH", crate::shellenv::path());
+            .env("PATH", crate::shellenv::path())
+            .env("PYTHONUNBUFFERED", "1");
         c.creation_flags(0x0800_0000);
         (c, None)
     };
