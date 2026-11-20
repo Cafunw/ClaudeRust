@@ -602,6 +602,10 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
     if let Some(err) = last_meta.get("error").filter(|e| !e.is_null()) {
         parts.push(json!({"kind": "notice", "code": "error", "error": err}));
     }
+    // client-side switch to another model because the chosen one was overloaded
+    if let Some(fb) = msgs.iter().filter(|m| m.role == "assistant").find_map(|m| m.meta.get("overload_fallback").filter(|v| v.is_object())) {
+        parts.insert(0, json!({"kind": "notice", "code": "overloaded_fallback", "from": fb["from"], "to": fb["to"]}));
+    }
     if last_meta["budget_stop"].is_object() {
         parts.push(json!({"kind": "notice", "code": "budget", "budget": last_meta["budget_stop"]["budget"], "spent": last_meta["budget_stop"]["spent"]}));
     }

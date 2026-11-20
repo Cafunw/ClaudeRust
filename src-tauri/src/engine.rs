@@ -795,6 +795,11 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
     }
 }
 
+/// The API said the model is overloaded (after the client's own retries).
+fn is_overloaded(e: &AppError) -> bool {
+    e.status() == 529 || e.kind() == "overloaded_error"
+}
+
 /// Spending limit for one agent turn in this conversation (USD; 0 = none):
 /// the conversation's own (`/budget`) or the setting.
 pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
@@ -818,9 +823,14 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
     let mut stop_continues = 0usize;
     // what this turn has cost so far (responses and sub-agents)
     let mut turn_cost = 0.0f64;
+    // set when the model was overloaded: the rest of the turn uses this one
+    let mut turn_model: Option<String> = None;
     loop {
         steps += 1;
-        let conv = st.db.conv_get(conv_id)?;
+        let mut conv = st.db.conv_get(conv_id)?;
+        if let Some(m) = &turn_model {
+            conv.model = m.clone();
+        }
         let max_steps = if conv.kind == "code" { 400 } else { 60 };
         let settings = st.settings.read().clone();
         let path = st.db.path_to(&parent)?;
@@ -930,6 +940,23 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             let res = stream_with_recovery(st, &client, &mut body, &mut betas, cancel, &mut on_event).await;
             match res {
                 Err(e) => {
+                    // Overloaded before anything was produced: try another model.
+                    if content.is_empty() && is_overloaded(&e) && am.meta["overload_fallback"].is_null() {
+                        if let Some(fb) = crate::models::overload_fallback(&conv.model, &settings.overload_fallback) {
+                            let mut c2 = conv.clone();
+                            c2.model = fb.clone();
+                            if let Ok(rc2) = build_request_context(st, &c2, &settings).await {
+                                log::warn!("{} is overloaded; retrying with {fb}", conv.model);
+                                let (b2, bt2) = base_body(&rc2, &settings, &c2, build_messages(&path, &rc2));
+                                body = b2;
+                                betas = bt2;
+                                am.meta["overload_fallback"] = json!({"from": conv.model, "to": fb});
+                                am.meta["model"] = json!(fb);
+                                turn_model = Some(fb);
+                                continue;
+                            }
+                        }
+                    }
                     error = Some(e);
                     break;
                 }

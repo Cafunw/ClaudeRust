@@ -360,6 +360,9 @@ function renderNotice(el, p, ctx) {
       el.style.background = 'transparent';
       el.style.padding = '2px 0';
       break;
+    case 'overloaded_fallback':
+      html = `${icon('info', 16)}<div class="grow small">${esc(t('overload_notice', { from: modelInfo(p.from || '').name || p.from, to: modelInfo(p.to || '').name || p.to }))}</div>`;
+      break;
     case 'fallback':
       html = `${icon('info', 16)}<div class="grow small">${esc(t('fallback_notice', { from: modelInfo(p.from || '').name || p.from, to: modelInfo(p.to || '').name || p.to }))}</div>`;
       break;

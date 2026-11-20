@@ -77,6 +77,8 @@ pub struct Settings {
     /// Pause an agent turn once it has cost this much (USD; 0 = no limit).
     /// A conversation can override it (`/budget`).
     pub turn_budget_usd: f64,
+    /// Model to switch to when the chosen one is overloaded: auto | off | <model id>
+    pub overload_fallback: String,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -135,6 +137,7 @@ impl Default for Settings {
             code_checkpoints: true,
             auto_compact_pct: 85,
             turn_budget_usd: 0.0,
+            overload_fallback: "auto".into(),
             tool_policies: Default::default(),
             trusted_hooks: Default::default(),
             oai_base_url: String::new(),

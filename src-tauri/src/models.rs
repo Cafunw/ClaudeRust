@@ -309,9 +309,46 @@ pub fn web_tools(m: &ModelInfo) -> Vec<Value> {
     }
 }
 
+/// Model to use when `model` is overloaded. `setting` is "off", "auto" (a
+/// current model of another family) or a model id. None when there's
+/// nothing different to try.
+pub fn overload_fallback(model: &str, setting: &str) -> Option<String> {
+    let s = setting.trim();
+    let m = model.trim();
+    if s.eq_ignore_ascii_case("off") || m.is_empty() || m == "default" || m.starts_with(crate::oai::PREFIX) {
+        return None;
+    }
+    let pick = if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        let l = m.to_ascii_lowercase();
+        if l.contains("sonnet") {
+            "claude-opus-5-5"
+        } else {
+            // Fable, Opus, Haiku and anything else: Sonnet (Opus when Sonnet is the one overloaded)
+            "claude-sonnet-5-5"
+        }
+        .to_string()
+    } else {
+        s.to_string()
+    };
+    (pick != m).then_some(pick)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overload_fallbacks() {
+        assert_eq!(overload_fallback("claude-opus-5-5", "auto").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(overload_fallback("claude-fable-5-2", "").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(overload_fallback("claude-sonnet-5-5", "auto").as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(overload_fallback("claude-haiku-5-5", "auto").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(overload_fallback("claude-opus-5-5", "off"), None);
+        assert_eq!(overload_fallback("claude-opus-5-5", "claude-opus-5-5"), None);
+        assert_eq!(overload_fallback("claude-opus-5-5", "claude-haiku-5-5").as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(overload_fallback("default", "auto"), None);
+        assert_eq!(overload_fallback("oai:llama3", "auto"), None);
+    }
 
     #[test]
     fn names() {

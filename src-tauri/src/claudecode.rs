@@ -363,6 +363,10 @@ async fn run_once(
         args.push("--model".into());
         args.push(conv.model.clone());
     }
+    if let Some(fb) = crate::models::overload_fallback(&conv.model, &st.settings.read().overload_fallback) {
+        args.push("--fallback-model".into());
+        args.push(fb);
+    }
     let budget = crate::engine::turn_budget(&conv, &st.settings.read());
     if budget > 0.0 {
         args.push("--max-budget-usd".into());

@@ -215,6 +215,10 @@ const RENDER = {
     body.appendChild(row(t('send_enter'), t('send_enter_d'), toggle('send_on_enter')));
     body.appendChild(h(`<h4>API</h4>`));
     body.appendChild(row(t('fallbacks_toggle'), t('fallbacks_toggle_d'), toggle('refusal_fallbacks')));
+    {
+      const models = (store.models || []).filter((m) => m.featured && !String(m.id).startsWith('oai:'));
+      body.appendChild(row(t('overload_setting'), t('overload_setting_d'), select('overload_fallback', [['auto', t('overload_auto')], ['off', t('overload_off')], ...models.map((m) => [m.id, m.name])])));
+    }
     body.appendChild(row(t('caching_toggle'), t('caching_toggle_d'), toggle('prompt_caching')));
   },
 

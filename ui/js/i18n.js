@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  overload_setting: "When the model is overloaded",
+  overload_setting_d: "If Claude's servers stay busy for the chosen model, answer with another one instead of failing. Automatic picks Sonnet for Opus, Fable and Haiku, and Opus for Sonnet. Claude Code sessions use it as --fallback-model.",
+  overload_auto: "Switch automatically",
+  overload_off: "Don't switch (show an error)",
+  overload_notice: "{from} was overloaded, so {to} answered this turn.",
   ws_files: "Files",
   files_filter: "Find a file…",
   files_mention: "Mention in message",
@@ -433,6 +438,11 @@ const en = {
 };
 
 const tr = {
+  overload_setting: "Model aşırı yüklendiğinde",
+  overload_setting_d: "Seçilen model için Claude sunucuları meşgul kalırsa hata vermek yerine başka bir modelle yanıtla. Otomatik seçim Opus, Fable ve Haiku için Sonnet'i, Sonnet için Opus'u kullanır. Claude Code oturumlarında --fallback-model olarak geçer.",
+  overload_auto: "Otomatik geçiş yap",
+  overload_off: "Geçme (hata göster)",
+  overload_notice: "{from} aşırı yüklüydü, bu turu {to} yanıtladı.",
   ws_files: "Dosyalar",
   files_filter: "Dosya bul…",
   files_mention: "Mesajda etiketle",
