@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  quote_reply: "Quote",
+  quote_explain: "Explain",
+  quote_explain_p: "Explain this part in more detail.",
   pr_ahead_one: "1 commit ahead",
   pr_btn: "Pull request",
   pr_title: "Create pull request",
@@ -459,6 +462,9 @@ const en = {
 };
 
 const tr = {
+  quote_reply: "Alıntıla",
+  quote_explain: "Açıkla",
+  quote_explain_p: "Bu kısmı daha ayrıntılı açıkla.",
   pr_ahead_one: "1 commit önde",
   pr_btn: "Çekme isteği",
   pr_title: "Çekme isteği oluştur",
