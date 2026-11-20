@@ -289,6 +289,18 @@ function renderTool(el, p) {
   el.innerHTML = `<button class="tool-head">${icon(ic, 15)}<span class="tname">${esc(sum.name)}</span><span class="targ">${esc(sum.arg)}</span>${stat}${statusHtml(p)}${isTodo ? '' : icon('chevRight', 14, 'class="chev"')}</button>
     <div class="tool-body">${isTodo ? todosHtml(p.input && p.input.todos) : toolBody(p)}</div>`;
   if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => { el.classList.toggle('open'); if (!el.classList.contains('open')) el.dataset.userClosed = '1'; });
+  // file tools: the path opens the file in the editor
+  const fp = p.input && (p.input.file_path || p.input.notebook_path);
+  if (fp && ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(p.tool)) {
+    const targ = el.querySelector('.targ');
+    targ.classList.add('file-link');
+    targ.title = t('open_in_editor');
+    targ.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const abs = /^([a-zA-Z]:)?[\\/]/.test(fp) || !store.codeRoot ? fp : `${store.codeRoot}/${fp}`;
+      call('open_in_editor', { path: abs, line: p.input.offset ? Number(p.input.offset) : null }).catch(() => {});
+    });
+  }
   const pre = el.querySelector('.live-out pre');
   if (pre) pre.scrollTop = pre.scrollHeight;
 }

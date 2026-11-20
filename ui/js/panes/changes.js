@@ -96,7 +96,7 @@ function draw(el, ctx) {
       <button class="icon-btn sm" data-a="revert" title="${t('revert')}">${icon('retry', 13)}</button>
     </div>`);
     row.onclick = (e) => { if (e.target.closest('button')) return; if (s.selected === f.path) { s.selected = null; s.diff = null; draw(el, ctx); } else loadDiff(el, ctx, f.path); };
-    row.querySelector('[data-a=open]').onclick = () => call('open_path', { path: `${d.root}/${f.path}` }).catch(errorToast);
+    row.querySelector('[data-a=open]').onclick = () => call('open_in_editor', { path: `${d.root}/${f.path}`, line: null }).catch(errorToast);
     row.querySelector('[data-a=ask]').onclick = (ev) => {
       const mention = /\s/.test(f.path) ? `@"${f.path}"` : `@${f.path}`;
       const ask = async (prompt) => {

@@ -2328,3 +2328,55 @@ pub async fn context_breakdown(state: St<'_>, conversation_id: String) -> AppRes
         "auto_compact_pct": settings.auto_compact_pct,
     }))
 }
+
+// ------------------------------------------------------------- open in editor
+
+/// The editor command and its arguments for a file (and line).
+pub fn editor_args(editor: &str, path: &str, line: Option<u32>) -> Option<(String, Vec<String>)> {
+    let with_line = |p: &str| match line {
+        Some(l) => format!("{p}:{l}"),
+        None => p.to_string(),
+    };
+    let found = |b: &str| crate::shellenv::which(b);
+    let pick = match editor {
+        "auto" => ["code", "cursor", "windsurf", "zed", "subl"].into_iter().find(|b| found(b)).map(|b| b.to_string()),
+        "system" | "" => None,
+        other => Some(other.to_string()),
+    }?;
+    let args = match pick.as_str() {
+        "code" | "cursor" | "windsurf" | "codium" => vec!["-g".to_string(), with_line(path)],
+        "idea" | "pycharm" | "webstorm" | "goland" | "rustrover" | "clion" => match line {
+            Some(l) => vec!["--line".to_string(), l.to_string(), path.to_string()],
+            None => vec![path.to_string()],
+        },
+        _ => vec![with_line(path)],
+    };
+    Some((pick, args))
+}
+
+#[tauri::command]
+pub async fn open_in_editor(app: AppHandle, state: St<'_>, path: String, line: Option<u32>) -> AppResult<String> {
+    let editor = state.settings.read().editor.clone();
+    if let Some((bin, args)) = editor_args(&editor, &path, line) {
+        let mut cmd = crate::shellenv::command(&bin, &args);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        if cmd.spawn().is_ok() {
+            return Ok(bin);
+        }
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(&path, None::<&str>).map_err(|e| AppError::msg(e.to_string()))?;
+    Ok("system".into())
+}
+
+#[cfg(test)]
+mod editor_tests {
+    #[test]
+    fn editor_arguments() {
+        let (b, a) = super::editor_args("code", "/p/a.rs", Some(12)).unwrap();
+        assert_eq!((b.as_str(), a), ("code", vec!["-g".to_string(), "/p/a.rs:12".to_string()]));
+        let (_, a) = super::editor_args("idea", "/p/a.rs", Some(3)).unwrap();
+        assert_eq!(a, vec!["--line", "3", "/p/a.rs"]);
+        assert!(super::editor_args("system", "/p/a.rs", None).is_none());
+    }
+}

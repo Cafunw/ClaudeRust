@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  open_in_editor: "Open in editor",
+  editor_setting: "Editor",
+  editor_setting_d: "Files from tool cards, Changes and Map open here (at the line when known). Auto picks VS Code, Cursor, Windsurf, Zed or Sublime Text if installed.",
+  editor_auto: "Auto-detect",
+  editor_system: "System default app",
   ctx_title: "Context window",
   ctx_tokens: "tokens",
   ctx_estimated: "estimated (no response yet)",
@@ -393,6 +398,11 @@ const en = {
 };
 
 const tr = {
+  open_in_editor: "Düzenleyicide aç",
+  editor_setting: "Düzenleyici",
+  editor_setting_d: "Araç kartlarındaki, Değişiklikler ve Harita panellerindeki dosyalar burada açılır (biliniyorsa ilgili satırda). Otomatik: kuruluysa VS Code, Cursor, Windsurf, Zed ya da Sublime Text.",
+  editor_auto: "Otomatik algıla",
+  editor_system: "Sistemin varsayılan uygulaması",
   ctx_title: "Bağlam penceresi",
   ctx_tokens: "token",
   ctx_estimated: "tahmini (henüz yanıt yok)",

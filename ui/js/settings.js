@@ -247,6 +247,7 @@ const RENDER = {
   async code(body) {
     body.appendChild(h(`<h3>${t('s_code')}</h3>`));
     body.appendChild(row(t('code_engine'), t('code_engine_d'), select('code_engine', [['auto', t('engine_auto')], ['claude-code', t('engine_cc')], ['builtin', t('engine_builtin')]])));
+    body.appendChild(row(t('editor_setting'), t('editor_setting_d'), select('editor', [['auto', t('editor_auto')], ['code', 'VS Code'], ['cursor', 'Cursor'], ['windsurf', 'Windsurf'], ['zed', 'Zed'], ['subl', 'Sublime Text'], ['idea', 'IntelliJ IDEA'], ['system', t('editor_system')]])));
     body.appendChild(row(t('checkpoints_setting'), t('checkpoints_setting_d'), toggle('code_checkpoints')));
     {
       const cur = Number(store.settings.auto_compact_pct ?? 85);

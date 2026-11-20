@@ -79,6 +79,11 @@ fn login_shell_path() -> Option<OsString> {
 
 /// Build a std Command for `program`, resolving it on the login PATH and
 /// handling Windows .cmd/.bat shims.
+/// Whether a program can be found on the user's (login shell) PATH.
+pub fn which(program: &str) -> bool {
+    which::which_in(program, Some(path()), std::env::current_dir().unwrap_or_default()).is_ok()
+}
+
 pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
     let path = path();
     let resolved = which::which_in(program, Some(&path), std::env::current_dir().unwrap_or_default())

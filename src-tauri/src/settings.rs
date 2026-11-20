@@ -82,6 +82,8 @@ pub struct Settings {
     /// OpenAI-compatible endpoint for local / other models ("" = off), e.g. http://localhost:11434/v1
     pub oai_base_url: String,
     pub oai_api_key: String,
+    /// Editor for "open in editor": auto | code | cursor | windsurf | zed | subl | idea | system
+    pub editor: String,
     pub disabled_mcp_servers: Vec<String>,
 
     pub onboarded: bool,
@@ -133,6 +135,7 @@ impl Default for Settings {
             trusted_hooks: Default::default(),
             oai_base_url: String::new(),
             oai_api_key: String::new(),
+            editor: "auto".into(),
             disabled_mcp_servers: vec![],
             onboarded: false,
         }

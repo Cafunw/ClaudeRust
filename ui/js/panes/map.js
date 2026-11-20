@@ -100,6 +100,10 @@ async function draw(pane, ctx) {
     gEl.addEventListener('mouseenter', () => focus(i, false));
     gEl.addEventListener('mouseleave', () => focus(sel, false));
     gEl.addEventListener('click', (e) => { e.stopPropagation(); sel = sel === i ? -1 : i; focus(sel, true); });
+    gEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      call('open_in_editor', { path: `${g.root}/${n.id}`, line: null }).catch(() => {});
+    });
     gEl.addEventListener('dblclick', async () => {
       const chat = await import('../chat.js');
       const c2 = chat.current();
