@@ -46,6 +46,8 @@ Resmî Claude Desktop bir Electron uygulamasıdır (yüzlerce MB disk, ayrı bir
 | Arayüz dili | ✅ English, **Türkçe** |
 | — | ➕ **Claude'dan içe aktarma**: claude.ai dışa aktarımı (sohbetler, dallar, artifact'ler, projeler), Claude Code oturumları, Claude Desktop MCP sunucuları ve uzantıları |
 | — | ➕ **Uzak Masaüstü / VM uyumu**: uzak oturum algılanınca yazılımla çizim, ekran dışında kalan pencereyi geri getirme, "Donanım hızlandırma" ayarı |
+| Claude Code'un ajan özellikleri | ✅ **Kod çalışma alanı** (aşağıda): Değişiklikler / Terminal / Plan / Görevler / Önizleme / Harita panelleri, kontrol noktaları ve geri sarma, git worktree yalıtımı, satır içi inceleme yorumları, alt ajanlar, kancalar (hooks), bağlam sıkıştırma, `@` dosya/sembol etiketleme, `/` komutları, CLAUDE.md/AGENTS.md hafızası, Otomatik izin modu |
+| — | ➕ **İzleme modu** (dosyalar değişince derleme/test denetimi, hataları Claude'a gönderme), **rutinler** (zamanlanmış istemler), yapay zekâ ile commit mesajı, proje **mimari haritası**, genişletilmiş komut paleti |
 
 ### Zorunlu farklar
 
@@ -107,7 +109,20 @@ cargo test -p clauderust --lib   # birim testleri
   - **Claude Code oturumları** (`~/.claude/projects`; CLI ve Claude Desktop'ın Kod sekmesi): içe aktarılan oturumlar Claude Code motoruyla **kaldığı yerden devam eder**.
   - **Claude Desktop bağlayıcıları**: `claude_desktop_config.json` içindeki MCP sunucuları ve Claude'da kurulu masaüstü uzantıları (kayıtlı ayarlarıyla), ayrıca `~/.claude.json` içindeki Claude Code MCP sunucuları.
 - **Uzak Masaüstü, VM ve GPU sorunları**: Uzak bir oturum (Windows RDP, xrdp, VNC, Chrome Uzak Masaüstü, X yönlendirme) algılanınca ClaudeRust yazılımla çizime geçer. Linux'ta boş/beyaz pencereye yol açan DMA-BUF çizicisi varsayılan olarak kapalıdır. Kayıtlı konumu artık var olmayan bir ekranda kalan pencere görünür ekrana taşınır ve ekrandan büyükse küçültülür. Pencere yine boş ya da siyahsa Ayarlar → Masaüstü uygulaması → **Donanım hızlandırma → Kapalı** seçin. Pencere hiç açılmıyorsa uygulamayı `--disable-gpu` ile ya da `CLAUDERUST_DISABLE_GPU=1` ortam değişkeniyle başlatın.
-- **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama `Ctrl/⌘+K`, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`.
+- **Kod çalışma alanı** (kod oturumlarında sağdaki panel, `Ctrl+\``):
+  - **Değişiklikler**: git'te HEAD'e göre (git dışında ajanın düzenlemelerine göre) değişen dosyalar, satır numaralı diff, dosya/tümünü geri alma, satırlara **inceleme yorumu** ekleyip hepsini tek istemle gönderme, Claude'un yazdığı mesajla **commit** (isteğe bağlı push).
+  - **Terminal**: proje klasöründe gerçek bir kabuk (PTY). **Görevler**: arka plan komutları ve alt ajanlar, canlı çıktı ve durdurma. **Plan**: plan modunun planı ve yapılacaklar listesi. **Önizleme**: yerel geliştirme sunucusunu (localhost) uygulama içinde açar; komut çıktısındaki adresler otomatik bulunur. **Harita**: dosyalar arası içe aktarma grafiği.
+  - **Kontrol noktaları / geri sarma**: her turdan önce proje dosyalarının anlık görüntüsü alınır (uygulama veri klasöründe ayrı bir git deposu; projenin `.git`'ine dokunulmaz). Mesajınızın yanındaki ⟲ düğmesi ya da `/rewind` ile kodu, sohbeti ya da ikisini birden o noktaya döndürün; kod geri yüklemesi geri alınabilir.
+  - **Worktree yalıtımı**: aynı depoda başka bir oturum çalışırken (ayar: her zaman / asla) yeni oturum kendi `clauderust/…` dalında ve worktree'sinde çalışır; "…dalına uygula" değişiklikleri ana klasöre aktarır, oturum silinince worktree temizlenir.
+  - **İzin modları**: İzin iste, **Otomatik** (güvenli düzenleme ve komutlar sormadan; `sudo`, `git push`, `--force`, proje dışına silme/yazma, ağ araçları, `.env`/anahtar dosyaları gibi riskli işlemler için sorar), Düzenlemeleri kabul et, Plan, İzinleri atla.
+  - **Girdi**: `@` dosya ve sembol (fonksiyon/tip) etiketleme, `/` komutları (`/compact`, `/cost`, `/review`, `/init`, `/doctor`, `/memory`, `/rewind`, `/hooks`, `/watch`, `/schedule`, `/clear`, `/model`, `/permissions` …) ve `.claude/commands/*.md` özel komutları; mesajları "/komut olarak kaydet"; `# not` ile hafızaya ekleme.
+  - **Hafıza**: `~/.claude/CLAUDE.md`, üst klasörlerdeki `CLAUDE.md`, `.claude/CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md` (`@yol` içe aktarmalarıyla) her mesajda yeniden okunur.
+  - **Bağlam**: üst çubukta bağlam doluluğu ve maliyet; `/compact` ya da bağlam %85 dolunca otomatik özetleme.
+  - **Alt ajanlar**: yerleşik ajan karmaşık işleri `Task` aracıyla paralel alt ajanlara bölebilir.
+  - **Kancalar (hooks)**: Claude Code biçimi (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`); proje kancaları yalnızca siz onayladıktan sonra çalışır.
+  - **İzleme modu**: üst çubuktaki *İzle* rozeti; dosyalar değiştikçe algılanan denetim komutunu (cargo check, tsc, go build, npm script …) çalıştırır, hataları tek tıkla ya da otomatik olarak Claude'a gönderir.
+  - **Rutinler**: Kod sayfası → *Rutinler*: belirli aralıklarla ya da her gün belirli saatte yeni bir kod oturumunda çalışan istemler.
+- **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama ve komut paleti `Ctrl/⌘+K` (`>` komutlar, `@` dosyalar), çalışma alanı/terminal ``Ctrl/⌘+` ``, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`.
 
 ---
 
@@ -120,6 +135,8 @@ ClaudeRust recreates the Claude desktop experience — chats, projects, artifact
 **Import from Claude:** Settings → Import brings over a claude.ai data export (chats with their edit branches, attachments, thinking, versioned artifacts, and projects with their instructions and documents), Claude Code sessions from `~/.claude/projects` (they stay resumable), Claude Desktop's MCP servers and installed extensions, and Claude Code's user MCP servers.
 
 **Remote Desktop / VMs:** in remote sessions (RDP, xrdp, VNC, Chrome Remote Desktop, X forwarding) the WebView uses software rendering; on Linux the DMA-BUF renderer is off by default; a window restored onto a missing monitor is moved back on screen. Settings → Desktop app → *Hardware acceleration* overrides this, and `--disable-gpu` / `CLAUDERUST_DISABLE_GPU=1` help when the window doesn't open at all.
+
+**Code workspace:** code sessions get a side panel (``Ctrl+` ``) with Changes (diff vs HEAD, revert, inline review comments, commit with a Claude-written message), a real PTY Terminal, Plan (plan + todos), Tasks (background commands and sub-agents), Preview (local dev server in-app) and Map (import graph). Also: per-turn checkpoints with rewind (code and/or conversation), git worktree isolation for parallel sessions, an Auto permission mode, `@` file/symbol mentions, `/` commands (including `.claude/commands`), CLAUDE.md/AGENTS.md memory, compaction with a context/cost meter, sub-agents, Claude Code-format hooks (project hooks run only once trusted), watch mode (re-run a check on file changes and send failures to Claude) and routines (scheduled prompts).
 
 **Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs.
 
@@ -136,7 +153,22 @@ src-tauri/src
 ├── highlight.rs    syntect-based highlighting with themeable CSS classes
 ├── artifacts.rs    <antArtifact> parsing and sandboxed documents for artifact://
 ├── mcp.rs          MCP client (stdio + streamable HTTP), claude_desktop_config.json
-├── codetools.rs    Bash / Read / Write / Edit / Glob / Grep / TodoWrite + permission rules
+├── codetools.rs    Bash / Read / Write / Edit / Glob / Grep / TodoWrite + permission rules (incl. Auto mode)
+├── shells.rs       background commands (run_in_background, BashOutput, KillShell)
+├── terminal.rs     PTY terminals for the Terminal pane
+├── gitops.rs       changes, diffs and revert (git or recorded originals)
+├── checkpoints.rs  per-turn snapshots in a shadow git repo; rewind
+├── worktree.rs     isolated git worktrees per session
+├── subagent.rs     Task tool: parallel sub-agents
+├── hooks.rs        Claude Code-format hooks with a trust check
+├── compact.rs      context compaction
+├── memory.rs       CLAUDE.md / AGENTS.md loading, quick memory
+├── slash.rs        custom /commands (.claude/commands)
+├── filesearch.rs   @ file search and mention expansion
+├── symbols.rs      @ symbol index
+├── watch.rs        watch mode (check on file changes)
+├── routines.rs     scheduled prompts
+├── archmap.rs      import graph for the Map pane
 ├── claudecode.rs   Claude Code CLI engine: stream-json, permission prompts, resume/fork
 ├── import.rs       import from claude.ai exports, Claude Code sessions, Claude Desktop
 ├── extensions.rs   .mcpb / .dxt desktop extensions
@@ -147,10 +179,10 @@ src-tauri/src
 ├── attachments.rs  images (downscaling), PDFs, .docx, text files
 ├── commands.rs     Tauri commands used by the UI
 └── lib.rs          windows, tray, Quick Entry, global shortcut, artifact protocol
-ui/                 index.html, css/app.css, js/*.js (ES modules), vendor/katex
+ui/                 index.html, css/app.css, js/*.js + js/panes/*.js (ES modules), vendor/katex, vendor/xterm
 ```
 
 Conversation history is sent back to the API append-only and unchanged (thinking blocks, server tool results and fallback markers included), so prompt caching and preserved thinking keep working across tool loops, branches and model switches.
 
 ### Third-party notices
-KaTeX is bundled under its MIT license (`ui/vendor/katex/LICENSE`). "Claude" is a trademark of Anthropic; this is an independent client for the Claude API.
+KaTeX and xterm.js are bundled under their MIT licenses (`ui/vendor/katex/LICENSE`, `ui/vendor/xterm/LICENSE`). "Claude" is a trademark of Anthropic; this is an independent client for the Claude API.
