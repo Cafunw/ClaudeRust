@@ -101,6 +101,7 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         let cwd = conv.cwd.clone().unwrap_or_default();
         code = Some(st.code_session(&conv.id, &cwd));
         tools.extend(codetools::definitions(eager));
+        tools.push(crate::subagent::definition());
         tools.extend(models::web_tools(&model));
         prompts::code_system(&prompts::CodePromptInput {
             cwd: &cwd,
@@ -436,7 +437,7 @@ pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
     merged
 }
 
-fn base_body(rc: &ReqCtx, settings: &Settings, conv: &Conversation, messages: Vec<Value>) -> (Value, Vec<String>) {
+pub(crate) fn base_body(rc: &ReqCtx, settings: &Settings, conv: &Conversation, messages: Vec<Value>) -> (Value, Vec<String>) {
     let thinking_default = if conv.kind == "code" { true } else { settings.thinking_default };
     let thinking_on = opt_bool(&conv.options, "thinking", thinking_default);
     let effort = conv.options["effort"].as_str();
@@ -503,7 +504,7 @@ fn strip_all_thinking(body: &mut Value) {
     }
 }
 
-async fn stream_with_recovery<F>(
+pub(crate) async fn stream_with_recovery<F>(
     st: &AppState,
     client: &Client,
     body: &mut Value,
@@ -972,8 +973,47 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             return Ok(());
         }
         let mut results: Vec<Value> = vec![];
+        // Sub-agents (Task) run first, all in parallel.
+        let mut task_results: HashMap<String, (Vec<Value>, bool)> = HashMap::new();
+        let tasks: Vec<&Value> = tool_uses
+            .iter()
+            .filter(|t| t["name"] == crate::subagent::TASK_TOOL && !invalid_json.contains_key(t["id"].as_str().unwrap_or("")))
+            .collect();
+        if !tasks.is_empty() && rc.code.is_some() && !cancel.is_cancelled() {
+            for t in &tasks {
+                live.live_tools.insert(t["id"].as_str().unwrap_or("").to_string(), "running".into());
+            }
+            st.live.lock().insert(conv_id.to_string(), live.clone());
+            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            let futs = tasks.iter().map(|t| {
+                let tid = t["id"].as_str().unwrap_or("").to_string();
+                let rc = &rc;
+                let am_id = am_id.clone();
+                async move {
+                    let r = crate::subagent::run_task(app, st, conv_id, &am_id, &tid, rc, &t["input"], cancel).await;
+                    (tid, r)
+                }
+            });
+            for (tid, r) in futures_util::future::join_all(futs).await {
+                live.live_tools.remove(&tid);
+                task_results.insert(tid, r);
+            }
+            let su = st.subagents.usage_for(&am_id);
+            if !su.is_empty() {
+                am.meta["subagent_usage"] = Value::Object(su);
+                st.db.msg_update(&am_id, &am.content, &am.meta)?;
+            }
+        }
         for tu in &tool_uses {
             let id = tu["id"].as_str().unwrap_or("").to_string();
+            if let Some((blocks, is_error)) = task_results.remove(&id) {
+                let mut r = json!({"type": "tool_result", "tool_use_id": id, "content": blocks});
+                if is_error {
+                    r["is_error"] = json!(true);
+                }
+                results.push(r);
+                continue;
+            }
             if cancel.is_cancelled() {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": "The user interrupted this tool call."}));
                 continue;
@@ -1049,7 +1089,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
     }
 }
 
-fn all_tool_ids(content: &Value) -> HashSet<String> {
+pub(crate) fn all_tool_ids(content: &Value) -> HashSet<String> {
     content
         .as_array()
         .into_iter()
@@ -1136,6 +1176,11 @@ fn denial(reply: &Option<PermissionReply>) -> Vec<Value> {
             text_block(s)
         }
     }
+}
+
+/// The conversation's "allow for this session" rules.
+pub(crate) fn allowed_rules(conv: &Conversation) -> Vec<String> {
+    opt_strs(&conv.options, "allowed_rules")
 }
 
 pub(crate) fn update_conv_options(st: &AppState, conv_id: &str, f: impl FnOnce(&mut Value)) {

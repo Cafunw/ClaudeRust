@@ -30,7 +30,7 @@ async function draw(el, ctx) {
   updateTabs();
   el.innerHTML = '';
   const head = h(`<div class="pane-head"><span class="muted">${t('ws_tasks_d')}</span><div class="grow"></div><button class="btn sm ghost" data-a="clear">${t('clear_finished')}</button></div>`);
-  head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); draw(el, ctx); };
+  head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); await call('subagents_clear', { conversationId: ctx.convId }).catch(() => {}); draw(el, ctx); };
   el.appendChild(head);
   if (!rows.length) { el.appendChild(h(`<div class="pane-empty">${icon('list', 22)}<div>${t('ws_tasks_empty')}</div></div>`)); return; }
   for (const r of rows) {
@@ -79,6 +79,18 @@ registerPane({
   },
   hide: () => { clearInterval(timer); timer = null; },
 });
+
+// sub-agents of the built-in agent
+addTaskProvider(async (ctx) => {
+  const list = await call('subagents_list', { conversationId: ctx.convId });
+  return list.map((a) => ({
+    id: a.id, kind: 'agent', title: `${t('subagent')} · ${a.description}`, sub: `${a.steps} ${t('subagent_steps')}`, status: a.status === 'stopped' ? 'killed' : a.status,
+    started: a.started_at, finished: a.finished_at, exit: null,
+    onStop: () => call('subagent_stop', { id: a.id }),
+    output: () => call('subagent_output', { id: a.id }),
+  }));
+});
+on('subagents-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) refresh('tasks'); });
 
 on('shells-changed', ({ conversation_id }) => {
   const c = context();

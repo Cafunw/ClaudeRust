@@ -1,5 +1,12 @@
 // UI strings: English and Turkish.
 const en = {
+  cmd_review: "Review the current changes for bugs and risks",
+  cmd_init: "Create a CLAUDE.md that describes this codebase",
+  cmd_doctor: "Check the app's setup (API, Claude Code, git, MCP, hooks…)",
+  doctor_title: "Doctor",
+  subagent: "Agent",
+  subagent_task: "Task",
+  subagent_steps: "tool calls",
   cmd_hooks: "Show the hooks that run in this session",
   hooks_title: "Hooks",
   hooks_event: "Event",
@@ -233,6 +240,13 @@ const en = {
 };
 
 const tr = {
+  cmd_review: "Mevcut değişiklikleri hata ve risk için incele",
+  cmd_init: "Bu kod tabanını anlatan bir CLAUDE.md oluştur",
+  cmd_doctor: "Uygulama kurulumunu denetle (API, Claude Code, git, MCP, kancalar…)",
+  doctor_title: "Tanılama",
+  subagent: "Ajan",
+  subagent_task: "Görev",
+  subagent_steps: "araç çağrısı",
   cmd_hooks: "Bu oturumda çalışan kancaları göster",
   hooks_title: "Kancalar",
   hooks_event: "Olay",

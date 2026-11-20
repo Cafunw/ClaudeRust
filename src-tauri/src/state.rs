@@ -46,6 +46,7 @@ pub struct AppState {
     pub code_sessions: Mutex<HashMap<String, Arc<CodeSession>>>,
     pub shells: Arc<crate::shells::Shells>,
     pub terminals: crate::terminal::Terminals,
+    pub subagents: crate::subagent::Registry,
     pub models: Mutex<Option<Vec<Value>>>,
     /// Set when the configured endpoint rejected optional request features.
     pub degraded: AtomicBool,
@@ -71,6 +72,7 @@ impl AppState {
             code_sessions: Mutex::new(HashMap::new()),
             shells: Arc::new(crate::shells::Shells::default()),
             terminals: crate::terminal::Terminals::default(),
+            subagents: crate::subagent::Registry::default(),
             models: Mutex::new(None),
             degraded: AtomicBool::new(false),
             data_dir,

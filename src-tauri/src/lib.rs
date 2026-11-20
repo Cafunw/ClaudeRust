@@ -30,6 +30,7 @@ pub mod shellenv;
 pub mod slash;
 pub mod shells;
 pub mod state;
+pub mod subagent;
 pub mod terminal;
 pub mod util;
 pub mod view;
@@ -326,6 +327,11 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::doctor,
+            commands::subagents_list,
+            commands::subagent_output,
+            commands::subagent_stop,
+            commands::subagents_clear,
             commands::hooks_info,
             commands::hooks_trust,
             commands::compact_conversation,

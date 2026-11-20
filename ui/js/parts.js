@@ -224,6 +224,9 @@ function toolBody(p) {
       return `<div class="tool-section"><pre>${esc(String(i.content || '').slice(0, 20000))}</pre></div>` + (p.status === 'error' ? resultSection(p) : '');
     case 'ExitPlanMode':
       return `<div class="tool-section"><pre style="white-space:pre-wrap;font-family:var(--font-ui);font-size:13px">${esc(i.plan || '')}</pre></div>${resultSection(p)}`;
+    case 'Task':
+    case 'Agent':
+      return `<div class="tool-section"><div class="lbl">${t('subagent_task')}</div><pre style="white-space:pre-wrap;font-family:var(--font-ui);font-size:13px">${esc(i.prompt || '')}</pre></div>${liveSection(p)}${resultSection(p)}`;
     default: {
       const inputJson = JSON.stringify(i, null, 2);
       const showInput = inputJson && inputJson !== '{}';

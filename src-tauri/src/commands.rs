@@ -493,6 +493,7 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     st.db.conv_delete(&id)?;
     st.code_sessions.lock().remove(&id);
     st.shells.kill_conversation(&id);
+    st.subagents.forget_conversation(&id);
     st.terminals.close_conversation(&id);
     st.live.lock().remove(&id);
     // Prompts still waiting for this conversation: drop them (the run was
@@ -1031,6 +1032,13 @@ pub async fn usage_stats(state: St<'_>, conversation_id: String) -> AppResult<Va
         let o = u["output_tokens"].as_u64().unwrap_or(0);
         let cr = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
         let cw = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        let su = &m.meta["subagent_usage"];
+        let (i, o, cr, cw) = (
+            i + su["input_tokens"].as_u64().unwrap_or(0),
+            o + su["output_tokens"].as_u64().unwrap_or(0),
+            cr + su["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            cw + su["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        );
         tot.0 += i;
         tot.1 += o;
         tot.2 += cr;
@@ -1471,4 +1479,107 @@ pub async fn hooks_trust(state: St<'_>, root: String, hash: Option<String>) -> A
     }
     s.save(&st.db)?;
     Ok(())
+}
+
+// ------------------------------------------------------------- sub-agents
+
+#[tauri::command]
+pub async fn subagents_list(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    Ok(json!(state.subagents.list(&conversation_id)))
+}
+
+#[tauri::command]
+pub async fn subagent_output(state: St<'_>, id: String) -> AppResult<String> {
+    state.subagents.log(&id).ok_or_else(|| AppError::msg("This sub-agent is gone."))
+}
+
+#[tauri::command]
+pub async fn subagent_stop(state: St<'_>, id: String) -> AppResult<bool> {
+    Ok(state.subagents.stop(&id))
+}
+
+#[tauri::command]
+pub async fn subagents_clear(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    state.subagents.clear_finished(&conversation_id);
+    Ok(())
+}
+
+// ------------------------------------------------------------- /doctor
+
+fn dir_size(p: &std::path::Path, budget: &mut usize) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+    let mut n = 0;
+    for e in rd.flatten() {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        match e.file_type() {
+            Ok(t) if t.is_dir() => n += dir_size(&e.path(), budget),
+            Ok(_) => n += e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => {}
+        }
+    }
+    n
+}
+
+/// Health checks for the app and (optionally) a code session.
+#[tauri::command]
+pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let settings = st.settings.read().clone();
+    let mut checks: Vec<Value> = vec![];
+    let mut add = |name: &str, status: &str, detail: String| checks.push(json!({"name": name, "status": status, "detail": detail}));
+
+    add("App", "ok", format!("ClaudeRust {} on {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH));
+    let has_key = st.api_key.read().is_some();
+    add("API key", if has_key { "ok" } else { "warn" }, if has_key { format!("set · endpoint {}", settings.base_url) } else { "not set (chat and the built-in agent need one; Claude Code uses its own sign-in)".into() });
+    if has_key {
+        let r = match st.client() {
+            Ok(c) => tokio::time::timeout(std::time::Duration::from_secs(10), c.list_models()).await.ok().map(|r| r.map(|m| m.len())),
+            Err(_) => None,
+        };
+        match r {
+            Some(Ok(n)) => add("API connection", "ok", format!("reachable · {n} models")),
+            Some(Err(e)) => add("API connection", "error", e.to_string()),
+            None => add("API connection", "error", "no answer within 10 s".into()),
+        }
+    }
+    let cc = crate::claudecode::cli_info(&settings.claude_code_path).await;
+    if cc["found"] == true {
+        add("Claude Code CLI", "ok", format!("{} · {}", cc["version"].as_str().unwrap_or("?"), cc["path"].as_str().unwrap_or("")));
+    } else {
+        add("Claude Code CLI", "warn", "not found (needed for the Claude Code engine and subscription sign-in)".into());
+    }
+    match crate::gitops::git(&std::env::temp_dir(), &["--version"]).await {
+        Ok(v) => add("git", "ok", v.trim().to_string()),
+        Err(_) => add("git", "warn", "not found (changes, worktrees and checkpoints need git)".into()),
+    }
+    let shell = if cfg!(windows) { "powershell" } else if which::which("bash").is_ok() { "bash" } else { "sh" };
+    add("Shell", "ok", shell.to_string());
+    for s in st.mcp.statuses().await {
+        let v = serde_json::to_value(&s).unwrap_or_default();
+        let status = v["status"].as_str().unwrap_or("");
+        add(&format!("MCP: {}", v["name"].as_str().unwrap_or("?")), if status == "connected" { "ok" } else if matches!(status, "connecting" | "starting" | "disabled") { "warn" } else { "error" },
+            format!("{status}{}", v["error"].as_str().map(|e| format!(" — {e}")).unwrap_or_default()));
+    }
+    let mut budget = 20_000;
+    let cp = dir_size(&st.data_dir.join("checkpoints"), &mut budget);
+    add("Checkpoints", "ok", format!("{} · {:.1} MB", if settings.code_checkpoints { "on" } else { "off" }, cp as f64 / 1_048_576.0));
+    if let Some(id) = conversation_id {
+        if let Ok(conv) = st.db.conv_get(&id) {
+            if let Some(cwd) = conv.cwd.clone() {
+                let p = std::path::PathBuf::from(&cwd);
+                add("Project folder", if p.is_dir() { "ok" } else { "error" }, cwd.clone());
+                add("Git repository", "ok", crate::worktree::repo_root(&p).map(|r| r.display().to_string()).unwrap_or_else(|| "no (changes are tracked from the agent's edits)".into()));
+                let mem: Vec<String> = crate::memory::files(&p).into_iter().filter(|f| f["exists"] == true).map(|f| f["path"].as_str().unwrap_or("").to_string()).collect();
+                add("Memory files", "ok", if mem.is_empty() { "none".into() } else { mem.join(", ") });
+                let hooks = engine::hook_config(&st, &p);
+                let n: usize = hooks.events.values().map(|v| v.len()).sum();
+                add("Hooks", if hooks.untrusted.is_some() { "warn" } else { "ok" }, format!("{n} active{}", if hooks.untrusted.is_some() { " · project hooks not trusted yet" } else { "" }));
+                add("Engine", "ok", conv.options["engine"].as_str().unwrap_or("builtin").to_string());
+            }
+        }
+    }
+    Ok(json!(checks))
 }
