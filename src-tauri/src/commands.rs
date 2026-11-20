@@ -1868,3 +1868,19 @@ pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, 
     let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
     Ok(msg)
 }
+
+// ------------------------------------------------------------- architecture map
+
+#[tauri::command]
+pub async fn arch_map(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.unwrap_or(cwd);
+    let mut v = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || crate::archmap::build(&root)
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))?;
+    v["root"] = json!(root);
+    Ok(v)
+}

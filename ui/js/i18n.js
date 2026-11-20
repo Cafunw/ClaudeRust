@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_map: "Map",
+  map_filter: "Filter files…",
+  map_empty: "No Rust, JavaScript/TypeScript, Python or Go source files found.",
+  map_help: "{n} files · {e} imports — scroll to zoom, drag to pan, click a file to focus it, double-click to mention it",
+  map_lines: "lines",
+  map_imports: "imports {n}",
+  map_imported_by: "imported by {n}",
+  map_truncated: "large project: showing the most connected files",
   pal_new_code: "New code session",
   pal_appearance: "Appearance",
   pal_import: "Import from Claude",
@@ -313,6 +321,14 @@ const en = {
 };
 
 const tr = {
+  ws_map: "Harita",
+  map_filter: "Dosyaları süz…",
+  map_empty: "Rust, JavaScript/TypeScript, Python ya da Go kaynak dosyası bulunamadı.",
+  map_help: "{n} dosya · {e} içe aktarma — yakınlaştırmak için kaydırın, kaydırmak için sürükleyin, odaklanmak için tıklayın, etiketlemek için çift tıklayın",
+  map_lines: "satır",
+  map_imports: "{n} içe aktarır",
+  map_imported_by: "{n} yerde içe aktarılır",
+  map_truncated: "büyük proje: en bağlantılı dosyalar gösteriliyor",
   pal_new_code: "Yeni kod oturumu",
   pal_appearance: "Görünüm",
   pal_import: "Claude'dan içe aktar",

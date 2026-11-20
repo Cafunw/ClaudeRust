@@ -1,6 +1,7 @@
 //! ClaudeRust — a lightweight Claude desktop client written in Rust.
 
 pub mod anthropic;
+pub mod archmap;
 pub mod artifacts;
 pub mod claudecode;
 pub mod attachments;
@@ -330,6 +331,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::arch_map,
             commands::commit_message_suggest,
             commands::git_commit,
             commands::watch_start,
