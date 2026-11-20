@@ -6,6 +6,11 @@ import { call } from './api.js';
 import { esc, modal } from './util.js';
 
 const builtins = [];
+let hashHandler = null;
+
+/** Handler for messages starting with "# " (quick memory). Resolves true (handled), false (send it) or null (cancelled). */
+export function registerHashHandler(fn) { hashHandler = fn; }
+export async function handleHash(text, ctx) { return hashHandler ? hashHandler(text, ctx) : false; }
 
 /**
  * Register a built-in command.

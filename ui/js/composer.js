@@ -166,6 +166,11 @@ export function createComposer(opts) {
     busy = true; updateSend();
     const atts = attachments.slice();
     try {
+      if (mode === 'code' && /^#\s+\S/.test(text) && !text.trim().includes('\n') && !atts.length) {
+        const r = await slash.handleHash(text.trim(), cmdContext());
+        if (r === true) { ta.value = ''; autoGrow(ta); if (opts.draftKey) store.drafts.delete(opts.draftKey); return; }
+        if (r === null) return;
+      }
       if (text.trim().startsWith('/') && !atts.length) {
         const r = await slash.handle(text, cmdContext());
         if (r && r.handled) {

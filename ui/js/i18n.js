@@ -1,5 +1,18 @@
 // UI strings: English and Turkish.
 const en = {
+  cmd_memory: "Edit memory files (CLAUDE.md, AGENTS.md)",
+  memory_title: "Memory",
+  memory_hint: "Claude reads these at the start of every turn. Use @path to import other files.",
+  memory_new: "new",
+  memory_saved: "Memory saved.",
+  memory_added: "Added to {file}.",
+  memory_quick_header: "Remember this in…",
+  memory_send_instead: "Send as a message instead",
+  memory_scope_project: "Project memory",
+  memory_scope_local: "Private project memory",
+  memory_scope_agents: "AGENTS.md",
+  memory_scope_user: "User memory (all projects)",
+  memory_scope_folder: "Folder memory",
   ws_plan: "Plan",
   plan_empty: "No plan or todo list yet. In plan mode Claude researches first and proposes a plan here.",
   plan_start: "Switch to plan mode",
@@ -194,6 +207,19 @@ const en = {
 };
 
 const tr = {
+  cmd_memory: "Hafıza dosyalarını düzenle (CLAUDE.md, AGENTS.md)",
+  memory_title: "Hafıza",
+  memory_hint: "Claude bunları her turun başında okur. Başka dosyaları eklemek için @yol kullanın.",
+  memory_new: "yeni",
+  memory_saved: "Hafıza kaydedildi.",
+  memory_added: "{file} dosyasına eklendi.",
+  memory_quick_header: "Bunu şuraya kaydet…",
+  memory_send_instead: "Bunun yerine mesaj olarak gönder",
+  memory_scope_project: "Proje hafızası",
+  memory_scope_local: "Özel proje hafızası",
+  memory_scope_agents: "AGENTS.md",
+  memory_scope_user: "Kullanıcı hafızası (tüm projeler)",
+  memory_scope_folder: "Klasör hafızası",
   ws_plan: "Plan",
   plan_empty: "Henüz plan ya da yapılacaklar listesi yok. Plan modunda Claude önce araştırır ve planını burada önerir.",
   plan_start: "Plan moduna geç",

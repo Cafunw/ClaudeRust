@@ -876,3 +876,13 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .plan-badge.rejected { background: var(--danger-soft); color: var(--danger); }
 .plan-md { font-size: 13.5px; }
 .spinner.tiny { width: 9px; height: 9px; border-width: 1.5px; }
+
+/* memory editor */
+.mem-ed { display: flex; gap: 14px; min-height: 360px; }
+.mem-list { width: 210px; display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+.mem-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; background: none; text-align: left; cursor: pointer; color: var(--text-0); font-size: 13px; min-width: 0; }
+.mem-item span { font-size: 11.5px; color: var(--text-2); max-width: 100%; }
+.mem-item.on { background: var(--bg-2); border-color: var(--border); }
+.mem-main { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.mem-main textarea { flex: 1; min-height: 300px; font-family: var(--font-mono); font-size: 12.5px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-0); color: var(--text-0); resize: vertical; }
+.mem-foot { display: flex; align-items: center; gap: 8px; }

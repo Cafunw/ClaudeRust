@@ -10,6 +10,7 @@ import { setToolProgress } from './parts.js';
 import * as workspace from './workspace.js';
 import './commands_builtin.js';
 import './rewind.js';
+import './memory_ui.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';

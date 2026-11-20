@@ -19,6 +19,7 @@ pub mod highlight;
 pub mod import;
 pub mod markdown;
 pub mod mcp;
+pub mod memory;
 pub mod models;
 pub mod prompts;
 pub mod render;
@@ -323,6 +324,9 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::memory_files,
+            commands::memory_save,
+            commands::memory_append,
             commands::plan_state,
             commands::rewind,
             commands::rewind_info,

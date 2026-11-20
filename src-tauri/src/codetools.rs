@@ -1470,32 +1470,7 @@ pub fn env_snapshot(cwd: &Path, model: &str) -> String {
 
 /// Concatenated CLAUDE.md memory: user-level then project-level files.
 pub fn load_memory(cwd: &Path) -> String {
-    let mut parts = vec![];
-    if let Some(home) = dirs::home_dir() {
-        let p = home.join(".claude").join("CLAUDE.md");
-        if let Ok(t) = std::fs::read_to_string(&p) {
-            parts.push(format!("Contents of {} (user instructions for all projects):\n\n{}", p.display(), t.trim()));
-        }
-    }
-    // walk up from cwd collecting CLAUDE.md (root-most first)
-    let mut dirs_up = vec![];
-    let mut d = Some(cwd);
-    while let Some(x) = d {
-        dirs_up.push(x.to_path_buf());
-        d = x.parent();
-    }
-    dirs_up.reverse();
-    for dir in dirs_up {
-        for name in ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
-            let p = dir.join(name);
-            if let Ok(t) = std::fs::read_to_string(&p) {
-                if !t.trim().is_empty() {
-                    parts.push(format!("Contents of {} (project instructions):\n\n{}", p.display(), truncate_middle(t.trim(), 40_000)));
-                }
-            }
-        }
-    }
-    parts.join("\n\n")
+    crate::memory::load(cwd)
 }
 
 #[cfg(test)]

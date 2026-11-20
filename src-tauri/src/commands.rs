@@ -315,6 +315,15 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     }
     // @mentions: include the files' contents (the Claude Code CLI expands
     // them itself).
+    // Pick up edits to CLAUDE.md / AGENTS.md since the session started.
+    if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
+        if let Some(cwd) = &conv.cwd {
+            let mem = crate::memory::load(std::path::Path::new(cwd));
+            if conv.options["memory"].as_str() != Some(mem.as_str()) {
+                engine::update_conv_options(&st, &conv.id, |o| o["memory"] = json!(mem));
+            }
+        }
+    }
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE && req.text.contains('@') {
         if let Some(cwd) = &conv.cwd {
             let session = st.code_session(&conv.id, cwd);
@@ -1331,4 +1340,27 @@ mod plan_tests {
         let v2 = plan_state_of(&path[..3]);
         assert_eq!(v2["plan_status"], "pending");
     }
+}
+
+// ------------------------------------------------------------- memory files
+
+fn conv_cwd(st: &AppState, conversation_id: &str) -> AppResult<std::path::PathBuf> {
+    let c = st.db.conv_get(conversation_id)?;
+    c.cwd.map(std::path::PathBuf::from).ok_or_else(|| AppError::msg("This conversation has no project folder."))
+}
+
+#[tauri::command]
+pub async fn memory_files(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    Ok(json!(crate::memory::files(&conv_cwd(&state, &conversation_id)?)))
+}
+
+#[tauri::command]
+pub async fn memory_save(state: St<'_>, conversation_id: String, path: String, content: String) -> AppResult<()> {
+    crate::memory::save(&conv_cwd(&state, &conversation_id)?, std::path::Path::new(&path), &content)
+}
+
+#[tauri::command]
+pub async fn memory_append(state: St<'_>, conversation_id: String, scope: String, note: String) -> AppResult<String> {
+    let p = crate::memory::append(&conv_cwd(&state, &conversation_id)?, &scope, &note)?;
+    Ok(p.to_string_lossy().to_string())
 }
