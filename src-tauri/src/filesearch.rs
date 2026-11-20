@@ -208,7 +208,7 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
             let numbered: String = content
                 .lines()
                 .enumerate()
-                .filter(|(i, _)| *i + 1 >= from && *i + 1 <= to)
+                .filter(|(i, _)| *i + 1 >= from && *i < to)
                 .map(|(i, l)| format!("{:>6}\t{l}\n", i + 1))
                 .collect();
             total += numbered.len();
