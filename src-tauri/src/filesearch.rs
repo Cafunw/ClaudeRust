@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 const MAX_FILES: usize = 60_000;
 const CACHE_TTL: Duration = Duration::from_secs(8);
 
-static CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, std::sync::Arc<Vec<(String, bool)>>)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Relative path and whether it is a directory.
+type FileList = std::sync::Arc<Vec<(String, bool)>>;
+
+static CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, FileList)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Relative paths under `root` (files and directories), .gitignore-aware.
-pub fn list(root: &Path) -> std::sync::Arc<Vec<(String, bool)>> {
+pub fn list(root: &Path) -> FileList {
     if let Some((t, v)) = CACHE.lock().get(root) {
         if t.elapsed() < CACHE_TTL {
             return v.clone();
