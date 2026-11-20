@@ -72,7 +72,7 @@ export function createComposer(opts) {
     const mb = $('[data-act=mode]', el);
     if (mb) {
       mb.className = `mode-btn ${st.permission_mode}`;
-      const ic = { default: 'shield', acceptEdits: 'edit', plan: 'compass', bypassPermissions: 'zap' }[st.permission_mode] || 'shield';
+      const ic = { default: 'shield', auto: 'sparkle', acceptEdits: 'edit', plan: 'compass', bypassPermissions: 'zap' }[st.permission_mode] || 'shield';
       mb.innerHTML = `${icon(ic, 14)} ${esc(t('mode_' + st.permission_mode))}`;
     }
     updateSend();
@@ -277,7 +277,7 @@ export function createComposer(opts) {
   }
 
   function modeMenu(anchor) {
-    const modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+    const modes = ['default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'];
     showMenu(anchor, modes.map((m) => ({ label: t('mode_' + m), sub: t('mode_' + m + '_d'), checked: st.permission_mode === m, onClick: () => persist({ permission_mode: m }) })), { placement: 'top-start', width: 300 });
   }
 

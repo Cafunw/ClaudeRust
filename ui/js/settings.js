@@ -246,7 +246,7 @@ const RENDER = {
     };
     drawStatus();
     body.appendChild(h(`<p class="help" style="margin:-6px 0 18px">${esc(t('cc_explain'))}</p>`));
-    const modes = ['default', 'acceptEdits', 'plan', 'bypassPermissions'].map((m) => [m, t('mode_' + m)]);
+    const modes = ['default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'].map((m) => [m, t('mode_' + m)]);
     body.appendChild(row(t('default_mode'), '', select('code_permission_mode', modes)));
     body.appendChild(row(t('code_model'), '', select('code_model', modelOptions())));
     const to = textField('bash_timeout_secs', { type: 'number' });

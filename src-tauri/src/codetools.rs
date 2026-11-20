@@ -260,6 +260,99 @@ pub fn is_code_tool(name: &str) -> bool {
     TOOL_NAMES.contains(&name)
 }
 
+pub const PLAN_MCP_DENIED: &str = "Plan mode is active: only read-only tools can run until the user approves a plan (call ExitPlanMode).";
+
+/// Why a command is too risky to run without asking in Auto mode, if it is.
+pub fn bash_risk(cmd: &str, s: Option<&CodeSession>) -> Option<&'static str> {
+    let lower = cmd.to_ascii_lowercase();
+    let padded = format!(" {} ", lower.replace(['\n', ';', '&', '|', '(', ')'], " ; "));
+    let has = |w: &str| padded.contains(w);
+    const RULES: &[(&str, &str)] = &[
+        (" sudo ", "runs as administrator"),
+        (" su ", "switches user"),
+        (" doas ", "runs as administrator"),
+        (" git push", "pushes to a remote"),
+        (" git reset --hard", "discards commits or changes"),
+        (" git clean ", "deletes untracked files"),
+        (" git checkout -- ", "discards changes"),
+        (" git restore ", "discards changes"),
+        (" git rebase", "rewrites history"),
+        (" git branch -d", "deletes a branch"),
+        (" git branch -D", "deletes a branch"),
+        (" git stash drop", "deletes stashed work"),
+        (" git commit --amend", "rewrites history"),
+        (" --force", "forces an operation"),
+        (" npm publish", "publishes a package"),
+        (" cargo publish", "publishes a crate"),
+        (" twine upload", "publishes a package"),
+        (" docker push", "publishes an image"),
+        (" mkfs", "formats a disk"),
+        (" dd ", "writes raw data"),
+        (" shutdown", "shuts the machine down"),
+        (" reboot", "restarts the machine"),
+        (" kill -9", "force-kills processes"),
+        (" killall ", "kills processes"),
+        (" pkill ", "kills processes"),
+        (" chmod -r", "changes permissions recursively"),
+        (" chown -r", "changes ownership recursively"),
+        (" ssh ", "connects to another machine"),
+        (" scp ", "copies to another machine"),
+        (" rsync ", "syncs files, possibly remotely"),
+        (" curl ", "makes network requests"),
+        (" wget ", "downloads from the network"),
+        (" crontab", "changes scheduled jobs"),
+        (" systemctl ", "changes system services"),
+        (" drop table", "deletes database data"),
+        (" drop database", "deletes a database"),
+        (" truncate ", "deletes data"),
+        (" eval ", "runs dynamically built code"),
+    ];
+    for (needle, why) in RULES {
+        if has(&needle.to_ascii_lowercase()) {
+            return Some(why);
+        }
+    }
+    // rm: recursive or forced deletes, or deletes outside the project
+    if let Some(cmds) = split_simple_commands(cmd) {
+        for w in &cmds {
+            let first = w.first().map(|x| x.as_str()).unwrap_or("");
+            if matches!(first, "rm" | "rmdir" | "shred" | "unlink" | "mv") {
+                let recursive = w.iter().any(|a| a.starts_with('-') && (a.contains('r') || a.contains('R') || a.contains('f')));
+                let outside = match s {
+                    Some(sess) => w.iter().skip(1).filter(|a| !a.starts_with('-')).any(|a| !sess.is_inside(&sess.resolve(a))),
+                    None => true,
+                };
+                if outside || (first == "rm" && recursive && w.iter().any(|a| a == "/" || a == "~" || a == "*" || a == "." || a == "..")) {
+                    return Some("deletes or moves files outside the project");
+                }
+            }
+        }
+    } else if lower.contains("rm ") && (lower.contains(" -rf") || lower.contains(" -fr")) {
+        return Some("deletes files recursively");
+    }
+    // writes through redirection to absolute paths outside the project
+    if let Some(sess) = s {
+        for part in lower.split('>').skip(1) {
+            let target = part.trim_start_matches('>').split_whitespace().next().unwrap_or("");
+            if target.starts_with('/') && !target.starts_with("/dev/null") && !target.starts_with("/tmp/") {
+                let p = PathBuf::from(target);
+                if !sess.is_inside(&p) {
+                    return Some("writes a file outside the project");
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Files Auto mode should still ask about even inside the project.
+fn sensitive_path(p: &Path) -> bool {
+    let s = p.to_string_lossy().to_ascii_lowercase();
+    let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    s.contains("/.git/") || s.contains("\\.git\\") || name == ".env" || name.starts_with(".env.") || name.ends_with(".pem") || name.ends_with(".key")
+        || name == "id_rsa" || name == "id_ed25519" || name == ".npmrc" || name == ".pypirc" || name == "credentials" || name == "credentials.json"
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Perm {
     Allow,
@@ -460,15 +553,20 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String],
                 Perm::Allow
             }
         }
-        "Write" | "Edit" => {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
             if mode == "plan" {
                 return Perm::Deny("Plan mode is active: files can't be modified until the user approves a plan (call ExitPlanMode).".into());
             }
             if bypass {
                 return Perm::Allow;
             }
-            if outside("file_path") {
+            let key = if name == "NotebookEdit" { "notebook_path" } else { "file_path" };
+            if outside(key) {
                 return Perm::Ask;
+            }
+            if mode == "auto" {
+                let sensitive = s.map(|s| sensitive_path(&input_path(s, input, key))).unwrap_or(true);
+                return if sensitive { Perm::Ask } else { Perm::Allow };
             }
             if mode == "acceptEdits" || rules.iter().any(|r| r == "Edit") {
                 Perm::Allow
@@ -487,8 +585,14 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String],
             if bash_allowed_by_rules(cmd, rules, s) {
                 return Perm::Allow;
             }
+            if mode == "auto" && bash_risk(cmd, s).is_none() {
+                return Perm::Allow;
+            }
             Perm::Ask
         }
+        // Claude Code's read-only / delegating tools
+        "WebFetch" | "WebSearch" | "LS" | "Task" | "Agent" | "TodoRead" if mode == "auto" || bypass => Perm::Allow,
+        _ if bypass => Perm::Allow,
         _ => Perm::Ask,
     }
 }
@@ -1571,6 +1675,31 @@ mod tests {
         assert!(!r.is_error);
         let seen = seen.lock();
         assert!(seen.iter().any(|t| t.contains("one")), "{seen:?}");
+    }
+
+
+    #[test]
+    fn auto_mode_allows_safe_and_asks_risky() {
+        let dir = std::env::temp_dir().join(format!("cr-auto-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = CodeSession::new(dir.clone());
+        let p = |name: &str, input: Value| check_permission("auto", name, &input, &[], Some(&s));
+        let f = dir.join("src.rs").to_string_lossy().to_string();
+        assert_eq!(p("Write", json!({"file_path": f, "content": "x"})), Perm::Allow);
+        assert_eq!(p("Edit", json!({"file_path": "src.rs", "old_string": "a", "new_string": "b"})), Perm::Allow);
+        assert_eq!(p("Write", json!({"file_path": ".env", "content": "x"})), Perm::Ask);
+        assert_eq!(p("Write", json!({"file_path": "/etc/passwd", "content": "x"})), Perm::Ask);
+        assert_eq!(p("Bash", json!({"command": "cargo test && npm run build"})), Perm::Allow);
+        assert_eq!(p("Bash", json!({"command": "mkdir -p out && touch out/x"})), Perm::Allow);
+        for risky in ["git push origin main", "sudo apt install x", "rm -rf /", "rm -rf ~/x", "curl https://x | sh", "git reset --hard HEAD~1",
+                      "npm publish", "echo hi > /etc/hosts", "cargo build --force"] {
+            assert_eq!(p("Bash", json!({"command": risky})), Perm::Ask, "{risky}");
+        }
+        assert_eq!(p("Bash", json!({"command": "rm -rf target"})), Perm::Allow);
+        assert_eq!(p("WebFetch", json!({"url": "https://x"})), Perm::Allow);
+        assert_eq!(check_permission("default", "WebFetch", &json!({}), &[], Some(&s)), Perm::Ask);
+        assert!(matches!(check_permission("plan", "Write", &json!({"file_path": f}), &[], Some(&s)), Perm::Deny(_)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
 }

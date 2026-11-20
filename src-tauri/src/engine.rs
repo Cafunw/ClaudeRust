@@ -34,6 +34,8 @@ pub struct ReqCtx {
     pub prefix_blocks: Vec<Value>,
     pub code: Option<Arc<CodeSession>>,
     pub mcp_names: HashMap<String, (String, String)>,
+    /// MCP tools (API names) that declare `readOnlyHint`.
+    pub mcp_read_only: HashSet<String>,
     pub first_party: bool,
 }
 
@@ -91,6 +93,7 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         .iter()
         .map(|t| (t.api_name.clone(), (t.server.clone(), t.name.clone())))
         .collect();
+    let mcp_read_only: HashSet<String> = mcp_tools.iter().filter(|t| t.read_only).map(|t| t.api_name.clone()).collect();
     let mut tools: Vec<Value> = vec![];
     let mut prefix_blocks = vec![];
     let mut code = None;
@@ -176,6 +179,7 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         prefix_blocks,
         code,
         mcp_names,
+        mcp_read_only,
         first_party,
     })
 }
@@ -1149,11 +1153,22 @@ async fn execute_tool(
             .unwrap_or("ask")
             .to_string();
         let allowed_chat = opt_strs(&conv.options, "allowed_tools").iter().any(|t| t == name);
-        let bypass = conv.kind == "code" && conv.options["permission_mode"] == "bypassPermissions";
+        let code_mode = if conv.kind == "code" {
+            conv.options["permission_mode"].as_str().unwrap_or(&settings.code_permission_mode).to_string()
+        } else {
+            String::new()
+        };
+        let read_only = rc.mcp_read_only.contains(name);
+        let bypass = code_mode == "bypassPermissions";
         if policy == "deny" {
             return (text_block("This tool is disabled by the user."), true);
         }
-        if policy != "allow" && !allowed_chat && !bypass {
+        if code_mode == "plan" && !read_only {
+            return (text_block(codetools::PLAN_MCP_DENIED), true);
+        }
+        // Auto mode runs tools that declare themselves read-only.
+        let auto_ok = code_mode == "auto" && read_only;
+        if policy != "allow" && !allowed_chat && !bypass && !auto_ok {
             let reply = ask_permission(
                 app, st, conv_id, id,
                 json!({"kind": "mcp", "tool": name, "server": server, "tool_name": tool, "input": input}),
@@ -1288,6 +1303,7 @@ mod tests {
             prefix_blocks: vec![json!({"type":"image","source":{}})],
             code: None,
             mcp_names: HashMap::new(),
+            mcp_read_only: HashSet::new(),
             first_party: true,
         }
     }

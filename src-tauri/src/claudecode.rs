@@ -356,7 +356,9 @@ async fn run_once(
     .iter()
     .map(|s| s.to_string())
     .collect();
-    args.push(mode.clone());
+    // Auto mode is ours: the CLI asks (default mode) and we answer safe
+    // requests ourselves.
+    args.push(if mode == "auto" { "default".to_string() } else { mode.clone() });
     if !conv.model.trim().is_empty() && conv.model != "default" {
         args.push("--model".into());
         args.push(conv.model.clone());
@@ -644,6 +646,16 @@ async fn run_once(
                     let input = req["input"].clone();
                     let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
                     let kind = if tool == "ExitPlanMode" { "plan" } else { "code" };
+                    // Auto mode: approve safe requests without asking.
+                    let mode_now = st.db.conv_get(conv_id).ok().and_then(|c| c.options["permission_mode"].as_str().map(String::from)).unwrap_or_default();
+                    if mode_now == "auto" && tool != "ExitPlanMode" {
+                        let sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                        if crate::codetools::check_permission("auto", &tool, &input, &[], Some(&sess)) == crate::codetools::Perm::Allow {
+                            write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
+                                "response": {"behavior": "allow", "updatedInput": input, "toolUseID": tool_use_id}}})).await;
+                            continue;
+                        }
+                    }
                     let diff = {
                         let session = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
                         let (tool, input) = (tool.clone(), input.clone());
