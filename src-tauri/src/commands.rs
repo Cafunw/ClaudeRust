@@ -315,6 +315,30 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     }
     // @mentions: include the files' contents (the Claude Code CLI expands
     // them itself).
+    // Hooks (built-in agent): SessionStart on the first message, then
+    // UserPromptSubmit, which can add context or block the message.
+    if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
+        if let Some(cwd) = &conv.cwd {
+            let root = std::path::PathBuf::from(cwd);
+            let hooks = engine::hook_config(&st, &root);
+            if let Some((r, hash, cmds)) = &hooks.untrusted {
+                let _ = app.emit("hooks-untrusted", json!({"conversation_id": conv.id, "root": r, "hash": hash, "commands": cmds}));
+            }
+            let mut extra: Vec<String> = vec![];
+            if conv.current_leaf.is_none() {
+                let o = crate::hooks::run(&hooks, "SessionStart", "", json!({"session_id": conv.id, "source": "startup"}), &root).await;
+                extra.extend(o.context);
+            }
+            let o = crate::hooks::run(&hooks, "UserPromptSubmit", "", json!({"session_id": conv.id, "prompt": req.text}), &root).await;
+            if let Some(reason) = o.block {
+                return Err(AppError::msg(format!("A UserPromptSubmit hook blocked this message: {reason}")));
+            }
+            extra.extend(o.context);
+            for c in extra {
+                content.push(json!({"type": "text", "text": format!("<system-reminder>{c}</system-reminder>")}));
+            }
+        }
+    }
     // Pick up edits to CLAUDE.md / AGENTS.md since the session started.
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
         if let Some(cwd) = &conv.cwd {
@@ -1410,4 +1434,41 @@ pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id
     engine::update_conv_options(&st, &conversation_id, |o| o["pending_compact"] = json!({"summary": s2, "upto": leaf}));
     let _ = app.emit("compacted", json!({"conversation_id": conversation_id, "auto": false}));
     Ok(json!({"summary": summary, "context_before": before}))
+}
+
+// ------------------------------------------------------------- hooks
+
+/// Hooks configured for a conversation's project (for Settings / review).
+#[tauri::command]
+pub async fn hooks_info(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let cfg = engine::hook_config(&state, &cwd);
+    let active: Vec<Value> = cfg
+        .events
+        .iter()
+        .flat_map(|(e, hs)| hs.iter().map(move |h| json!({"event": e, "matcher": h.matcher, "command": h.command})))
+        .collect();
+    Ok(json!({"active": active, "untrusted": cfg.untrusted.map(|(r, h, c)| json!({"root": r, "hash": h, "commands": c}))}))
+}
+
+/// Trust (or stop trusting) a project's current hook configuration.
+#[tauri::command]
+pub async fn hooks_trust(state: St<'_>, root: String, hash: Option<String>) -> AppResult<()> {
+    let st = state.inner().clone();
+    let mut s = st.settings.write();
+    match hash {
+        Some(h) => {
+            // only the configuration that is there now can be trusted
+            let current = crate::hooks::project_hash(std::path::Path::new(&root)).map(|(h, _)| h);
+            if current.as_deref() != Some(h.as_str()) {
+                return Err(AppError::msg("The project's hooks changed; review them again."));
+            }
+            s.trusted_hooks.insert(root, json!(h));
+        }
+        None => {
+            s.trusted_hooks.remove(&root);
+        }
+    }
+    s.save(&st.db)?;
+    Ok(())
 }

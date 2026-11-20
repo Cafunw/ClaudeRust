@@ -667,6 +667,18 @@ pub fn stop(st: &AppState, conv_id: &str) {
     }
 }
 
+/// Hooks that apply to a code session (project hooks only when trusted).
+pub(crate) fn hook_config(st: &AppState, cwd: &std::path::Path) -> crate::hooks::Config {
+    let trusted: HashMap<String, String> = st
+        .settings
+        .read()
+        .trusted_hooks
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    crate::hooks::load(cwd, &trusted)
+}
+
 /// Snapshot the project before a code turn starts (once per user message).
 async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
     let Ok(conv) = st.db.conv_get(conv_id) else { return };
@@ -743,6 +755,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
         }
     }
     let mut steps = 0usize;
+    let mut stop_continues = 0usize;
     loop {
         steps += 1;
         let conv = st.db.conv_get(conv_id)?;
@@ -923,6 +936,32 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             return Err(e);
         }
         if stop_reason.as_deref() != Some("tool_use") {
+            // Stop hooks may ask Claude to keep going (at most 3 times a turn).
+            if conv.kind == "code" && stop_reason.as_deref() == Some("end_turn") && stop_continues < 3 {
+                if let Some(cwd) = conv.cwd.as_deref() {
+                    let root = std::path::PathBuf::from(cwd);
+                    let hooks = hook_config(st, &root);
+                    if hooks.events.contains_key("Stop") {
+                        let o = crate::hooks::run(&hooks, "Stop", "", json!({"session_id": conv_id, "stop_hook_active": stop_continues > 0}), &root).await;
+                        if let Some(reason) = o.block {
+                            stop_continues += 1;
+                            let fb = Message {
+                                id: new_id(),
+                                conversation_id: conv_id.to_string(),
+                                parent_id: Some(am_id.clone()),
+                                role: "user".into(),
+                                content: json!([{"type": "text", "text": format!("Stop hook feedback: {reason}")}]),
+                                meta: json!({"tool_results": true, "hook_feedback": true}),
+                                created_at: now_ms(),
+                            };
+                            st.db.msg_insert(&fb)?;
+                            st.db.conv_set_leaf(conv_id, Some(&fb.id))?;
+                            parent = fb.id;
+                            continue;
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -1160,7 +1199,20 @@ async fn execute_tool(
             };
         }
         let rules = opt_strs(&conv.options, "allowed_rules");
-        match codetools::check_permission(&mode, name, input, &rules, Some(session)) {
+        let root = session.root.clone();
+        let hooks = hook_config(st, &root);
+        let hook_input = json!({"session_id": conv_id, "tool_name": name, "tool_input": input});
+        let pre = crate::hooks::run(&hooks, "PreToolUse", name, hook_input.clone(), &root).await;
+        if let Some(reason) = &pre.block {
+            return (text_block(format!("A PreToolUse hook blocked this tool call: {reason}")), true);
+        }
+        let mut perm = codetools::check_permission(&mode, name, input, &rules, Some(session));
+        match pre.permission.as_deref() {
+            Some("allow") if perm == Perm::Ask => perm = Perm::Allow,
+            Some("ask") if perm == Perm::Allow => perm = Perm::Ask,
+            _ => {}
+        }
+        match perm {
             Perm::Deny(msg) => return (text_block(msg), true),
             Perm::Ask => {
                 let diff = codetools::preview_diff(Some(session), name, input);
@@ -1206,7 +1258,19 @@ async fn execute_tool(
         if matches!(name, "Write" | "Edit" | "Bash") {
             let _ = app.emit("files-changed", json!({"conversation_id": conv_id}));
         }
-        return (out.content, out.is_error);
+        let mut content = out.content;
+        if hooks.events.contains_key("PostToolUse") {
+            let mut post_in = hook_input;
+            post_in["tool_response"] = json!(render::plain_text(&Value::Array(content.clone())));
+            let post = crate::hooks::run(&hooks, "PostToolUse", name, post_in, &root).await;
+            if let Some(reason) = post.block {
+                content.push(json!({"type": "text", "text": format!("PostToolUse hook feedback: {reason}")}));
+            }
+            for c in post.context {
+                content.push(json!({"type": "text", "text": format!("<system-reminder>{c}</system-reminder>")}));
+            }
+        }
+        return (content, out.is_error);
     }
 
     if MEMORY_TOOLS.contains(&name) && conv.kind != "code" {
@@ -1261,6 +1325,13 @@ async fn execute_tool(
                     let _ = s.save(&st.db);
                 }
                 _ => return (denial(&reply), true),
+            }
+        }
+        if let (true, Some(session)) = (conv.kind == "code", rc.code.as_ref()) {
+            let hooks = hook_config(st, &session.root);
+            let pre = crate::hooks::run(&hooks, "PreToolUse", &format!("mcp__{name}"), json!({"session_id": conv_id, "tool_name": format!("mcp__{name}"), "tool_input": input}), &session.root).await;
+            if let Some(reason) = pre.block {
+                return (text_block(format!("A PreToolUse hook blocked this tool call: {reason}")), true);
             }
         }
         let call = st.mcp.call(name, input);

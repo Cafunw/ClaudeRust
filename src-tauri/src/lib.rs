@@ -17,6 +17,7 @@ pub mod extensions;
 pub mod filesearch;
 pub mod gitops;
 pub mod highlight;
+pub mod hooks;
 pub mod import;
 pub mod markdown;
 pub mod mcp;
@@ -325,6 +326,8 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::hooks_info,
+            commands::hooks_trust,
             commands::compact_conversation,
             commands::memory_files,
             commands::memory_save,
