@@ -1172,3 +1172,84 @@ pub async fn worktree_commit(app: AppHandle, state: St<'_>, conversation_id: Str
     let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
     Ok(r)
 }
+
+// ------------------------------------------------------------- checkpoints / rewind
+
+/// Rewind a code session to just before `message_id` (a user message):
+/// the files (if `code`), and/or the conversation (if `conversation`, the
+/// next message then starts a new branch from there). Returns the message
+/// text so the UI can put it back in the composer, and an undo id.
+#[tauri::command]
+pub async fn rewind(app: AppHandle, state: St<'_>, conversation_id: String, message_id: String, code: bool, conversation: bool) -> AppResult<Value> {
+    let st = state.inner().clone();
+    if st.runs.lock().contains_key(&conversation_id) {
+        return Err(AppError::msg("Stop the current response before rewinding."));
+    }
+    let conv = st.db.conv_get(&conversation_id)?;
+    let msg = st.db.msg_get(&message_id)?;
+    if msg.conversation_id != conversation_id || msg.role != "user" {
+        return Err(AppError::msg("Pick one of your messages to rewind to."));
+    }
+    let mut undo = Value::Null;
+    if code {
+        let sha = msg.meta["checkpoint"].as_str().ok_or_else(|| AppError::msg("There is no checkpoint for this message."))?.to_string();
+        let cwd = conv.cwd.clone().ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+        let data = st.data_dir.clone();
+        let before = tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).restore(&sha))
+            .await
+            .map_err(|e| AppError::msg(e.to_string()))??;
+        undo = json!(before);
+        // the agent must re-read files before editing them again
+        if let Some(s) = st.code_sessions.lock().get(&conversation_id) {
+            s.read_files.lock().clear();
+        }
+        let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    }
+    if conversation {
+        st.db.conv_set_leaf(&conversation_id, msg.parent_id.as_deref())?;
+        if conv.options["engine"] == crate::claudecode::ENGINE {
+            // the next message must fork the CLI session before this point
+            engine::update_conv_options(&st, &conversation_id, |o| {
+                if let Some(m) = o.as_object_mut() {
+                    m.remove("cc_tip");
+                }
+            });
+        }
+        engine::emit_conv_updated(&app, &conversation_id);
+    }
+    let text = crate::render::plain_text(&Value::Array(
+        msg.content.as_array().cloned().unwrap_or_default().into_iter().filter(|b| !b["text"].as_str().unwrap_or("").starts_with("<system-reminder>")).collect(),
+    ));
+    Ok(json!({"text": text, "undo": undo}))
+}
+
+/// Undo a code rewind (restore the snapshot taken just before it).
+#[tauri::command]
+pub async fn rewind_undo(app: AppHandle, state: St<'_>, conversation_id: String, undo: String) -> AppResult<()> {
+    let conv = state.db.conv_get(&conversation_id)?;
+    let cwd = conv.cwd.ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    let data = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).restore(&undo))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(())
+}
+
+/// What a rewind to `message_id` would restore: whether a checkpoint exists
+/// and which files changed since.
+#[tauri::command]
+pub async fn rewind_info(state: St<'_>, conversation_id: String, message_id: String) -> AppResult<Value> {
+    let conv = state.db.conv_get(&conversation_id)?;
+    let msg = state.db.msg_get(&message_id)?;
+    let Some(sha) = msg.meta["checkpoint"].as_str().map(String::from) else {
+        return Ok(json!({"checkpoint": false, "files": []}));
+    };
+    let Some(cwd) = conv.cwd else { return Ok(json!({"checkpoint": false, "files": []})) };
+    let data = state.data_dir.clone();
+    let files = tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).changed_since(&sha))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+        .unwrap_or_default();
+    Ok(json!({"checkpoint": true, "files": files}))
+}

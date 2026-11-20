@@ -1,4 +1,5 @@
 // Conversation view: turns, streaming updates, branching, permissions.
+import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
@@ -337,6 +338,11 @@ function renderUserTurn(el, turn) {
   if (String(turn.id).startsWith('pending-')) return;
   const nav = branchNav(turn);
   if (nav) actions.appendChild(nav);
+  if (cur && cur.conv.kind === 'code') {
+    const rb = h(`<button class="icon-btn sm" title="${t('rewind_here')}">${icon('history', 15)}</button>`);
+    rb.onclick = () => rewindTo(turn, text);
+    actions.appendChild(rb);
+  }
   if (text) {
     const eb = h(`<button class="icon-btn sm" title="${t('edit')}">${icon('edit', 15)}</button>`);
     eb.onclick = () => startEdit(el, turn, text);
@@ -344,6 +350,34 @@ function renderUserTurn(el, turn) {
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
     actions.append(eb, cb);
   }
+}
+
+function rewindTo(turn, text) {
+  const c = cur;
+  openRewind({
+    conversationId: c.id,
+    messageId: turn.id,
+    preview: text,
+    onConversationRewound: async (msgText) => {
+      if (cur !== c) return;
+      await reload();
+      c.composer.setText(msgText || text);
+      c.composer.focus();
+    },
+  });
+}
+
+/** /rewind: pick one of the user's messages. */
+export function openRewindPicker() {
+  if (!cur) return;
+  const users = cur.order.map((id) => cur.turns.get(id)).filter((tn) => tn && tn.role === 'user');
+  if (!users.length) return;
+  const items = users.slice(-15).reverse().map((tn) => {
+    const text = (tn.parts.find((p) => p.kind === 'user_text') || {}).text || '';
+    return { label: text.slice(0, 80) || '…', icon: 'history', onClick: () => rewindTo(tn, text) };
+  });
+  const anchor = cur.composer.el;
+  showMenu(anchor, items, { placement: 'top-start', width: 420 });
 }
 
 function startEdit(el, turn, text) {

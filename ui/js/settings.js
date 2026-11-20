@@ -227,6 +227,7 @@ const RENDER = {
   async code(body) {
     body.appendChild(h(`<h3>${t('s_code')}</h3>`));
     body.appendChild(row(t('code_engine'), t('code_engine_d'), select('code_engine', [['auto', t('engine_auto')], ['claude-code', t('engine_cc')], ['builtin', t('engine_builtin')]])));
+    body.appendChild(row(t('checkpoints_setting'), t('checkpoints_setting_d'), toggle('code_checkpoints')));
     body.appendChild(row(t('worktree_setting'), t('worktree_setting_d'), select('code_worktree', [['parallel', t('worktree_parallel')], ['always', t('worktree_always')], ['off', t('worktree_never')]])));
     const pathIn = textField('claude_code_path', { placeholder: t('cc_path_help') });
     pathIn.classList.add('mono');

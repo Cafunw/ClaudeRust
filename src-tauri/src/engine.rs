@@ -665,7 +665,34 @@ pub fn stop(st: &AppState, conv_id: &str) {
     }
 }
 
+/// Snapshot the project before a code turn starts (once per user message).
+async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
+    let Ok(conv) = st.db.conv_get(conv_id) else { return };
+    if conv.kind != "code" || !st.settings.read().code_checkpoints {
+        return;
+    }
+    let Some(cwd) = conv.cwd.clone() else { return };
+    let Ok(path) = st.db.path_to(parent) else { return };
+    let Some(user) = path.iter().rev().find(|m| m.role == "user" && !render::is_tool_result_msg(m)).cloned() else { return };
+    if user.meta["checkpoint"].is_string() {
+        return;
+    }
+    let data = st.data_dir.clone();
+    let label = format!("{conv_id} {}", user.id);
+    let r = tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).snapshot(&label)).await;
+    match r {
+        Ok(Ok(sha)) => {
+            let mut meta = user.meta.clone();
+            meta["checkpoint"] = json!(sha);
+            let _ = st.db.msg_update(&user.id, &user.content, &meta);
+        }
+        Ok(Err(e)) => log::warn!("checkpoint failed: {e}"),
+        Err(e) => log::warn!("checkpoint failed: {e}"),
+    }
+}
+
 async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
+    checkpoint_turn(st, conv_id, &parent).await;
     {
         let conv = st.db.conv_get(conv_id)?;
         if conv.kind == "code" && conv.options["engine"] == crate::claudecode::ENGINE {

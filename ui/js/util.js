@@ -52,13 +52,15 @@ export function fmtTokens(n) {
 }
 
 // ------------------------------------------------------------------ toasts
-export function toast(msg, kind = '') {
+export function toast(msg, kind = '', { action, onAction } = {}) {
   let root = $('.toast-root');
   if (!root) { root = h('<div class="toast-root"></div>'); document.body.appendChild(root); }
-  const el = h(`<div class="toast ${kind}">${esc(msg)}</div>`);
+  const el = h(`<div class="toast ${kind}">${esc(msg)}${action ? ` <button class="toast-action">${esc(action)}</button>` : ''}</div>`);
+  if (action) el.querySelector('.toast-action').onclick = () => { el.remove(); onAction && onAction(); };
   root.appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, kind === 'error' ? 4500 : 2200);
-  setTimeout(() => el.remove(), kind === 'error' ? 4900 : 2600);
+  const ms = kind === 'error' ? 4500 : action ? 8000 : 2200;
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, ms);
+  setTimeout(() => el.remove(), ms + 400);
 }
 
 export function errorToast(e) { toast((e && e.message) || String(e), 'error'); }

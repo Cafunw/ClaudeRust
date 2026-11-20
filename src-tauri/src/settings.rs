@@ -70,6 +70,8 @@ pub struct Settings {
     pub claude_code_path: String,
     /// Git worktrees for code sessions: off | parallel | always
     pub code_worktree: String,
+    /// Snapshot project files before each turn (for rewind).
+    pub code_checkpoints: bool,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -118,6 +120,7 @@ impl Default for Settings {
             code_engine: "auto".into(),
             claude_code_path: String::new(),
             code_worktree: "parallel".into(),
+            code_checkpoints: true,
             tool_policies: Default::default(),
             disabled_mcp_servers: vec![],
             onboarded: false,

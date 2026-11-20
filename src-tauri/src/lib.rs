@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod artifacts;
 pub mod claudecode;
 pub mod attachments;
+pub mod checkpoints;
 pub mod codetools;
 pub mod commands;
 pub mod db;
@@ -322,6 +323,9 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::rewind,
+            commands::rewind_info,
+            commands::rewind_undo,
             commands::worktree_apply,
             commands::worktree_commit,
             commands::file_search,
