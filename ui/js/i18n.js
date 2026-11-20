@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  queue_send: "Queue this message (sent when Claude finishes)",
   ws_history: "History",
   hist_commits: "commits",
   hist_empty: "No commits yet.",
@@ -364,6 +365,7 @@ const en = {
 };
 
 const tr = {
+  queue_send: "Bu mesajı sıraya koy (Claude bitirince gönderilir)",
   ws_history: "Geçmiş",
   hist_commits: "commit",
   hist_empty: "Henüz commit yok.",

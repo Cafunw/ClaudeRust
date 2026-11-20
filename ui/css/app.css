@@ -1015,3 +1015,10 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .hist-msg { margin: 6px 12px; white-space: pre-wrap; font-size: 12px; }
 .hist-file { border-top: 1px solid var(--border); }
 .hist-file summary { padding: 5px 12px; cursor: pointer; font-size: 12.5px; }
+
+/* queued messages */
+.queued { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px 0; }
+.q-item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-1); background: var(--bg-1); border: 1px dashed var(--border); border-radius: 8px; padding: 4px 8px; min-width: 0; }
+.q-item span { flex: 1; min-width: 0; }
+.q-item button { border: 0; background: none; color: var(--text-3); cursor: pointer; display: inline-flex; }
+.send-btn.queue { background: var(--text-1); }

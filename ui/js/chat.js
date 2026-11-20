@@ -63,9 +63,24 @@ export async function openConversation(id, { focus = true } = {}) {
     initial: composerInitial(conv),
     draftKey: id,
     onSend: (text, atts) => sendInConversation(text, atts),
-    onStop: () => call('stop_generation', { conversationId: id }).catch(errorToast),
+    onStop: () => {
+      // stopping brings queued messages back into the box instead of sending them
+      const q = queues.get(id) || [];
+      if (q.length) {
+        const text = q.map((x) => x.text).join('\n\n');
+        queues.set(id, []);
+        showQueue(id);
+        if (cur && cur.id === id) cur.composer.setText(text);
+      }
+      call('stop_generation', { conversationId: id }).catch(errorToast);
+    },
     onOptions: (patch) => persistOptions(patch),
     onEditLast: () => editLastUserMessage(),
+    onQueue: (text, atts) => {
+      if (!queues.has(id)) queues.set(id, []);
+      queues.get(id).push({ text, atts });
+      showQueue(id);
+    },
     context: () => ({ conversationId: id, cwd: cur && cur.conv.cwd, engine: (cur && cur.conv.options && cur.conv.options.engine) || 'builtin', conv: cur && cur.conv }),
   });
   cur.composer = composer;
@@ -82,6 +97,7 @@ export async function openConversation(id, { focus = true } = {}) {
   scrollToBottom(true);
   if (focus) composer.focus();
   artifacts.onConversationOpened(id, cur.artifacts);
+  showQueue(id);
   workspace.setConversation(conv);
   document.title = conv.title || 'ClaudeRust';
 }
@@ -545,9 +561,30 @@ export function onTurnEvent({ conversation_id, turn }) {
   }
 }
 
+// Messages queued while Claude was responding, per conversation.
+const queues = new Map();
+
+function showQueue(convId) {
+  if (!cur || cur.id !== convId) return;
+  const q = queues.get(convId) || [];
+  cur.composer.showQueue(q, (i) => { q.splice(i, 1); showQueue(convId); });
+}
+
+async function sendQueued(convId) {
+  const q = queues.get(convId);
+  if (!q || !q.length) return;
+  const next = q.shift();
+  showQueue(convId);
+  try {
+    if (cur && cur.id === convId) await sendInConversation(next.text, next.atts);
+    else { await call('send_message', { req: { conversation_id: convId, text: next.text, attachment_ids: next.atts.map((a) => a.id).filter(Boolean) } }); emit('conversations-changed'); }
+  } catch (e) { errorToast(e); }
+}
+
 export function onStateEvent({ conversation_id, running, error }) {
   if (running) store.running.add(conversation_id); else store.running.delete(conversation_id);
   emit('running-changed');
+  if (!running && !error && (queues.get(conversation_id) || []).length) setTimeout(() => sendQueued(conversation_id), 300);
   if (!cur || cur.id !== conversation_id) return;
   cur.running = running;
   cur.composer.setRunning(running);

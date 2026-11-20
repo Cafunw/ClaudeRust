@@ -88,6 +88,17 @@ export function createComposer(opts) {
   }
 
   function updateSend() {
+    if (running && opts.onQueue && ta.value.trim()) {
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('stop');
+      sendBtn.classList.add('queue');
+      sendBtn.innerHTML = icon('arrowUp', 18);
+      sendBtn.setAttribute('aria-label', t('queue_send'));
+      sendBtn.title = t('queue_send');
+      return;
+    }
+    sendBtn.classList.remove('queue');
+    sendBtn.title = '';
     if (running) {
       sendBtn.disabled = false;
       sendBtn.classList.add('stop');
@@ -160,7 +171,18 @@ export function createComposer(opts) {
   }
 
   async function send() {
-    if (running) { opts.onStop && opts.onStop(); return; }
+    if (running) {
+      // typing while Claude works queues the message (sent when it finishes)
+      if (ta.value.trim() && opts.onQueue && !attachments.some((a) => a.loading)) {
+        opts.onQueue(ta.value, attachments.slice());
+        ta.value = ''; attachments = []; renderAttachments(); autoGrow(ta);
+        if (opts.draftKey) store.drafts.delete(opts.draftKey);
+        updateSend();
+        return;
+      }
+      opts.onStop && opts.onStop();
+      return;
+    }
     let text = ta.value;
     if ((!text.trim() && !attachments.length) || busy || attachments.some((a) => a.loading)) return;
     busy = true; updateSend();
@@ -324,7 +346,7 @@ export function createComposer(opts) {
     const sendOnEnter = store.settings.send_on_enter !== false;
     if (e.key === 'Enter' && ((sendOnEnter && !e.shiftKey && !e.ctrlKey && !e.metaKey) || (!sendOnEnter && (e.ctrlKey || e.metaKey)))) {
       e.preventDefault();
-      if (!running) send();
+      if (!running || ta.value.trim()) send();
     } else if (e.key === 'ArrowUp' && !ta.value && opts.onEditLast) {
       e.preventDefault();
       opts.onEditLast();
@@ -365,6 +387,18 @@ export function createComposer(opts) {
     state: st,
     focus() { ta.focus(); const n = ta.value.length; ta.setSelectionRange(n, n); },
     setRunning(r) { running = r; updateSend(); },
+    /** Show messages queued while Claude is responding. */
+    showQueue(list, onRemove) {
+      let q = el.querySelector('.queued');
+      if (!list.length) { if (q) q.remove(); return; }
+      if (!q) { q = h('<div class="queued"></div>'); el.insertBefore(q, el.firstChild); }
+      q.innerHTML = '';
+      list.forEach((item, i) => {
+        const c = h(`<div class="q-item">${icon('clock', 12)}<span class="ellipsis">${esc(item.text)}</span><button aria-label="remove">${icon('x', 11)}</button></div>`);
+        c.querySelector('button').onclick = () => onRemove(i);
+        q.appendChild(c);
+      });
+    },
     setText(s) { ta.value = s; autoGrow(ta); updateSend(); },
     getText() { return ta.value; },
     setState(patch) { Object.assign(st, patch); refreshBar(); },
