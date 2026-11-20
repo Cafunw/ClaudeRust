@@ -12,6 +12,7 @@ import './commands_builtin.js';
 import './rewind.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
+import './panes/review.js';
 import './panes/terminal.js';
 import './panes/tasks.js';
 import * as artifacts from './artifacts.js';

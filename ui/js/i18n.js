@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  review_prompt_intro: "Please address these review comments on the current changes:",
+  review_prompt_outro: "Make the changes, then summarize what you did for each comment.",
+  review_placeholder: "Leave a comment for Claude… (Ctrl+Enter to add)",
+  review_add: "Add comment",
+  review_add_title: "Comment on this line",
+  review_send: "Send {n} comment(s)",
+  review_send_d: "Send all comments to Claude as one request",
+  review_clear: "Discard all comments",
   rewind_here: "Rewind to here",
   rewind_title: "Rewind to before this message",
   rewind_files: "{n} file(s) changed since this message:",
@@ -179,6 +187,14 @@ const en = {
 };
 
 const tr = {
+  review_prompt_intro: "Lütfen mevcut değişikliklerle ilgili şu inceleme yorumlarını ele al:",
+  review_prompt_outro: "Değişiklikleri yap, sonra her yorum için ne yaptığını özetle.",
+  review_placeholder: "Claude için bir yorum bırakın… (eklemek için Ctrl+Enter)",
+  review_add: "Yorum ekle",
+  review_add_title: "Bu satıra yorum yap",
+  review_send: "{n} yorumu gönder",
+  review_send_d: "Tüm yorumları tek istek olarak Claude'a gönder",
+  review_clear: "Tüm yorumları sil",
   rewind_here: "Buraya geri sar",
   rewind_title: "Bu mesajın öncesine geri sar",
   rewind_files: "Bu mesajdan sonra {n} dosya değişti:",

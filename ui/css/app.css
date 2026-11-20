@@ -849,3 +849,16 @@ table.kv td:last-child { text-align: right; font-variant-numeric: tabular-nums; 
 .rw-opt[disabled] { opacity: .45; cursor: default; }
 .rw-opt span { font-size: 12.5px; color: var(--text-2); }
 .toast-action { margin-left: 10px; background: none; border: 0; color: var(--accent); font-weight: 600; cursor: pointer; }
+
+/* inline review comments */
+table.dv td.code { position: relative; }
+.rc-add { position: absolute; left: -20px; top: 1px; width: 17px; height: 17px; border-radius: 5px; border: 0; background: var(--accent); color: #fff; display: none; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+table.dv tr:hover .rc-add { display: inline-flex; }
+table.dv td.no + td.no { padding-right: 22px; }
+tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background: var(--bg-1); }
+.rc { display: flex; align-items: flex-start; gap: 8px; font-family: var(--font-ui); font-size: 12.5px; background: var(--bg-0); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 6px 8px; }
+.rc-body { flex: 1; white-space: pre-wrap; color: var(--text-0); }
+.rc-icon { color: var(--accent); padding-top: 2px; }
+.rc-edit { display: flex; flex-direction: column; gap: 6px; font-family: var(--font-ui); }
+.rc-edit textarea { width: 100%; resize: vertical; font: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-0); color: var(--text-0); }
+.rc-actions { display: flex; justify-content: flex-end; gap: 6px; }
