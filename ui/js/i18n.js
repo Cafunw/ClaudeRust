@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_toggle: 'Toggle side panel', ws_terminal: 'Terminal', ws_tasks: 'Tasks', ws_tasks_d: 'Background commands and agents of this session',
+  ws_tasks_empty: 'No background tasks. Commands Claude runs in the background appear here.', clear_finished: 'Clear finished', no_output: '(no output yet)',
+  term_exited: '[process exited — press Enter to start a new shell]',
   new_chat: 'New chat', chats: 'Chats', projects: 'Projects', artifacts: 'Artifacts', code: 'Code',
   starred: 'Starred', recents: 'Recents', view_all: 'View all', search_chats: 'Search your chats…',
   settings: 'Settings', language: 'Language', help: 'Get help', remove_key: 'Remove API key',
@@ -123,6 +126,9 @@ const en = {
 };
 
 const tr = {
+  ws_toggle: 'Yan paneli aç/kapat', ws_terminal: 'Terminal', ws_tasks: 'Görevler', ws_tasks_d: 'Bu oturumun arka plan komutları ve ajanları',
+  ws_tasks_empty: 'Arka plan görevi yok. Claude\'un arka planda çalıştırdığı komutlar burada görünür.', clear_finished: 'Bitenleri temizle', no_output: '(henüz çıktı yok)',
+  term_exited: '[işlem sona erdi — yeni kabuk için Enter\'a basın]',
   new_chat: 'Yeni sohbet', chats: 'Sohbetler', projects: 'Projeler', artifacts: 'Artifact’ler', code: 'Kod',
   starred: 'Yıldızlı', recents: 'Son sohbetler', view_all: 'Tümünü gör', search_chats: 'Sohbetlerinde ara…',
   settings: 'Ayarlar', language: 'Dil', help: 'Yardım', remove_key: 'API anahtarını kaldır',

@@ -1,4 +1,5 @@
 // Code page: start coding sessions in a local folder and list past ones.
+import * as workspace from './workspace.js';
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
@@ -134,7 +135,7 @@ export async function renderChats(view) {
   };
   delBtn.onclick = async () => {
     if (!selected.size || !(await confirmDialog(t('confirm_delete_chat')))) return;
-    for (const id of selected) await call('delete_conversation', { id }).catch(errorToast);
+    for (const id of selected) { await call('delete_conversation', { id }).catch(errorToast); workspace.disposeConversation(id); }
     emit('conversations-changed');
     renderChats(view);
   };

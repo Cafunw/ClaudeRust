@@ -1,4 +1,5 @@
 // Conversation view: turns, streaming updates, branching, permissions.
+import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
@@ -76,6 +77,7 @@ export async function openConversation(id, { focus = true } = {}) {
   scrollToBottom(true);
   if (focus) composer.focus();
   artifacts.onConversationOpened(id, cur.artifacts);
+  workspace.setConversation(conv);
   document.title = conv.title || 'ClaudeRust';
 }
 
@@ -101,6 +103,7 @@ function renderTopbar() {
   const usage = h(`<button class="icon-btn" title="${t('usage')}">${icon('info', 17)}</button>`);
   usage.onclick = () => showUsage(usage);
   cur.topEl.append(usage);
+  if (c.kind === 'code') cur.topEl.append(workspace.toggleButton());
   if (cur.artifacts.size) {
     const ab = h(`<button class="icon-btn" title="${t('artifacts')}">${icon('layers', 17)}</button>`);
     ab.onclick = () => artifacts.togglePanel(cur.id, cur.artifacts);
@@ -153,6 +156,7 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
     { label: t('delete'), icon: 'trash', danger: true, onClick: async () => {
       if (!(await confirmDialog(t('confirm_delete_chat')))) return;
       await call('delete_conversation', { id: c.id });
+      workspace.disposeConversation(c.id);
       emit('conversations-changed');
       if (onDelete) onDelete(); else if (cur && cur.id === c.id) emit('navigate', { name: c.kind === 'code' ? 'code' : 'new' });
     } },

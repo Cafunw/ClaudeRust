@@ -25,6 +25,11 @@ fn set_ours(key: &'static str, val: &str) {
     }
 }
 
+/// Names of the rendering variables we set for our own WebView.
+pub fn vars_we_set() -> Vec<&'static str> {
+    SET_VARS.lock().map(|v| v.clone()).unwrap_or_default()
+}
+
 /// Remove the rendering variables we set from a child's environment.
 pub fn scrub_child_env(cmd: &mut tokio::process::Command) {
     if let Ok(v) = SET_VARS.lock() {

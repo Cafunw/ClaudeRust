@@ -23,6 +23,7 @@ pub mod settings;
 pub mod shellenv;
 pub mod shells;
 pub mod state;
+pub mod terminal;
 pub mod util;
 pub mod view;
 
@@ -317,6 +318,11 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::term_open,
+            commands::term_write,
+            commands::term_resize,
+            commands::term_close,
+            commands::term_list,
             devtools::dev_report,
             commands::shell_output,
             commands::shell_kill,
@@ -352,6 +358,7 @@ pub fn run() {
             if let Some(st) = handle.try_state::<Arc<AppState>>() {
                 let st = st.inner().clone();
                 st.shells.kill_all();
+                st.terminals.close_all();
                 tauri::async_runtime::block_on(async move { st.mcp.stop_all().await });
             }
         }

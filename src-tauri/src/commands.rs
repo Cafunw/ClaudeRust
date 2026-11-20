@@ -409,6 +409,7 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     st.db.conv_delete(&id)?;
     st.code_sessions.lock().remove(&id);
     st.shells.kill_conversation(&id);
+    st.terminals.close_conversation(&id);
     st.live.lock().remove(&id);
     // Prompts still waiting for this conversation: drop them (the run was
     // cancelled above, so nothing will answer them).
@@ -994,4 +995,41 @@ pub async fn shell_kill(state: St<'_>, id: String) -> AppResult<bool> {
 pub async fn shells_clear(state: St<'_>, conversation_id: String) -> AppResult<()> {
     state.shells.clear_finished(&conversation_id);
     Ok(())
+}
+
+// ------------------------------------------------------------- terminals
+
+#[tauri::command]
+pub async fn term_open(app: AppHandle, state: St<'_>, conversation_id: String, cwd: Option<String>, cols: u16, rows: u16) -> AppResult<Value> {
+    let cwd = match cwd {
+        Some(c) if !c.is_empty() => c,
+        _ => state
+            .db
+            .conv_get(&conversation_id)
+            .ok()
+            .and_then(|c| c.cwd)
+            .unwrap_or_default(),
+    };
+    state.terminals.open(&app, &conversation_id, &cwd, cols, rows)
+}
+
+#[tauri::command]
+pub async fn term_write(state: St<'_>, id: String, data: String) -> AppResult<()> {
+    state.terminals.write(&id, &data)
+}
+
+#[tauri::command]
+pub async fn term_resize(state: St<'_>, id: String, cols: u16, rows: u16) -> AppResult<()> {
+    state.terminals.resize(&id, cols, rows)
+}
+
+#[tauri::command]
+pub async fn term_close(state: St<'_>, id: String) -> AppResult<()> {
+    state.terminals.close(&id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn term_list(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    Ok(json!(state.terminals.list(&conversation_id)))
 }

@@ -54,11 +54,11 @@ Architecture rules followed throughout:
 
 - [x] F1. ✅ Tam — Session lifecycle: deleting a conversation now stops its run, kills its background shells, drops its live state and pending permission prompts.
 - [x] F2. ✅ Tam — Bash output streams live into the tool card (`tool-progress` event, 120 ms throttle); new `shells.rs` registry with `run_in_background`, `BashOutput` (incremental, regex filter), `KillShell` (conversation-scoped); shells killed on delete and app exit; `shells_*` commands for the Tasks pane. Tests: `background_shell_output_and_kill`, `bash_reports_live_output`, shells buffer tests. Verified in the app (live steps, dev server started/listed/killed).
-- [ ] F3. Integrated PTY terminal (portable-pty backend, terminal pane in the UI).
+- [x] F3. ✅ Tam — Real PTY terminal: `terminal.rs` (portable-pty, user's login shell, UTF-8-safe `term-output` events, resize, close on delete/exit) + Terminal pane with vendored xterm.js 6 (lazy-loaded, theme-aware, restart on exit). Ctrl+` toggles it.
 - [ ] F4. Git & diff engine: session change detection (`git status`/snapshot), per-file diff, revert file / revert all.
 - [ ] F5. Permission layer: Auto mode (safe actions auto-approved, risky ones ask) in both engines; plan mode also gates MCP tools; tests.
 - [ ] F6. Composer: `@` file mention picker (fuzzy, .gitignore-aware) and `/` slash command menu (built-ins + `.claude/commands/*.md` + MCP prompts).
-- [ ] F7. Resizable side workspace panel (Changes / Terminal / Plan / Tasks / Preview tabs), widths persisted.
+- [x] F7. ✅ Tam — `workspace.js`: resizable side panel for code sessions with a pane registry (per-conversation pane DOM kept alive), width/open/tab persisted; Tasks pane lists background shells with live output, elapsed time and stop buttons (badge = running count).
 
 ## Faz 2 — IMPLEMENT
 
@@ -80,3 +80,4 @@ Architecture rules followed throughout:
 
 ## Log
 - F1+F2 done. Also added a debug-only UI automation hook (`devtools.rs`, `CLAUDERUST_EVAL_DIR`) used to drive the app in tests; clippy is clean.
+- F3+F7 done: verified typing into the PTY (`echo`, `ls`) and stopping a dev server from the Tasks pane.

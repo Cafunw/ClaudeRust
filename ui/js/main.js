@@ -7,6 +7,9 @@ import { mountSidebar, refreshSidebar, toggleSidebar } from './sidebar.js';
 import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
 import { setToolProgress } from './parts.js';
+import * as workspace from './workspace.js';
+import './panes/terminal.js';
+import './panes/tasks.js';
 import * as artifacts from './artifacts.js';
 import { renderProjects, renderProject, refreshProjects } from './projects.js';
 import { renderCode, renderChats } from './code.js';
@@ -28,6 +31,7 @@ function layout() {
   document.body.innerHTML = `<div class="app" id="app">
     <aside class="sidebar" id="sidebar"></aside>
     <main class="main"><div class="view" id="view"></div></main>
+    <aside class="workspace-panel hidden" id="workspace-panel"></aside>
     <aside class="artifact-panel hidden" id="artifact-panel"></aside>
   </div>`;
 }
@@ -41,6 +45,7 @@ async function navigate({ name, params = {} }) {
   if (!sameConv) {
     chat.closeCurrent();
     artifacts.close();
+    if (name !== 'chat') workspace.setConversation(null);
   }
   store.route = { name, params };
   saveLocal({ lastRoute: name === 'chat' || name === 'new' || name === 'code' ? { name, params: { id: params.id } } : null });
