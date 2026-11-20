@@ -185,7 +185,7 @@ fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, art
         return None;
     }
     let mut html = String::new();
-    let opts = Opts { math: ctx.math };
+    let opts = Opts { math: ctx.math, breaks: true };
     for seg in artifacts::split(&acc.raw) {
         match seg {
             Segment::Markdown(md) => html.push_str(&markdown::render(&md, opts)),
@@ -493,13 +493,13 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
                     let live = is_streaming && last_block;
                     if let Some(prev) = parts.last_mut().filter(|p| p["kind"] == "thinking") {
                         let raw = format!("{}\n\n{}", prev["raw"].as_str().unwrap_or(""), t);
-                        prev["html"] = json!(markdown::render(raw.trim(), Opts { math: ctx.math }));
+                        prev["html"] = json!(markdown::render(raw.trim(), Opts { math: ctx.math, breaks: true }));
                         prev["raw"] = json!(raw);
                         prev["streaming"] = json!(live);
                     } else {
                         parts.push(json!({
                             "kind": "thinking",
-                            "html": markdown::render(t, Opts { math: ctx.math }),
+                            "html": markdown::render(t, Opts { math: ctx.math, breaks: true }),
                             "raw": t,
                             "redacted": redacted,
                             "streaming": live,

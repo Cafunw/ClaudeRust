@@ -1,14 +1,16 @@
 // Settings modal.
 import { icon } from './icons.js';
 import { t, LANGUAGES } from './i18n.js';
-import { call, isMac } from './api.js';
+import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
 import { $, esc, h, modal, button, toast, errorToast, promptDialog, confirmDialog } from './util.js';
+import { renderImport } from './importer.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
   ['appearance', 'sun', 's_appearance'],
   ['account', 'key', 's_account'],
+  ['import', 'download', 's_import'],
   ['features', 'sparkle', 's_features'],
   ['developer', 'plug', 's_developer'],
   ['code', 'terminal', 's_code'],
@@ -42,7 +44,10 @@ export function openSettings(tab = 'general') {
     body.scrollTop = 0;
     (RENDER[id] || RENDER.general)(body);
   }
-  const off = on('settings-changed', () => { if (['account', 'appearance'].includes(active)) show(active); });
+  const offSettings = on('settings-changed', () => { if (['account', 'appearance'].includes(active)) show(active); });
+  // Slow MCP servers finish starting in the background.
+  const offMcp = onBackend('mcp-changed', () => { if (active === 'developer') show(active); });
+  const off = () => { offSettings(); offMcp.then((u) => u()); };
   current = { show };
   show(tab);
 }
@@ -212,9 +217,7 @@ const RENDER = {
       actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
       actions.appendChild(button(t('install_extension'), '', () => installExtension(draw)));
       if (status.claude_desktop_config) {
-        actions.appendChild(button(t('import_claude'), '', async () => {
-          try { const r = await call('mcp_import_claude_desktop'); toast(t('imported', { n: r.imported })); draw(r); } catch (e) { errorToast(e); }
-        }));
+        actions.appendChild(button(t('import_claude'), '', () => emit('open-settings', 'import')));
       }
       actions.appendChild(h(`<span class="small muted mono ellipsis" style="max-width:100%" title="${esc(status.config_path)}">${esc(status.config_path)}</span>`));
     };
@@ -250,6 +253,8 @@ const RENDER = {
     to.style.width = '120px';
     body.appendChild(row(t('bash_timeout'), '', to));
   },
+
+  import(body) { renderImport(body); },
 
   desktop(body) {
     body.appendChild(h(`<h3>${t('s_desktop')}</h3>`));

@@ -22,7 +22,7 @@ fn read_manifest(zip_path: &Path) -> AppResult<Value> {
     Ok(v)
 }
 
-fn sanitize_name(s: &str) -> String {
+pub(crate) fn sanitize_name(s: &str) -> String {
     let n: String = s
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
@@ -153,7 +153,64 @@ pub fn install(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_
     }
     std::fs::create_dir_all(&dir)?;
     unzip(zip_path, &dir)?;
+    register(&dir, &name, &manifest, config_path, user_values)
+}
 
+/// Install an extension that is already unpacked in a folder (for example one
+/// installed by the Claude desktop app): copy it and register it.
+pub fn install_from_dir(src: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value) -> AppResult<String> {
+    let text = std::fs::read_to_string(src.join("manifest.json"))
+        .map_err(|_| AppError::msg("The extension has no manifest.json."))?;
+    let manifest: Value = serde_json::from_str(&text).map_err(|e| AppError::msg(format!("Invalid manifest.json: {e}")))?;
+    if !manifest["server"].is_object() || manifest["name"].as_str().unwrap_or("").is_empty() {
+        return Err(AppError::msg("manifest.json must define \"name\" and \"server\"."));
+    }
+    let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
+    let dir = extensions_dir.join(&name);
+    let tmp = extensions_dir.join(format!(".{name}.importing"));
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp)?;
+    }
+    copy_dir(src, &tmp)?;
+    // Validate the user config before replacing an existing install.
+    let res = register(&tmp, &name, &manifest, &extensions_dir.join(".dry-run.json"), user_values);
+    let _ = std::fs::remove_file(extensions_dir.join(".dry-run.json"));
+    if let Err(e) = res {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::rename(&tmp, &dir)?;
+    register(&dir, &name, &manifest, config_path, user_values)
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else if ft.is_file() {
+            std::fs::copy(entry.path(), &to)?;
+        } else if ft.is_symlink() {
+            // Keep links that stay inside the bundle (node_modules/.bin etc.).
+            #[cfg(unix)]
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                if target.is_relative() && !target.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    let _ = std::os::unix::fs::symlink(target, &to);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_values: &Value) -> AppResult<String> {
+    let name = name.to_string();
     // user config: provided values, else defaults; check required ones
     let mut user = Map::new();
     let vars = base_vars(&dir);

@@ -296,7 +296,7 @@ function upsertTurn(turn, live = true) {
 function attachmentsHtml(items) {
   return `<div class="user-atts">${items.map((a) => a.src && a.kind === 'image'
     ? `<img src="${esc(a.src)}" alt="${esc(a.name)}" data-zoom>`
-    : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${humanSize(a.size || 0)}</div></div></div>`).join('')}</div>`;
+    : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : humanSize(a.size || 0)}</div></div></div>`).join('')}</div>`;
 }
 
 function branchNav(turn) {

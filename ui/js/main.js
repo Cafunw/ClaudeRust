@@ -167,12 +167,13 @@ function bindBackend() {
     if (store.activeComposer && text.trim()) store.activeComposer.send();
   });
   // native file drag & drop
-  onBackend('tauri://drag-enter', () => store.activeComposer && store.activeComposer.setDrag(true));
+  onBackend('tauri://drag-enter', () => store.activeComposer && !document.querySelector('.modal-scrim') && store.activeComposer.setDrag(true));
   onBackend('tauri://drag-leave', () => store.activeComposer && store.activeComposer.setDrag(false));
   onBackend('tauri://drag-drop', (p) => {
     const c = store.activeComposer;
     if (!c) return;
     c.setDrag(false);
+    if (document.querySelector('.modal-scrim')) return; // e.g. Settings → Import handles it
     if (p && p.paths && p.paths.length) c.addPaths(p.paths);
   });
 }

@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod extensions;
 pub mod highlight;
+pub mod import;
 pub mod markdown;
 pub mod mcp;
 pub mod models;
@@ -280,7 +281,6 @@ pub fn run() {
             commands::mcp_status,
             commands::mcp_reload,
             commands::mcp_save_config,
-            commands::mcp_import_claude_desktop,
             commands::mcp_list_prompts,
             commands::mcp_get_prompt,
             commands::mcp_read_resource,
@@ -289,6 +289,12 @@ pub fn run() {
             commands::claude_code_login,
             commands::extension_inspect,
             commands::extension_install,
+            import::import_scan,
+            import::import_mcp_servers,
+            import::import_desktop_extensions,
+            import::import_claude_code_sessions,
+            import::import_claude_export,
+            import::pick_import_file,
             commands::open_external,
             commands::open_path,
             commands::reveal_path,

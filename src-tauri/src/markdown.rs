@@ -16,6 +16,9 @@ static CACHE: Lazy<Mutex<HashMap<u64, String>>> = Lazy::new(|| Mutex::new(HashMa
 #[derive(Clone, Copy)]
 pub struct Opts {
     pub math: bool,
+    /// Render single newlines as line breaks, like Claude's chat bubbles
+    /// (poems, addresses, step lists without markup).
+    pub breaks: bool,
 }
 
 pub fn safe_url(url: &str) -> Option<String> {
@@ -131,7 +134,7 @@ fn linkify(text: &str) -> Vec<Event<'static>> {
 
 /// Render markdown to HTML (cached by content hash).
 pub fn render(md: &str, opts: Opts) -> String {
-    let key = hash64(md) ^ (opts.math as u64);
+    let key = hash64(md) ^ (opts.math as u64) ^ ((opts.breaks as u64) << 1);
     if let Some(h) = CACHE.lock().get(&key) {
         return h.clone();
     }
@@ -263,6 +266,7 @@ fn render_uncached(md: &str, opts: Opts) -> String {
                     "<span class=\"math math-display\" data-tex=\"{e}\">{e}</span>"
                 ))));
             }
+            Event::SoftBreak if opts.breaks => events.push(Event::HardBreak),
             other => events.push(other),
         }
     }
@@ -309,7 +313,7 @@ fn render_uncached(md: &str, opts: Opts) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const O: Opts = Opts { math: true };
+    const O: Opts = Opts { math: true, breaks: false };
 
     #[test]
     fn escapes_raw_html_and_bad_links() {
@@ -333,6 +337,14 @@ mod tests {
     fn streaming_unclosed_fence() {
         let h = render("```py\nprint(1)", O);
         assert!(h.contains("code-block"));
+    }
+
+    #[test]
+    fn soft_breaks_only_in_chat() {
+        let chat = render("Waves fold\nsalt wind\n\nnext", Opts { math: false, breaks: true });
+        assert!(chat.contains("Waves fold<br />"), "{chat}");
+        let doc = render("Waves fold\nsalt wind", O);
+        assert!(!doc.contains("<br"), "{doc}");
     }
 
     #[test]

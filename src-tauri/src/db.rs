@@ -373,6 +373,33 @@ impl Db {
         Ok(())
     }
 
+    /// Keep the original dates of an imported conversation.
+    pub fn conv_set_times(&self, id: &str, created_at: i64, updated_at: i64) -> AppResult<()> {
+        self.conn.lock().execute(
+            "UPDATE conversations SET created_at=?2, updated_at=?3 WHERE id=?1",
+            params![id, created_at, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// `options.imported_from` of every imported conversation, plus
+    /// `claude-code:<session>` for sessions the Claude Code engine ran here,
+    /// to skip duplicates.
+    pub fn imported_keys(&self) -> AppResult<std::collections::HashSet<String>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare(
+            "SELECT json_extract(options,'$.imported_from') FROM conversations WHERE options LIKE '%imported_from%'",
+        )?;
+        let rows = st.query_map([], |r| r.get::<_, Option<String>>(0))?;
+        let mut out: std::collections::HashSet<String> = rows.filter_map(|r| r.ok().flatten()).collect();
+        let mut st = c.prepare(
+            "SELECT DISTINCT json_extract(meta,'$.cc_session') FROM messages WHERE meta LIKE '%cc_session%'",
+        )?;
+        let rows = st.query_map([], |r| r.get::<_, Option<String>>(0))?;
+        out.extend(rows.filter_map(|r| r.ok().flatten()).map(|s| format!("claude-code:{s}")));
+        Ok(out)
+    }
+
     pub fn conv_touch(&self, id: &str) -> AppResult<()> {
         self.conn.lock().execute(
             "UPDATE conversations SET updated_at=?2 WHERE id=?1",

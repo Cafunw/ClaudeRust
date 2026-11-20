@@ -69,14 +69,7 @@ pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppRe
         let _ = if new.launch_at_login { m.enable() } else { m.disable() };
     }
     if old.disabled_mcp_servers != new.disabled_mcp_servers {
-        let st2 = st.clone();
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let disabled = st2.settings.read().disabled_mcp_servers.clone();
-            st2.mcp.start_all(&disabled).await;
-            use tauri::Emitter;
-            let _ = app2.emit("mcp-changed", json!({}));
-        });
+        reload_mcp_in_background(&app, &st);
     }
     Ok(settings_json(&st))
 }
@@ -704,7 +697,7 @@ pub async fn serve_artifact(state: St<'_>, kind: String, content: String, dark: 
 #[tauri::command]
 pub async fn render_markdown(state: St<'_>, text: String) -> AppResult<String> {
     let math = state.settings.read().latex_enabled;
-    Ok(crate::markdown::render(&text, crate::markdown::Opts { math }))
+    Ok(crate::markdown::render(&text, crate::markdown::Opts { math, breaks: false }))
 }
 
 #[tauri::command]
@@ -728,12 +721,23 @@ pub async fn mcp_status(state: St<'_>) -> AppResult<Value> {
 
 #[tauri::command]
 pub async fn mcp_reload(app: AppHandle, state: St<'_>) -> AppResult<Value> {
-    let st = state.inner().clone();
-    let disabled = st.settings.read().disabled_mcp_servers.clone();
-    st.mcp.start_all(&disabled).await;
-    use tauri::Emitter;
-    let _ = app.emit("mcp-changed", json!({}));
+    let task = reload_mcp_in_background(&app, state.inner());
+    // Give quick servers a moment so the caller sees them connected; slow
+    // ones keep starting in the background and announce "mcp-changed".
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(6), task).await;
     mcp_status(state).await
+}
+
+/// Restart all MCP servers without waiting; emits "mcp-changed" when done.
+pub fn reload_mcp_in_background(app: &AppHandle, st: &Arc<AppState>) -> tauri::async_runtime::JoinHandle<()> {
+    let st = st.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let disabled = st.settings.read().disabled_mcp_servers.clone();
+        st.mcp.start_all(&disabled).await;
+        use tauri::Emitter;
+        let _ = app.emit("mcp-changed", json!({}));
+    })
 }
 
 #[tauri::command]
@@ -745,29 +749,6 @@ pub async fn mcp_save_config(app: AppHandle, state: St<'_>, config: String) -> A
     }
     std::fs::write(&st.mcp.config_path, serde_json::to_string_pretty(&v)?)?;
     mcp_reload(app, state).await
-}
-
-#[tauri::command]
-pub async fn mcp_import_claude_desktop(app: AppHandle, state: St<'_>) -> AppResult<Value> {
-    let st = state.inner().clone();
-    let src = mcp::claude_desktop_config_path()
-        .filter(|p| p.exists())
-        .ok_or_else(|| AppError::msg("Claude Desktop's config file was not found on this computer."))?;
-    let theirs = mcp::read_config(&src);
-    let mut ours = mcp::read_config(&st.mcp.config_path);
-    let mut n = 0;
-    if let (Some(dst), Some(srcs)) = (ours["mcpServers"].as_object_mut(), theirs["mcpServers"].as_object()) {
-        for (k, v) in srcs {
-            if !dst.contains_key(k) {
-                dst.insert(k.clone(), v.clone());
-                n += 1;
-            }
-        }
-    }
-    std::fs::write(&st.mcp.config_path, serde_json::to_string_pretty(&ours)?)?;
-    let mut status = mcp_reload(app, state).await?;
-    status["imported"] = json!(n);
-    Ok(status)
 }
 
 #[tauri::command]

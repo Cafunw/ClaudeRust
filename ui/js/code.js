@@ -22,8 +22,9 @@ export async function renderCode(view) {
       <div class="folder-pick"></div>
       <div class="composer-slot"></div>
     </div>
-    <div class="section-title" style="padding-left:2px">${t('sessions')}</div>
+    <div class="section-title sessions-head" style="padding-left:2px"><span>${t('sessions')}</span><button class="btn sm ghost" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button></div>
     <div class="sessions"></div></div></div>`;
+  $('[data-act=import]', view).onclick = () => emit('open-settings', 'import');
 
   const pick = $('.folder-pick', view);
   const drawFolder = () => {

@@ -62,11 +62,14 @@ function accountMenu(anchor) {
       label: l.name, checked: (store.settings.language || 'auto') === l.id,
       onClick: () => emit('save-settings', { language: l.id }),
     })), { placement: 'top-start', width: 220 }) },
+    { label: t('imp_menu'), icon: 'download', onClick: () => emit('open-settings', 'import') },
     { label: t('help'), icon: 'help', onClick: () => call('open_external', { url: 'https://docs.anthropic.com' }).catch(errorToast) },
-    { sep: true },
-    { label: t('remove_key'), icon: 'logout', onClick: async () => {
-      try { await call('set_api_key', { key: null }); emit('reload-settings'); } catch (e) { errorToast(e); }
-    } },
+    ...(store.settings.has_api_key ? [
+      { sep: true },
+      { label: t('remove_key'), icon: 'logout', onClick: async () => {
+        try { await call('set_api_key', { key: null }); emit('reload-settings'); } catch (e) { errorToast(e); }
+      } },
+    ] : []),
   ], { placement: 'top-start', width: 260 });
 }
 

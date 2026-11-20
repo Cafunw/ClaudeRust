@@ -947,7 +947,7 @@ fn all_tool_ids(content: &Value) -> HashSet<String> {
         .collect()
 }
 
-fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &str) {
+pub(crate) fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &str) {
     use crate::artifacts::Segment;
     for seg in crate::artifacts::split(text) {
         if let Segment::Artifact(a) = seg {

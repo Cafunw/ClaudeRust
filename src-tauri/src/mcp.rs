@@ -320,6 +320,10 @@ impl McpServer {
 pub struct McpManager {
     servers: tokio::sync::RwLock<HashMap<String, Arc<McpServer>>>,
     failed: Mutex<Vec<ServerStatus>>,
+    /// Servers still connecting: (name, transport).
+    starting: Mutex<Vec<(String, String)>>,
+    /// Bumped by every start_all; connections from an older run are dropped.
+    generation: std::sync::atomic::AtomicU64,
     pub config_path: PathBuf,
 }
 
@@ -361,16 +365,21 @@ impl McpManager {
         McpManager {
             servers: tokio::sync::RwLock::new(HashMap::new()),
             failed: Mutex::new(vec![]),
+            starting: Mutex::new(vec![]),
+            generation: std::sync::atomic::AtomicU64::new(0),
             config_path,
         }
     }
 
     /// (Re)start every configured server that is not disabled.
     pub async fn start_all(&self, disabled: &[String]) {
+        use std::sync::atomic::Ordering;
+        let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_all().await;
         let cfg = read_config(&self.config_path);
         let servers = cfg["mcpServers"].as_object().cloned().unwrap_or_default();
         let mut tasks = vec![];
+        let mut starting = vec![];
         for (name, conf) in servers {
             if disabled.contains(&name) || conf["disabled"].as_bool() == Some(true) {
                 self.failed.lock().push(ServerStatus {
@@ -385,13 +394,23 @@ impl McpManager {
                 });
                 continue;
             }
+            starting.push((name.clone(), if conf["url"].is_string() { "http".to_string() } else { "stdio".to_string() }));
             tasks.push(async move { (name.clone(), connect(&name, &conf).await) });
         }
+        *self.starting.lock() = starting;
         // Register each server as soon as it connects, so one slow server
         // doesn't hold back the others.
         let mut pending: futures_util::stream::FuturesUnordered<_> = tasks.into_iter().collect();
         use futures_util::StreamExt;
         while let Some((name, res)) = pending.next().await {
+            if self.generation.load(Ordering::SeqCst) != gen {
+                // A newer reload started; it owns the server list now.
+                if let Ok(s) = res {
+                    s.shutdown().await;
+                }
+                continue;
+            }
+            self.starting.lock().retain(|(n, _)| *n != name);
             match res {
                 Ok(s) => {
                     self.servers.write().await.insert(name, s);
@@ -421,6 +440,16 @@ impl McpManager {
     pub async fn statuses(&self) -> Vec<ServerStatus> {
         let mut out: Vec<ServerStatus> = self.servers.read().await.values().map(|s| s.status(false)).collect();
         out.extend(self.failed.lock().iter().cloned());
+        out.extend(self.starting.lock().iter().map(|(name, transport)| ServerStatus {
+            name: name.clone(),
+            transport: transport.clone(),
+            status: "starting".into(),
+            error: None,
+            tools: vec![],
+            server_info: Value::Null,
+            logs: vec![],
+            disabled: false,
+        }));
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
