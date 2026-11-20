@@ -1936,3 +1936,93 @@ pub async fn oai_refresh(state: St<'_>) -> AppResult<Value> {
         }
     }
 }
+
+// ------------------------------------------------------------- usage overview
+
+/// Cost of one response's usage with a model's prices (USD).
+pub fn usage_cost(model: &str, u: &Value) -> f64 {
+    let p = models::info(model).price;
+    let g = |k: &str| u[k].as_u64().unwrap_or(0) as f64;
+    (g("input_tokens") * p.0 + g("output_tokens") * p.1 + g("cache_read_input_tokens") * p.0 * 0.1 + g("cache_creation_input_tokens") * p.0 * 1.25) / 1_000_000.0
+}
+
+/// Tokens and cost across all conversations of the last `days` days.
+#[tauri::command]
+pub async fn usage_overview(state: St<'_>, days: Option<u32>) -> AppResult<Value> {
+    use chrono::TimeZone;
+    let days = days.unwrap_or(30).clamp(1, 365) as i64;
+    let since = now_ms() - days * 86_400_000;
+    let rows = state.db.assistant_usage_since(since)?;
+    let mut by_day: std::collections::BTreeMap<String, (u64, u64, f64)> = std::collections::BTreeMap::new();
+    let mut by_model: std::collections::HashMap<String, (u64, u64, f64, u64)> = std::collections::HashMap::new();
+    let mut by_conv: std::collections::HashMap<String, (String, String, f64)> = std::collections::HashMap::new();
+    let mut tot = (0u64, 0u64, 0.0f64, 0u64);
+    for (at, conv_id, title, kind, conv_model, meta) in rows {
+        let meta: Value = serde_json::from_str(&meta).unwrap_or_default();
+        let model = meta["model"].as_str().unwrap_or(&conv_model).to_string();
+        let mut cost = 0.0;
+        let mut inp = 0;
+        let mut out = 0;
+        for key in ["usage", "subagent_usage"] {
+            let u = &meta[key];
+            if !u.is_object() {
+                continue;
+            }
+            if !model.starts_with(crate::oai::PREFIX) {
+                cost += usage_cost(&model, u);
+            }
+            inp += u["input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0) + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            out += u["output_tokens"].as_u64().unwrap_or(0);
+        }
+        if inp == 0 && out == 0 {
+            continue;
+        }
+        let day = chrono::Local.timestamp_millis_opt(at).single().map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
+        let d = by_day.entry(day).or_default();
+        d.0 += inp;
+        d.1 += out;
+        d.2 += cost;
+        let m = by_model.entry(model).or_default();
+        m.0 += inp;
+        m.1 += out;
+        m.2 += cost;
+        m.3 += 1;
+        let c = by_conv.entry(conv_id).or_insert((title, kind, 0.0));
+        c.2 += cost;
+        tot.0 += inp;
+        tot.1 += out;
+        tot.2 += cost;
+        tot.3 += 1;
+    }
+    let mut models_v: Vec<Value> = by_model
+        .into_iter()
+        .map(|(m, (i, o, c, n))| json!({"model": m, "name": m.strip_prefix(crate::oai::PREFIX).map(String::from).unwrap_or_else(|| models::info(&m).name), "input_tokens": i, "output_tokens": o, "cost_usd": c, "responses": n}))
+        .collect();
+    models_v.sort_by(|a, b| b["cost_usd"].as_f64().unwrap_or(0.0).total_cmp(&a["cost_usd"].as_f64().unwrap_or(0.0)));
+    let mut convs: Vec<Value> = by_conv
+        .into_iter()
+        .map(|(id, (title, kind, c))| json!({"id": id, "title": title, "kind": kind, "cost_usd": c}))
+        .collect();
+    convs.sort_by(|a, b| b["cost_usd"].as_f64().unwrap_or(0.0).total_cmp(&a["cost_usd"].as_f64().unwrap_or(0.0)));
+    convs.truncate(8);
+    Ok(json!({
+        "days": days,
+        "by_day": by_day.into_iter().map(|(d, (i, o, c))| json!({"date": d, "input_tokens": i, "output_tokens": o, "cost_usd": c})).collect::<Vec<_>>(),
+        "by_model": models_v,
+        "top_conversations": convs,
+        "totals": {"input_tokens": tot.0, "output_tokens": tot.1, "cost_usd": tot.2, "responses": tot.3},
+    }))
+}
+
+#[cfg(test)]
+mod usage_tests {
+    #[test]
+    fn cost_uses_model_prices() {
+        let u = serde_json::json!({"input_tokens": 1_000_000, "output_tokens": 1_000_000});
+        let p = crate::models::info("claude-opus-5-5").price;
+        let c = super::usage_cost("claude-opus-5-5", &u);
+        assert!((c - (p.0 + p.1)).abs() < 1e-9, "{c}");
+        let cached = serde_json::json!({"cache_read_input_tokens": 1_000_000});
+        assert!((super::usage_cost("claude-opus-5-5", &cached) - p.0 * 0.1).abs() < 1e-9);
+    }
+}

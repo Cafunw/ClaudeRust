@@ -16,6 +16,7 @@ import './hooks_ui.js';
 import './commands_agent.js';
 import './routines.js';
 import './watch_ui.js';
+import './usage_ui.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';
@@ -215,6 +216,7 @@ async function init() {
   }
   store.settings = boot.settings;
   store.models = boot.models;
+  if (store.settings.oai_base_url) refreshModels();
   store.platform = boot.platform;
   store.version = boot.version;
   store.render = boot.render || {};

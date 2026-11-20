@@ -12,6 +12,9 @@ use std::path::Path;
 /// (conversation id, title, updated_at, first user message, kind)
 pub type RecentChat = (String, String, i64, String, String);
 
+/// (created_at, conversation id, title, kind, conversation model, message meta)
+pub type UsageRow = (i64, String, String, String, String, String);
+
 pub struct Db {
     conn: Mutex<Connection>,
     fts: bool,
@@ -401,6 +404,18 @@ impl Db {
         let rows = st.query_map([], |r| r.get::<_, Option<String>>(0))?;
         out.extend(rows.filter_map(|r| r.ok().flatten()).map(|s| format!("claude-code:{s}")));
         Ok(out)
+    }
+
+    /// (created_at, conversation id, conversation title, kind, model of the
+    /// conversation, message meta) of assistant messages since `since_ms`.
+    pub fn assistant_usage_since(&self, since_ms: i64) -> AppResult<Vec<UsageRow>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare(
+            "SELECT m.created_at, m.conversation_id, c.title, c.kind, c.model, m.meta FROM messages m JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.role = 'assistant' AND m.created_at >= ?1",
+        )?;
+        let rows = st.query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Remove conversations whose import was cut off (app closed mid-import).

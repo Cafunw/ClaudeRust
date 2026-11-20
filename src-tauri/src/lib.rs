@@ -333,6 +333,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::usage_overview,
             commands::oai_refresh,
             commands::arch_map,
             commands::commit_message_suggest,

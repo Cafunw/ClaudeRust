@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  usage_title: "Usage",
+  usage_days: "{n} days",
+  usage_responses: "Responses",
+  usage_by_model: "By model",
+  usage_top_convs: "Most expensive conversations",
+  usage_note: "Estimated from the token counts the API reported and list prices (cache reads and writes included; sub-agents counted with their parent). Sessions run through the Claude Code CLI with a subscription and local models aren't billed per token.",
+  cmd_usage: "Usage and cost across all conversations",
+  pal_usage: "Usage dashboard",
   oai_title: "Local and other models (OpenAI-compatible)",
   oai_url: "Endpoint URL",
   oai_url_help: "Chat with models served by Ollama (http://localhost:11434/v1), LM Studio (http://localhost:1234/v1), llama.cpp, vLLM, OpenRouter… They appear in the model menu. These chats are text and images only — no tools or coding agent.",
@@ -340,6 +348,14 @@ const en = {
 };
 
 const tr = {
+  usage_title: "Kullanım",
+  usage_days: "{n} gün",
+  usage_responses: "Yanıt",
+  usage_by_model: "Modele göre",
+  usage_top_convs: "En pahalı sohbetler",
+  usage_note: "API'nin bildirdiği token sayıları ve liste fiyatlarından tahmin edilir (önbellek okuma/yazma dahil; alt ajanlar üst yanıtla birlikte sayılır). Abonelikle Claude Code CLI üzerinden çalışan oturumlar ve yerel modeller token başına ücretlendirilmez.",
+  cmd_usage: "Tüm sohbetlerin kullanımı ve maliyeti",
+  pal_usage: "Kullanım panosu",
   oai_title: "Yerel ve diğer modeller (OpenAI uyumlu)",
   oai_url: "Uç nokta adresi",
   oai_url_help: "Ollama (http://localhost:11434/v1), LM Studio (http://localhost:1234/v1), llama.cpp, vLLM, OpenRouter… ile sunulan modellerle sohbet edin. Model menüsünde görünürler. Bu sohbetler yalnızca metin ve görsel içindir — araç ya da kod ajanı yoktur.",

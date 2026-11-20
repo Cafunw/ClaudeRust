@@ -130,6 +130,7 @@ async function actionItems(ctx) {
     { title: `${t('settings')}: Developer / MCP`, icon: 'plug', run: () => emit('open-settings', 'developer') },
     { title: t('pal_import'), icon: 'download', run: () => emit('open-settings', 'import') },
     { title: t('pal_routines'), icon: 'clock', run: async () => (await import('./routines.js')).openRoutines() },
+    { title: t('pal_usage'), icon: 'zap', run: async () => (await import('./usage_ui.js')).openUsage() },
     { title: t('pal_toggle_theme'), icon: 'moon', run: () => emit('save-settings', { theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }) },
   ];
   if (ctx && ctx.kind === 'code') {
