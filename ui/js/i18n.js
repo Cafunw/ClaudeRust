@@ -1,5 +1,14 @@
 // UI strings: English and Turkish.
 const en = {
+  term_ask: "Ask Claude",
+  term_ask_tip: "Send the selection, or the recent output, to the conversation",
+  term_add_selection: "Add selection to message",
+  term_add_output: "Add recent output to message",
+  term_fix: "Ask Claude to fix the errors shown",
+  term_fix_prompt: "Fix the problems shown in this terminal output. Find the cause in the code, make the change, and rerun the command to check.",
+  term_output_intro: "Output from my terminal:",
+  term_selection_intro: "From my terminal:",
+  term_nothing: "The terminal has no output yet.",
   budget_off: "No spending limit for turns in this session.",
   cmd_budget: "Spending limit for each agent turn here",
   budget_none: "no limit",
@@ -414,6 +423,15 @@ const en = {
 };
 
 const tr = {
+  term_ask: "Claude'a sor",
+  term_ask_tip: "Seçimi ya da son çıktıyı sohbete gönder",
+  term_add_selection: "Seçimi mesaja ekle",
+  term_add_output: "Son çıktıyı mesaja ekle",
+  term_fix: "Gösterilen hataları Claude düzeltsin",
+  term_fix_prompt: "Bu terminal çıktısında görünen sorunları düzelt. Nedenini kodda bul, değişikliği yap ve kontrol için komutu yeniden çalıştır.",
+  term_output_intro: "Terminalimden çıktı:",
+  term_selection_intro: "Terminalimden:",
+  term_nothing: "Terminalde henüz çıktı yok.",
   budget_off: "Bu oturumdaki turlar için harcama sınırı yok.",
   cmd_budget: "Buradaki her ajan turu için harcama sınırı",
   budget_none: "sınır yok",

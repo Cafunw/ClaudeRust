@@ -780,6 +780,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
 .pane-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-2); font-size: 13px; padding: 30px; text-align: center; }
 .term-pane { background: var(--bg-1); padding: 6px 0 0 8px; overflow: hidden; }
+.term-actions { position: absolute; top: 6px; right: 14px; z-index: 5; opacity: .85; }
+.term-actions:hover { opacity: 1; }
+.term-actions .btn { gap: 4px; background: var(--bg-0); box-shadow: var(--shadow-sm); }
 .term-host { flex: 1; min-height: 0; }
 .term-host .xterm { height: 100%; }
 .task-row { border-bottom: 1px solid var(--border); }
