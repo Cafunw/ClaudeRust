@@ -1886,6 +1886,7 @@ pub async fn arch_map(state: St<'_>, conversation_id: String) -> AppResult<Value
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn slash_save(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, scope: String, name: String, description: String, body: String, overwrite: bool) -> AppResult<String> {
     let root = root_of(&state, conversation_id.as_deref(), cwd);
     let root = match root {
