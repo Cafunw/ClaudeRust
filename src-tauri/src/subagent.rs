@@ -139,6 +139,7 @@ async fn ask(app: &AppHandle, st: &AppState, conv_id: &str, payload: Value, canc
     p["conversation_id"] = json!(conv_id);
     st.pending_perms.lock().insert(req_id.clone(), p.clone());
     let _ = app.emit("permission-request", &p);
+    crate::engine::notify_attention(app, st, conv_id, &p);
     let r = tokio::select! {
         r = rx => r.ok(),
         _ = cancel.cancelled() => None,

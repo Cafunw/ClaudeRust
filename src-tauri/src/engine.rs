@@ -636,6 +636,36 @@ pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str
     Ok(())
 }
 
+/// Desktop notification when a session needs the user (a permission
+/// prompt) while the app isn't in front.
+pub(crate) fn notify_attention(app: &AppHandle, st: &AppState, conv_id: &str, payload: &Value) {
+    if !st.settings.read().notifications {
+        return;
+    }
+    use tauri::Manager;
+    let focused = app
+        .get_webview_window("main")
+        .map(|w| w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if focused {
+        return;
+    }
+    let title = st
+        .db
+        .conv_get(conv_id)
+        .map(|c| if c.title.is_empty() { "ClaudeRust".to_string() } else { c.title })
+        .unwrap_or_else(|_| "ClaudeRust".into());
+    let tool = payload["tool"].as_str().unwrap_or("a tool");
+    let detail = payload["input"]["command"]
+        .as_str()
+        .or(payload["input"]["file_path"].as_str())
+        .map(|d| format!(": {}", d.chars().take(80).collect::<String>()))
+        .unwrap_or_default();
+    let body = if payload["kind"] == "plan" { "Claude has a plan ready for your review.".to_string() } else { format!("Claude wants to use {tool}{detail}") };
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 fn notify_done(app: &AppHandle, st: &AppState, conv_id: &str, failed: bool) {
     if !st.settings.read().notifications {
         return;
@@ -1148,6 +1178,7 @@ async fn ask_permission(
     st.live.lock().insert(conv_id.to_string(), live.clone());
     emit_turn(app, conv_id, &renderer.render(am, live));
     let _ = app.emit("permission-request", &ev);
+    notify_attention(app, st, conv_id, &ev);
     let reply = tokio::select! {
         r = rx => r.ok(),
         _ = cancel.cancelled() => None,

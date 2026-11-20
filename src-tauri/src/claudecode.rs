@@ -677,6 +677,7 @@ async fn run_once(
                     open_perms.insert(rid_key(&rid), (req_id.clone(), tool_use_id.clone()));
                     emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
                     let _ = app.emit("permission-request", &payload);
+                    crate::engine::notify_attention(app, st, conv_id, &payload);
                     // Wait for the answer without blocking the event stream.
                     let tx = perm_tx.clone();
                     let cancel = cancel.clone();
