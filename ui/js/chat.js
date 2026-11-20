@@ -1,4 +1,5 @@
 // Conversation view: turns, streaming updates, branching, permissions.
+import { watchBadge } from './watch_ui.js';
 import { contextMeter, compactDivider } from './context_ui.js';
 import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
@@ -104,6 +105,7 @@ function renderTopbar() {
   const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
   cur.topEl.append(tb, h('<div class="spacer"></div>'));
+  if (c.kind === 'code') cur.topEl.append(watchBadge(c));
   cur.topEl.append(contextMeter(cur.id, () => { cur.composer.setText('/cost'); cur.composer.send(); }));
   const usage = h(`<button class="icon-btn" title="${t('usage')}">${icon('info', 17)}</button>`);
   usage.onclick = () => showUsage(usage);

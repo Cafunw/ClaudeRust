@@ -947,3 +947,17 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .rt-form label.day, .rt-days label.day { flex-direction: row; align-items: center; gap: 5px; font-size: 13px; }
 .rt-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .hidden { display: none !important; }
+
+/* watch mode */
+.watch-badge { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-0); color: var(--text-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.watch-badge:hover { color: var(--text-0); border-color: var(--text-3); }
+.watch-badge.off { border-style: dashed; }
+.watch-badge.ok { color: #2f8a5b; border-color: rgba(58, 154, 91, .35); background: rgba(58, 154, 91, .07); }
+.watch-badge.failed, .watch-badge.error { color: var(--danger); border-color: rgba(181, 51, 51, .35); background: var(--danger-soft); }
+.watch-badge .wb-ok, .watch-badge .wb-err { display: inline-flex; }
+.watch-dlg { display: flex; flex-direction: column; gap: 10px; }
+.watch-dlg .row-inline { display: flex; gap: 6px; }
+.watch-dlg .row-inline .input { flex: 1; }
+.input.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.watch-res .wr-head { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 6px; }
+.watch-res .task-out { margin: 0; max-height: 300px; }

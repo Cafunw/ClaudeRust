@@ -35,6 +35,7 @@ pub mod subagent;
 pub mod terminal;
 pub mod util;
 pub mod view;
+pub mod watch;
 pub mod worktree;
 
 use state::AppState;
@@ -329,6 +330,11 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::watch_start,
+            commands::watch_stop,
+            commands::watch_status,
+            commands::watch_run,
+            commands::watch_auto_fix,
             commands::routines_list,
             commands::routine_save,
             commands::routine_delete,
@@ -398,6 +404,7 @@ pub fn run() {
                 let st = st.inner().clone();
                 st.shells.kill_all();
                 st.terminals.close_all();
+                st.watches.stop_all();
                 tauri::async_runtime::block_on(async move { st.mcp.stop_all().await });
             }
         }

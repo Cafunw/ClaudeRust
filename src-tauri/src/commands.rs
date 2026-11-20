@@ -498,6 +498,7 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     st.code_sessions.lock().remove(&id);
     st.shells.kill_conversation(&id);
     st.subagents.forget_conversation(&id);
+    st.watches.stop(&id);
     st.terminals.close_conversation(&id);
     st.live.lock().remove(&id);
     // Prompts still waiting for this conversation: drop them (the run was
@@ -1707,4 +1708,93 @@ pub async fn routine_run(app: AppHandle, state: St<'_>, id: String) -> AppResult
     }
     let _ = app.emit("routines-changed", json!({}));
     res
+}
+
+// ------------------------------------------------------------- watch mode
+
+#[tauri::command]
+pub async fn watch_status(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    if let Some(w) = state.watches.get(&conversation_id) {
+        return Ok(w.summary(&conversation_id));
+    }
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    Ok(json!({"watching": false, "detected": crate::watch::detect(&cwd)}))
+}
+
+#[tauri::command]
+pub async fn watch_start(app: AppHandle, state: St<'_>, conversation_id: String, command: Option<String>, auto_fix: Option<bool>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let cwd = conv_cwd(&st, &conversation_id)?;
+    let command = command.filter(|c| !c.trim().is_empty()).or_else(|| crate::watch::detect(&cwd))
+        .ok_or_else(|| AppError::msg("No check command found for this project; enter one (for example: npm test)."))?;
+    engine::update_conv_options(&st, &conversation_id, |o| {
+        o["watch_command"] = json!(command);
+        o["watch_auto_fix"] = json!(auto_fix.unwrap_or(false));
+        o["watch_enabled"] = json!(true);
+    });
+    let st_busy = st.clone();
+    let conv_busy = conversation_id.clone();
+    let busy: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || st_busy.runs.lock().contains_key(&conv_busy));
+    // Auto-fix: when a check fails after Claude's turn, send the errors back (at most twice in a row).
+    let st_fix = st.clone();
+    let app_fix = app.clone();
+    let conv_fix = conversation_id.clone();
+    let streak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let on_result: Arc<dyn Fn(Value) + Send + Sync> = Arc::new(move |summary: Value| {
+        use std::sync::atomic::Ordering;
+        if summary["status"] != "failed" {
+            streak.store(0, Ordering::Relaxed);
+            return;
+        }
+        if summary["auto_fix"] != true || streak.load(Ordering::Relaxed) >= 2 || st_fix.runs.lock().contains_key(&conv_fix) {
+            return;
+        }
+        streak.fetch_add(1, Ordering::Relaxed);
+        let text = watch_fix_prompt(&summary);
+        let (st2, app2, conv2) = (st_fix.clone(), app_fix.clone(), conv_fix.clone());
+        tauri::async_runtime::spawn(async move {
+            let req = SendReq { conversation_id: Some(conv2), new_conversation: None, text, attachment_ids: vec![], parent_id: None, edit: false };
+            let _ = send_message_inner(&app2, st2, req).await;
+        });
+    });
+    let v = st.watches.start(&app, &conversation_id, &cwd, command, busy, on_result)?;
+    if auto_fix == Some(true) {
+        st.watches.set_auto_fix(&conversation_id, true);
+    }
+    Ok(v)
+}
+
+/// The prompt that asks Claude to fix a failing check.
+pub fn watch_fix_prompt(summary: &Value) -> String {
+    let out = summary["output"].as_str().unwrap_or("");
+    let tail: String = {
+        let n = out.chars().count();
+        if n > 12_000 { out.chars().skip(n - 12_000).collect() } else { out.to_string() }
+    };
+    format!(
+        "The project check `{}` fails ({} error line(s)). Please fix the errors.\n\n```\n{}\n```",
+        summary["command"].as_str().unwrap_or(""),
+        summary["errors"].as_u64().unwrap_or(0),
+        tail.trim()
+    )
+}
+
+#[tauri::command]
+pub async fn watch_stop(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    state.watches.stop(&conversation_id);
+    engine::update_conv_options(&state, &conversation_id, |o| o["watch_enabled"] = json!(false));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn watch_run(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    state.watches.run_now(&conversation_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn watch_auto_fix(state: St<'_>, conversation_id: String, on: bool) -> AppResult<()> {
+    state.watches.set_auto_fix(&conversation_id, on);
+    engine::update_conv_options(&state, &conversation_id, |o| o["watch_auto_fix"] = json!(on));
+    Ok(())
 }

@@ -47,6 +47,7 @@ pub struct AppState {
     pub shells: Arc<crate::shells::Shells>,
     pub terminals: crate::terminal::Terminals,
     pub subagents: crate::subagent::Registry,
+    pub watches: crate::watch::Watches,
     pub models: Mutex<Option<Vec<Value>>>,
     /// Set when the configured endpoint rejected optional request features.
     pub degraded: AtomicBool,
@@ -73,6 +74,7 @@ impl AppState {
             shells: Arc::new(crate::shells::Shells::default()),
             terminals: crate::terminal::Terminals::default(),
             subagents: crate::subagent::Registry::default(),
+            watches: crate::watch::Watches::default(),
             models: Mutex::new(None),
             degraded: AtomicBool::new(false),
             data_dir,
