@@ -1030,3 +1030,10 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .ctx-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; }
 .tool .targ.file-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .tool .targ.file-link:hover { color: var(--accent); }
+
+/* Find in conversation */
+.find-bar { position: absolute; top: 56px; right: 18px; z-index: 30; display: flex; align-items: center; gap: 4px; padding: 4px 6px 4px 10px; background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-2, 0 4px 16px rgba(0,0,0,.12)); color: var(--text-2); }
+.find-bar input { width: 200px; border: 0; background: transparent; outline: none; color: var(--text-0); font: inherit; font-size: 13px; padding: 4px 2px; }
+.find-bar .fb-count { min-width: 44px; text-align: right; padding-right: 4px; }
+mark.find-hit { background: rgba(255, 196, 0, .35); color: inherit; border-radius: 2px; }
+mark.find-hit.cur { background: rgba(255, 140, 0, .75); }

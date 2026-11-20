@@ -1,5 +1,9 @@
 // UI strings: English and Turkish.
 const en = {
+  fork_here: "Continue in a new conversation from here",
+  forked: "Forked into a new conversation.",
+  find_in_chat: "Find in conversation",
+  sc_find: "Find in conversation",
   open_in_editor: "Open in editor",
   editor_setting: "Editor",
   editor_setting_d: "Files from tool cards, Changes and Map open here (at the line when known). Auto picks VS Code, Cursor, Windsurf, Zed or Sublime Text if installed.",
@@ -398,6 +402,10 @@ const en = {
 };
 
 const tr = {
+  fork_here: "Buradan yeni bir sohbette devam et",
+  forked: "Yeni bir sohbete dallandı.",
+  find_in_chat: "Sohbette bul",
+  sc_find: "Sohbette bul",
   open_in_editor: "Düzenleyicide aç",
   editor_setting: "Düzenleyici",
   editor_setting_d: "Araç kartlarındaki, Değişiklikler ve Harita panellerindeki dosyalar burada açılır (biliniyorsa ilgili satırda). Otomatik: kuruluysa VS Code, Cursor, Windsurf, Zed ya da Sublime Text.",

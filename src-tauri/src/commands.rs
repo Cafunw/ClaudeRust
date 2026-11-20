@@ -1048,7 +1048,8 @@ pub async fn usage_stats(state: St<'_>, conversation_id: String) -> AppResult<Va
         None => vec![],
     };
     let mut tot = (0u64, 0u64, 0u64, 0u64, 0.0f64);
-    for m in path.iter().filter(|m| m.role == "assistant") {
+    // answers copied by a fork were paid for in the original conversation
+    for m in path.iter().filter(|m| m.role == "assistant" && m.meta["forked_from"].is_null()) {
         let u = &m.meta["usage"];
         let model = models::info(m.meta["model"].as_str().unwrap_or(&conv.model));
         let i = u["input_tokens"].as_u64().unwrap_or(0);
@@ -2379,4 +2380,40 @@ mod editor_tests {
         assert_eq!(a, vec!["--line", "3", "/p/a.rs"]);
         assert!(super::editor_args("system", "/p/a.rs", None).is_none());
     }
+}
+
+// ------------------------------------------------------------- fork into a new conversation
+
+/// Copy the conversation up to (and including) `message_id` into a new
+/// conversation, so an alternative can be explored on its own.
+#[tauri::command]
+pub async fn fork_conversation(app: AppHandle, state: St<'_>, conversation_id: String, message_id: String) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let conv = st.db.conv_get(&conversation_id)?;
+    let path = st.db.path_to(&message_id)?;
+    if path.is_empty() || path.last().map(|m| m.conversation_id != conversation_id).unwrap_or(true) {
+        return Err(AppError::msg("Message not found in this conversation."));
+    }
+    let mut options = conv.options.clone();
+    if let Some(m) = options.as_object_mut() {
+        for k in ["cc_session", "cc_tip", "pending_compact", "worktree", "watch_enabled", "imported_from", "routine_id"] {
+            m.remove(k);
+        }
+    }
+    let base = if conv.title.is_empty() { "Conversation" } else { conv.title.trim_end_matches(" (fork)") };
+    let title = format!("{base} (fork)");
+    // A worktree belongs to its session and goes away with it: the fork
+    // works in the folder the original session was started in.
+    let cwd = conv.options["worktree"]["orig_cwd"]
+        .as_str()
+        .filter(|d| std::path::Path::new(d).is_dir())
+        .map(str::to_string)
+        .or(conv.cwd.clone());
+    let new = st.db.conv_create(&conv.kind, &conv.model, conv.project_id.as_deref(), cwd.as_deref(), &options)?;
+    for (id, content) in st.db.copy_path(&path, &new.id)? {
+        let _ = st.db.fts_index(&new.id, &id, &render::plain_text(&content));
+    }
+    st.db.conv_set_title(&new.id, &title)?;
+    engine::emit_conv_updated(&app, &new.id);
+    Ok(json!({"conversation_id": new.id}))
 }

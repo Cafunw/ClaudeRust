@@ -412,7 +412,7 @@ impl Db {
         let c = self.conn.lock();
         let mut st = c.prepare(
             "SELECT m.created_at, m.conversation_id, c.title, c.kind, c.model, m.meta FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'assistant' AND m.created_at >= ?1",
+             WHERE m.role = 'assistant' AND m.created_at >= ?1 AND json_extract(m.meta, '$.forked_from') IS NULL",
         )?;
         let rows = st.query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -520,6 +520,31 @@ impl Db {
         )?;
         let rows = st.query_map([leaf], msg_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Copy a root-to-leaf path of messages into conversation `to` with new
+    /// ids (parents remapped) and point the conversation at the copied leaf.
+    /// Claude Code links (`cc_session`, `cc_uuid`) are kept, so the next turn
+    /// resumes the CLI session at that point as a fork of it. Returns
+    /// `(new_id, content)` pairs so the caller can index them for search.
+    pub fn copy_path(&self, path: &[Message], to: &str) -> AppResult<Vec<(String, Value)>> {
+        let mut ids: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(path.len());
+        for m in path {
+            let mut c = m.clone();
+            c.id = new_id();
+            c.conversation_id = to.to_string();
+            c.parent_id = m.parent_id.as_deref().and_then(|p| ids.get(p).cloned());
+            if let Some(meta) = c.meta.as_object_mut() {
+                // spend was counted in the original conversation
+                meta.insert("forked_from".into(), Value::String(m.id.clone()));
+            }
+            ids.insert(&m.id, c.id.clone());
+            self.msg_insert(&c)?;
+            out.push((c.id, c.content));
+        }
+        self.conv_set_leaf(to, out.last().map(|(id, _)| id.as_str()))?;
+        Ok(out)
     }
 
     /// Mark assistant messages left unfinished by a previous crash/quit as stopped.
@@ -831,6 +856,44 @@ impl Db {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn copy_path_forks_a_branch() {
+        let db = Db::open_in_memory().unwrap();
+        let conv = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let mk = |id: &str, parent: Option<&str>, role: &str| Message {
+            id: id.into(),
+            conversation_id: conv.id.clone(),
+            parent_id: parent.map(|s| s.into()),
+            role: role.into(),
+            content: json!([{"type":"text","text":id}]),
+            meta: json!({"cc_uuid": "x", "keep": 1}),
+            created_at: 1,
+        };
+        db.msg_insert(&mk("u1", None, "user")).unwrap();
+        db.msg_insert(&mk("a1", Some("u1"), "assistant")).unwrap();
+        db.msg_insert(&mk("u2", Some("a1"), "user")).unwrap();
+        db.msg_insert(&mk("a2", Some("u2"), "assistant")).unwrap();
+        let fork = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let copied = db.copy_path(&db.path_to("a1").unwrap(), &fork.id).unwrap();
+        assert_eq!(copied.len(), 2);
+        let leaf = db.conv_get(&fork.id).unwrap().current_leaf.unwrap();
+        assert_eq!(leaf, copied[1].0);
+        let p = db.path_to(&leaf).unwrap();
+        assert_eq!(p.len(), 2);
+        assert!(p.iter().all(|m| m.conversation_id == fork.id && m.meta["cc_uuid"] == "x" && m.meta["keep"] == 1));
+        assert_eq!(p[1].meta["forked_from"], "a1");
+        // copied answers aren't counted again in the usage totals
+        let all = db.assistant_usage_since(0).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|r| r.1 == conv.id));
+        assert_eq!(p[0].parent_id, None);
+        assert_eq!(p[1].parent_id.as_deref(), Some(p[0].id.as_str()));
+        assert_eq!(p[1].content[0]["text"], "a1");
+        // the original is untouched
+        assert_eq!(db.path_to("a2").unwrap().len(), 4);
+        assert!(db.path_to("a2").unwrap().iter().all(|m| m.conversation_id == conv.id));
+    }
 
     #[test]
     fn tree_and_paths() {

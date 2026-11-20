@@ -493,6 +493,20 @@ function renderAssistantTurn(el, turn) {
     const cb = h(`<button class="icon-btn sm" title="${t('copy')}">${icon('copy', 15)}</button>`);
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
     actions.appendChild(cb);
+    // fork: continue from here in a new conversation
+    const lastId = (turn.msg_ids || []).at(-1);
+    if (lastId) {
+      const forkBtn = h(`<button class="icon-btn sm" title="${t('fork_here')}">${icon('branch', 15)}</button>`);
+      forkBtn.onclick = async () => {
+        try {
+          const r = await call('fork_conversation', { conversationId: cur.id, messageId: lastId });
+          emit('conversations-changed');
+          emit('navigate', { name: 'chat', params: { id: r.conversation_id } });
+          toast(t('forked'));
+        } catch (e) { errorToast(e); }
+      };
+      actions.appendChild(forkBtn);
+    }
   }
   const fb = turn.meta && turn.meta.feedback;
   const up = h(`<button class="icon-btn sm ${fb === 'up' ? 'active' : ''}" title="${t('good')}">${icon('thumbUp', 15)}</button>`);
