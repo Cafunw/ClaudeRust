@@ -45,7 +45,8 @@ type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>>;
 
 enum Transport {
     Stdio {
-        stdin: tokio::sync::Mutex<tokio::process::ChildStdin>,
+        /// Lines to write to the server's stdin (a writer task owns the pipe).
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
         child: Mutex<Option<tokio::process::Child>>,
         pending: Pending,
     },
@@ -102,17 +103,12 @@ impl McpServer {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         match &self.transport {
-            Transport::Stdio { stdin, pending, .. } => {
-                let (tx, rx) = oneshot::channel();
-                pending.lock().insert(id, tx);
-                {
-                    let mut w = stdin.lock().await;
-                    let line = format!("{}\n", msg);
-                    if let Err(e) = w.write_all(line.as_bytes()).await {
-                        pending.lock().remove(&id);
-                        return Err(AppError::msg(format!("MCP server '{}' is not running: {e}", self.name)));
-                    }
-                    let _ = w.flush().await;
+            Transport::Stdio { tx, pending, .. } => {
+                let (otx, rx) = oneshot::channel();
+                pending.lock().insert(id, otx);
+                if tx.send(format!("{}\n", msg)).is_err() {
+                    pending.lock().remove(&id);
+                    return Err(AppError::msg(format!("MCP server '{}' is not running", self.name)));
                 }
                 match tokio::time::timeout(timeout, rx).await {
                     Ok(Ok(Ok(v))) => Ok(v),
@@ -201,10 +197,8 @@ impl McpServer {
     async fn notify(&self, method: &str, params: Value) {
         let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
         match &self.transport {
-            Transport::Stdio { stdin, .. } => {
-                let mut w = stdin.lock().await;
-                let _ = w.write_all(format!("{}\n", msg).as_bytes()).await;
-                let _ = w.flush().await;
+            Transport::Stdio { tx, .. } => {
+                let _ = tx.send(format!("{}\n", msg));
             }
             Transport::Http {
                 client,
@@ -217,6 +211,7 @@ impl McpServer {
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json, text/event-stream")
                     .header("MCP-Protocol-Version", PROTOCOL_VERSION)
+                    .timeout(Duration::from_secs(15))
                     .body(msg.to_string());
                 for (k, v) in headers {
                     req = req.header(k.as_str(), v.as_str());
@@ -392,7 +387,11 @@ impl McpManager {
             }
             tasks.push(async move { (name.clone(), connect(&name, &conf).await) });
         }
-        for (name, res) in futures_util::future::join_all(tasks).await {
+        // Register each server as soon as it connects, so one slow server
+        // doesn't hold back the others.
+        let mut pending: futures_util::stream::FuturesUnordered<_> = tasks.into_iter().collect();
+        use futures_util::StreamExt;
+        while let Some((name, res)) = pending.next().await {
             match res {
                 Ok(s) => {
                     self.servers.write().await.insert(name, s);
@@ -475,7 +474,8 @@ impl McpManager {
     /// List resources and prompts of a server (for the attach menu).
     pub async fn list_prompts(&self) -> Vec<Value> {
         let mut out = vec![];
-        for s in self.servers.read().await.values() {
+        let servers: Vec<Arc<McpServer>> = self.servers.read().await.values().cloned().collect();
+        for s in servers {
             if s.info.lock()["capabilities"]["prompts"].is_null() {
                 continue;
             }
@@ -519,7 +519,8 @@ impl McpManager {
 
     pub async fn list_resources(&self) -> Vec<Value> {
         let mut out = vec![];
-        for s in self.servers.read().await.values() {
+        let servers: Vec<Arc<McpServer>> = self.servers.read().await.values().cloned().collect();
+        for s in servers {
             if s.info.lock()["capabilities"]["resources"].is_null() {
                 continue;
             }
@@ -561,8 +562,13 @@ pub fn convert_result(r: &Value) -> (Vec<Value>, bool) {
             "text" => blocks.push(json!({"type": "text", "text": truncate_middle(c["text"].as_str().unwrap_or(""), 100_000)})),
             "image" => {
                 let mime = c["mimeType"].as_str().unwrap_or("image/png");
-                if matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
-                    blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": c["data"]}}));
+                let normalized = if matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
+                    crate::attachments::normalize_image_b64(c["data"].as_str().unwrap_or(""), mime)
+                } else {
+                    None
+                };
+                if let Some((data, m)) = normalized {
+                    blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": m, "data": data}}));
                 } else {
                     blocks.push(json!({"type": "text", "text": format!("[image of type {mime}]")}));
                 }
@@ -634,10 +640,20 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
         let mut child = cmd
             .spawn()
             .map_err(|e| (AppError::msg(format!("Could not start `{command}`: {e}")), vec![]))?;
-        let stdin = child.stdin.take().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // writer: the only owner of stdin
+        tokio::spawn(async move {
+            while let Some(line) = rx.recv().await {
+                if stdin.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                let _ = stdin.flush().await;
+            }
+        });
         // stderr -> logs
         {
             let logs = logs.clone();
@@ -648,10 +664,11 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
                 }
             });
         }
-        // stdout -> responses
+        // stdout -> responses, and replies to requests the server sends us
         {
             let pending = pending.clone();
             let logs = logs.clone();
+            let tx = tx.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
@@ -659,10 +676,22 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
                         push_log(&logs, format!("[stdout] {l}"));
                         continue;
                     };
+                    if let Some(method) = v["method"].as_str() {
+                        // A request from the server (has an id) needs an answer.
+                        if !v["id"].is_null() {
+                            let reply = match method {
+                                "ping" => json!({"jsonrpc": "2.0", "id": v["id"], "result": {}}),
+                                "roots/list" => json!({"jsonrpc": "2.0", "id": v["id"], "result": {"roots": []}}),
+                                _ => json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32601, "message": format!("Method not supported: {method}")}}),
+                            };
+                            let _ = tx.send(format!("{reply}\n"));
+                        }
+                        continue;
+                    }
                     if let Some(id) = v["id"].as_i64() {
                         if v.get("result").is_some() || v.get("error").is_some() {
-                            if let Some(tx) = pending.lock().remove(&id) {
-                                let _ = tx.send(match v.get("error") {
+                            if let Some(otx) = pending.lock().remove(&id) {
+                                let _ = otx.send(match v.get("error") {
                                     Some(e) => Err(e.clone()),
                                     None => Ok(v["result"].clone()),
                                 });
@@ -675,7 +704,7 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
             });
         }
         Transport::Stdio {
-            stdin: tokio::sync::Mutex::new(stdin),
+            tx,
             child: Mutex::new(Some(child)),
             pending,
         }
@@ -715,7 +744,13 @@ mod tests {
 
     #[test]
     fn result_conversion() {
-        let (b, err) = convert_result(&json!({"content":[{"type":"text","text":"ok"},{"type":"image","data":"AAA","mimeType":"image/png"}]}));
+        use base64::Engine;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(png.get_ref());
+        let (b, err) = convert_result(&json!({"content":[{"type":"text","text":"ok"},{"type":"image","data":data,"mimeType":"image/png"}]}));
+        let (bad, _) = convert_result(&json!({"content":[{"type":"image","data":"AAA","mimeType":"image/png"}]}));
+        assert_eq!(bad[0]["type"], "text");
         assert!(!err);
         assert_eq!(b[0]["text"], "ok");
         assert_eq!(b[1]["source"]["media_type"], "image/png");
@@ -730,9 +765,26 @@ mod tests {
         }
         let script = r#"
 import sys, json
+got_roots = False
+deferred = None
+def send(o):
+    print(json.dumps(o), flush=True)
+TOOLS = {'tools': [{'name': 'echo', 'description': 'Echo', 'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}}]}
 for line in sys.stdin:
     m = json.loads(line)
+    if m.get('method') == 'notifications/initialized':
+        send({'jsonrpc': '2.0', 'id': 'srv-1', 'method': 'roots/list'})
+        continue
+    if 'method' not in m:
+        if m.get('id') == 'srv-1' and m.get('result') == {'roots': []}:
+            got_roots = True
+            if deferred is not None:
+                send({'jsonrpc': '2.0', 'id': deferred, 'result': TOOLS})
+        continue
     if 'id' not in m: continue
+    if m['method'] == 'tools/list' and not got_roots:
+        deferred = m['id']
+        continue
     if m['method'] == 'initialize':
         r = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '1'}}
     elif m['method'] == 'tools/list':

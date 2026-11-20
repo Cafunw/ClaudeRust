@@ -92,6 +92,7 @@ const en = {
   notifications_toggle: 'Notifications', notifications_toggle_d: 'Notify me when Claude finishes responding while the app is in the background.',
   searched_chats: 'Searched past chats', recent_chats_tool: 'Looked at recent chats',
   install_extension: 'Install extension…', install: 'Install', extension_installed: 'Installed {name}',
+  st_connected: 'connected', st_failed: 'failed', st_disabled: 'disabled', st_starting: 'starting',
 };
 
 const tr = {
@@ -187,6 +188,7 @@ const tr = {
   notifications_toggle: 'Bildirimler', notifications_toggle_d: 'Uygulama arka plandayken Claude yanıtını bitirdiğinde bildir.',
   searched_chats: 'Geçmiş sohbetlerde arandı', recent_chats_tool: 'Son sohbetlere bakıldı',
   install_extension: 'Eklenti yükle…', install: 'Yükle', extension_installed: '{name} yüklendi',
+  st_connected: 'bağlı', st_failed: 'başarısız', st_disabled: 'devre dışı', st_starting: 'başlatılıyor',
 };
 
 const dicts = { en, tr };

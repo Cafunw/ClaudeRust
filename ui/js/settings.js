@@ -270,7 +270,7 @@ function serverCard(s, redraw) {
   const disabled = (store.settings.disabled_mcp_servers || []).includes(s.name) || s.status === 'disabled';
   const card = h(`<div class="server"><div class="head">${icon('plug', 16)}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
     <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t('tools_count', { n: s.tools.length }) : ''}</div></div>
-    <span class="st ${esc(s.status)}">${esc(s.status)}</span>
+    <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
     <label class="switch" title="${t('enabled')}"><input type="checkbox" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);
   card.querySelector('input').addEventListener('change', (e) => {
     const set = new Set(store.settings.disabled_mcp_servers || []);

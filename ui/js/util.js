@@ -31,11 +31,12 @@ export function relTime(ms) {
   const now = new Date();
   const day = 86400000;
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  if (ms >= startToday) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const loc = document.documentElement.lang || undefined;
+  if (ms >= startToday) return d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
   if (ms >= startToday - day) return t('yesterday');
   const days = Math.floor((startToday - ms) / day) + 1;
   if (days < 7) return t('days_ago', { n: days });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+  return d.toLocaleDateString(loc, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
 export function humanSize(n) {

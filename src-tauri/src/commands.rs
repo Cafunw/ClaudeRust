@@ -298,10 +298,16 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
 #[tauri::command]
 pub async fn regenerate(app: AppHandle, state: St<'_>, conversation_id: String, user_message_id: String, model: Option<String>) -> AppResult<()> {
     let st = state.inner().clone();
+    if st.runs.lock().contains_key(&conversation_id) {
+        return Err(AppError::msg("Claude is still responding. Stop the response or wait for it to finish."));
+    }
+    let msg = st.db.msg_get(&user_message_id)?;
+    if msg.conversation_id != conversation_id {
+        return Err(AppError::msg("Message not found in this conversation."));
+    }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         st.db.conv_set_model(&conversation_id, &m)?;
     }
-    let msg = st.db.msg_get(&user_message_id)?;
     if msg.role != "user" {
         return Err(AppError::msg("Can only regenerate from a user message."));
     }
@@ -316,6 +322,9 @@ pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: S
         return Err(AppError::msg("Wait for the response to finish before switching versions."));
     }
     let nodes = st.db.tree_nodes(&conversation_id)?;
+    if !nodes.iter().any(|n| n.id == message_id) {
+        return Err(AppError::msg("Message not found in this conversation."));
+    }
     let leaf = view::latest_leaf(&nodes, &message_id);
     st.db.conv_set_leaf(&conversation_id, Some(&leaf))?;
     view::conversation_view(&st, &conversation_id).await
@@ -333,8 +342,18 @@ pub struct ConvUpdate {
     pub title: Option<String>,
     pub starred: Option<bool>,
     pub model: Option<String>,
+    /// Missing = unchanged; `null` = remove from project.
+    #[serde(default, deserialize_with = "double_option")]
     pub project_id: Option<Option<String>>,
     pub options: Option<Value>,
+}
+
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[tauri::command]
@@ -897,3 +916,17 @@ pub async fn reset_onboarding(state: St<'_>) -> AppResult<()> {
     s.save(&st.db)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn project_id_null_vs_missing() {
+        let a: ConvUpdate = serde_json::from_value(json!({"id": "x"})).unwrap();
+        assert!(a.project_id.is_none());
+        let b: ConvUpdate = serde_json::from_value(json!({"id": "x", "project_id": null})).unwrap();
+        assert_eq!(b.project_id, Some(None));
+        let c: ConvUpdate = serde_json::from_value(json!({"id": "x", "project_id": "p"})).unwrap();
+        assert_eq!(c.project_id, Some(Some("p".to_string())));
+    }
+}

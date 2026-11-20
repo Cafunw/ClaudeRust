@@ -71,13 +71,10 @@ document.addEventListener('click', async (e) => {
   }
   const a = e.target.closest('a[href]');
   if (a && !a.closest('[data-internal]')) {
-    const href = a.getAttribute('href');
-    if (/^(https?:|mailto:)/i.test(href)) {
-      e.preventDefault();
-      call('open_external', { url: href }).catch(() => {});
-    } else if (href && href.startsWith('#')) {
-      e.preventDefault();
-    }
+    // Never navigate the app window itself; web links open in the browser.
+    e.preventDefault();
+    const href = a.getAttribute('href') || '';
+    if (/^(https?:|mailto:)/i.test(href)) call('open_external', { url: href }).catch(() => {});
   }
 });
 
@@ -268,7 +265,7 @@ function renderSearch(el, p) {
   el.innerHTML = `<button class="tool-head">${icon('globe', 15)}<span class="tname">${running ? `<span class="shimmer">${t('searching_web')}</span>` : t('searched_web')}</span><span class="targ">${esc(p.query || '')}</span>
     ${p.status === 'error' ? `<span class="status err">${esc(p.error || t('failed'))}</span>` : running ? '<span class="status"><span class="spinner"></span></span>' : `<span class="status">${n} ${t('results')}</span>`}
     ${icon('chevRight', 14, 'class="chev"')}</button>
-    <div class="tool-body"><div class="tool-section search-results">${(p.results || []).map((r) => `<a class="search-result" href="${esc(r.url)}">${favicon(r.domain)}<span class="t">${esc(r.title || r.url)}</span><span class="d">${esc(r.domain || '')}</span></a>`).join('')}</div></div>`;
+    <div class="tool-body"><div class="tool-section search-results">${(p.results || []).filter((r) => /^https?:/i.test(r.url || '')).map((r) => `<a class="search-result" href="${esc(r.url)}">${favicon(r.domain)}<span class="t">${esc(r.title || r.url)}</span><span class="d">${esc(r.domain || '')}</span></a>`).join('')}</div></div>`;
   el.querySelector('.tool-head').addEventListener('click', () => el.classList.toggle('open'));
 }
 

@@ -151,7 +151,7 @@ impl TextAcc {
             let mut seen = HashSet::new();
             for c in cits {
                 let url = c["url"].as_str().unwrap_or("");
-                if url.is_empty() || !seen.insert(url.to_string()) {
+                if crate::markdown::safe_url(url).is_none() || !seen.insert(url.to_string()) {
                     continue;
                 }
                 let title = c["title"].as_str().unwrap_or(url).to_string();
@@ -279,6 +279,7 @@ fn server_result_view(name: &str, block: &Value) -> Value {
                 let results: Vec<Value> = arr
                     .iter()
                     .filter(|r| r["type"] == "web_search_result")
+                    .filter(|r| crate::markdown::safe_url(r["url"].as_str().unwrap_or("")).is_some())
                     .map(|r| {
                         let url = r["url"].as_str().unwrap_or("");
                         json!({"title": r["title"], "url": url, "domain": domain_of(url), "page_age": r["page_age"]})

@@ -97,6 +97,25 @@ fn downscale(bytes: &[u8], mime: &str) -> AppResult<(Vec<u8>, String)> {
     Ok((out.into_inner(), "image/jpeg".into()))
 }
 
+/// Make a base64 image safe to send to the API (size/dimension limits).
+/// Returns `None` if it can't be decoded.
+pub fn normalize_image_b64(data: &str, mime: &str) -> Option<(String, String)> {
+    if data.len() <= 4_000_000 && data.len() > 0 {
+        // small enough: still verify dimensions cheaply
+        let bytes = B64.decode(data.trim()).ok()?;
+        if let Ok((w, h)) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions() {
+            if w.max(h) <= 8000 {
+                return Some((data.to_string(), mime.to_string()));
+            }
+        }
+        let (b, m) = downscale(&bytes, mime).ok()?;
+        return Some((B64.encode(b), m));
+    }
+    let bytes = B64.decode(data.trim()).ok()?;
+    let (b, m) = downscale(&bytes, mime).ok()?;
+    Some((B64.encode(b), m))
+}
+
 fn thumbnail(bytes: &[u8]) -> Option<String> {
     let img = image::load_from_memory(bytes).ok()?;
     let t = img.thumbnail(240, 240);
@@ -119,7 +138,7 @@ fn docx_text(bytes: &[u8]) -> AppResult<String> {
     let b = xml.as_bytes();
     while i < b.len() {
         if b[i] == b'<' {
-            let end = xml[i..].find('>').map(|j| i + j).unwrap_or(b.len() - 1);
+            let Some(end) = xml[i..].find('>').map(|j| i + j) else { break };
             let tag = &xml[i + 1..end];
             if tag.starts_with("/w:p") && !tag.starts_with("/w:pPr") {
                 out.push('\n');
@@ -158,7 +177,10 @@ pub fn from_bytes(name: &str, bytes: &[u8]) -> AppResult<Attachment> {
             data: B64.encode(&data),
         });
     }
-    if bytes.starts_with(b"%PDF") || ext == "pdf" {
+    if ext == "pdf" && !bytes.starts_with(b"%PDF") {
+        return Err(AppError::msg(format!("“{name}” is not a valid PDF file.")));
+    }
+    if bytes.starts_with(b"%PDF") {
         if bytes.len() > MAX_PDF_BYTES {
             return Err(AppError::msg("PDF files must be smaller than 32 MB."));
         }
@@ -213,6 +235,13 @@ pub fn from_bytes(name: &str, bytes: &[u8]) -> AppResult<Attachment> {
 }
 
 pub fn from_path(path: &std::path::Path) -> AppResult<Attachment> {
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(AppError::msg(format!("{} is not a regular file.", path.display())));
+    }
+    if meta.len() > 40 * 1024 * 1024 {
+        return Err(AppError::msg("This file is too large to attach (40 MB maximum)."));
+    }
     let bytes = std::fs::read(path)?;
     let name = path
         .file_name()

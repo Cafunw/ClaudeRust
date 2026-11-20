@@ -11,6 +11,7 @@ use regex::RegexBuilder;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -211,37 +212,100 @@ pub enum Perm {
 
 const SAFE_CMDS: &[&str] = &[
     "ls", "pwd", "cat", "head", "tail", "wc", "echo", "which", "whoami", "date", "file", "stat", "du", "df", "tree",
-    "grep", "rg", "uname", "env", "printenv", "basename", "dirname", "realpath", "sort", "uniq", "diff", "type",
+    "grep", "rg", "uname", "basename", "dirname", "realpath", "sort", "uniq", "diff", "type",
 ];
 const SAFE_GIT: &[&str] = &["status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "blame", "remote", "describe", "shortlog", "tag"];
 
-pub fn is_safe_command(cmd: &str) -> bool {
-    if cmd.contains('>') || cmd.contains("$(") || cmd.contains('`') || cmd.contains("<(") {
-        return false;
+/// Split a shell command into simple commands (argument vectors). Returns
+/// `None` for anything we can't reason about safely: substitutions,
+/// redirections, background jobs, ANSI-C quoting, env assignments, or
+/// quoting that doesn't parse.
+pub fn split_simple_commands(cmd: &str) -> Option<Vec<Vec<String>>> {
+    for bad in ["$(", "`", "<(", ">(", "${", "$'", ">", "<", "\\\n"] {
+        if cmd.contains(bad) {
+            return None;
+        }
     }
-    let normalized = cmd.replace("&&", ";").replace("||", ";").replace('|', ";");
-    normalized.split([';', '\n']).all(|part| {
-        let words = shell_words::split(part.trim()).unwrap_or_default();
-        let Some(first) = words.first() else { return true };
-        if first == "git" {
-            return words.get(1).map(|s| SAFE_GIT.contains(&s.as_str())).unwrap_or(false)
-                && !words.iter().any(|w| w == "-D" || w == "--delete" || w == "-d" || w == "add" || w == "remove");
+    let norm = cmd.replace("&&", "\u{1}").replace("||", "\u{1}");
+    if norm.contains('&') {
+        return None;
+    }
+    let norm = norm.replace(['|', ';', '\n'], "\u{1}");
+    let mut out = vec![];
+    for part in norm.split('\u{1}') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
         }
-        if first == "find" {
-            return !words.iter().any(|w| w == "-exec" || w == "-execdir" || w == "-delete" || w == "-ok");
+        let words = shell_words::split(part).ok()?;
+        if words.is_empty() {
+            continue;
         }
-        SAFE_CMDS.contains(&first.as_str())
+        if words[0].contains('=') {
+            return None;
+        }
+        out.push(words);
+    }
+    Some(out)
+}
+
+fn simple_is_safe(w: &[String]) -> bool {
+    let first = w[0].as_str();
+    let args = &w[1..];
+    match first {
+        "git" => {
+            let Some(sub) = args.first() else { return false };
+            if !SAFE_GIT.contains(&sub.as_str()) {
+                return false;
+            }
+            if args.iter().any(|a| a.starts_with("--output") || a == "--ext-diff" || a.starts_with("--exec") || a.starts_with("-c")) {
+                return false;
+            }
+            let listing: &[&str] = match sub.as_str() {
+                "branch" => &["-a", "--all", "-r", "--remotes", "-v", "-vv", "--list", "--show-current", "--no-color", "--merged", "--no-merged"],
+                "tag" => &["-l", "--list", "-n"],
+                "remote" => &["-v", "--verbose"],
+                _ => return true,
+            };
+            args[1..].iter().all(|a| listing.contains(&a.as_str()))
+        }
+        "find" => !args.iter().any(|a| {
+            matches!(a.as_str(), "-exec" | "-execdir" | "-delete" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")
+        }),
+        "rg" => !args.iter().any(|a| a.starts_with("--pre")),
+        "sort" => !args.iter().any(|a| a.starts_with("--output") || (a.starts_with("-o")) || (a.starts_with('-') && !a.starts_with("--") && a.contains('o'))),
+        "tree" => !args.iter().any(|a| a.starts_with("-o")),
+        "date" => !args.iter().any(|a| a == "-s" || a.starts_with("--set")),
+        other => SAFE_CMDS.contains(&other),
+    }
+}
+
+/// True when every argument that names a path stays inside the project.
+fn args_inside(w: &[String], s: Option<&CodeSession>) -> bool {
+    let Some(s) = s else { return true };
+    w[1..].iter().all(|a| {
+        let looks_like_path = a.starts_with('/') || a.starts_with('~') || a.contains("..") || (cfg!(windows) && a.contains(':'));
+        !looks_like_path || s.is_inside(&s.resolve(a.trim_start_matches(|c| c == '=' )))
     })
 }
 
-/// Prefix used for "allow for this session" rules on Bash commands.
-pub fn bash_rule_prefix(cmd: &str) -> String {
-    let words = shell_words::split(cmd.trim()).unwrap_or_default();
-    match words.as_slice() {
+pub fn is_safe_command(cmd: &str) -> bool {
+    is_safe_command_in(cmd, None)
+}
+
+fn is_safe_command_in(cmd: &str, s: Option<&CodeSession>) -> bool {
+    match split_simple_commands(cmd) {
+        Some(parts) => !parts.is_empty() && parts.iter().all(|w| simple_is_safe(w) && args_inside(w, s)),
+        None => false,
+    }
+}
+
+fn prefix_of(w: &[String]) -> String {
+    let multi = ["git", "npm", "pnpm", "yarn", "bun", "cargo", "go", "make", "docker", "kubectl", "pip", "uv", "poetry", "dotnet", "mvn", "gradle", "python", "python3", "node", "npx"];
+    match w {
         [] => String::new(),
         [a] => a.clone(),
         [a, b, ..] => {
-            let multi = ["git", "npm", "pnpm", "yarn", "bun", "cargo", "go", "make", "docker", "kubectl", "pip", "uv", "poetry", "dotnet", "mvn", "gradle", "python", "python3", "node", "npx"];
             if multi.contains(&a.as_str()) && !b.starts_with('-') {
                 format!("{a} {b}")
             } else {
@@ -251,25 +315,119 @@ pub fn bash_rule_prefix(cmd: &str) -> String {
     }
 }
 
-pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String]) -> Perm {
+/// Prefix used for "allow for this session" rules on Bash commands.
+pub fn bash_rule_prefix(cmd: &str) -> String {
+    split_simple_commands(cmd)
+        .and_then(|p| p.into_iter().next())
+        .map(|w| prefix_of(&w))
+        .unwrap_or_default()
+}
+
+fn bash_allowed_by_rules(cmd: &str, rules: &[String], s: Option<&CodeSession>) -> bool {
+    let Some(parts) = split_simple_commands(cmd) else { return false };
+    !parts.is_empty()
+        && parts.iter().all(|w| {
+            (simple_is_safe(w) && args_inside(w, s)) || rules.iter().any(|r| r == &format!("Bash({})", prefix_of(w)))
+        })
+}
+
+fn path_rule_allows(rules: &[String], p: &Path) -> bool {
+    let target = canonical_or_self(p);
+    rules.iter().any(|r| {
+        r.strip_prefix("Path(")
+            .and_then(|x| x.strip_suffix(')'))
+            .map(|d| target.starts_with(d))
+            .unwrap_or(false)
+    })
+}
+
+fn canonical_or_self(p: &Path) -> PathBuf {
+    // canonicalize the nearest existing ancestor and re-append the rest
+    let mut cur = p.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = vec![];
+    loop {
+        if let Ok(c) = cur.canonicalize() {
+            let mut full = c;
+            for r in rest.iter().rev() {
+                full.push(r);
+            }
+            return full;
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent().map(|x| x.to_path_buf())) {
+            (Some(n), Some(par)) => {
+                rest.push(n);
+                cur = par;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+impl CodeSession {
+    /// Is `p` (absolute) inside the session's project folder? Paths whose
+    /// unresolved part contains `..` count as outside.
+    pub fn is_inside(&self, p: &Path) -> bool {
+        if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) && !p.exists() {
+            return false;
+        }
+        let root = canonical_or_self(&self.root);
+        canonical_or_self(p).starts_with(root)
+    }
+}
+
+fn input_path(s: &CodeSession, input: &Value, key: &str) -> PathBuf {
+    match input[key].as_str().filter(|p| !p.is_empty()) {
+        Some(p) => s.resolve(p),
+        None => s.cwd.lock().clone(),
+    }
+}
+
+pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String], s: Option<&CodeSession>) -> Perm {
+    let bypass = mode == "bypassPermissions";
+    let outside = |key: &str| -> bool {
+        match s {
+            Some(s) => {
+                let p = input_path(s, input, key);
+                !s.is_inside(&p) && !path_rule_allows(rules, &p)
+            }
+            None => false,
+        }
+    };
     match name {
-        "Read" | "Glob" | "Grep" | "TodoWrite" | "ExitPlanMode" => Perm::Allow,
-        "Write" | "Edit" => match mode {
-            "plan" => Perm::Deny("Plan mode is active: files can't be modified until the user approves a plan (call ExitPlanMode).".into()),
-            "acceptEdits" | "bypassPermissions" => Perm::Allow,
-            _ if rules.iter().any(|r| r == "Edit") => Perm::Allow,
-            _ => Perm::Ask,
-        },
+        "TodoWrite" | "ExitPlanMode" => Perm::Allow,
+        "Read" | "Glob" | "Grep" => {
+            let key = if name == "Read" { "file_path" } else { "path" };
+            if !bypass && outside(key) {
+                Perm::Ask
+            } else {
+                Perm::Allow
+            }
+        }
+        "Write" | "Edit" => {
+            if mode == "plan" {
+                return Perm::Deny("Plan mode is active: files can't be modified until the user approves a plan (call ExitPlanMode).".into());
+            }
+            if bypass {
+                return Perm::Allow;
+            }
+            if outside("file_path") {
+                return Perm::Ask;
+            }
+            if mode == "acceptEdits" || rules.iter().any(|r| r == "Edit") {
+                Perm::Allow
+            } else {
+                Perm::Ask
+            }
+        }
         "Bash" => {
             let cmd = input["command"].as_str().unwrap_or("");
-            if mode == "bypassPermissions" || is_safe_command(cmd) {
+            if bypass || is_safe_command_in(cmd, s) {
                 return Perm::Allow;
             }
             if mode == "plan" {
                 return Perm::Deny("Plan mode is active: only read-only commands can run until the user approves a plan (call ExitPlanMode).".into());
             }
-            let prefix = bash_rule_prefix(cmd);
-            if !prefix.is_empty() && rules.iter().any(|r| r == &format!("Bash({prefix})")) {
+            if bash_allowed_by_rules(cmd, rules, s) {
                 return Perm::Allow;
             }
             Perm::Ask
@@ -278,30 +436,61 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String])
     }
 }
 
-pub fn session_rule(name: &str, input: &Value) -> String {
+/// Rules to remember when the user picks "allow for this session".
+pub fn session_rules(s: &CodeSession, name: &str, input: &Value) -> Vec<String> {
     match name {
-        "Write" | "Edit" => "Edit".into(),
-        "Bash" => format!("Bash({})", bash_rule_prefix(input["command"].as_str().unwrap_or(""))),
-        other => other.to_string(),
+        "Write" | "Edit" | "Read" | "Glob" | "Grep" => {
+            let key = if matches!(name, "Glob" | "Grep") { "path" } else { "file_path" };
+            let p = input_path(s, input, key);
+            if s.is_inside(&p) {
+                if matches!(name, "Write" | "Edit") {
+                    vec!["Edit".into()]
+                } else {
+                    vec![]
+                }
+            } else {
+                let c = canonical_or_self(&p);
+                let dir = if c.is_dir() { c } else { c.parent().map(|x| x.to_path_buf()).unwrap_or(c) };
+                vec![format!("Path({})", dir.display())]
+            }
+        }
+        "Bash" => split_simple_commands(input["command"].as_str().unwrap_or(""))
+            .unwrap_or_default()
+            .iter()
+            .filter(|w| !simple_is_safe(w))
+            .map(|w| format!("Bash({})", prefix_of(w)))
+            .collect(),
+        _ => vec![],
     }
 }
 
 pub async fn execute(
-    s: &CodeSession,
+    s: Arc<CodeSession>,
     name: &str,
     input: &Value,
     cancel: &CancellationToken,
     default_timeout: Duration,
 ) -> ToolOutput {
-    let r = match name {
-        "Bash" => bash(s, input, cancel, default_timeout).await,
-        "Read" => read(s, input),
-        "Write" => write(s, input),
-        "Edit" => edit(s, input),
-        "Glob" => glob(s, input),
-        "Grep" => grep(s, input),
-        "TodoWrite" => todo(input),
+    if name == "Bash" {
+        return bash(&s, input, cancel, default_timeout)
+            .await
+            .unwrap_or_else(|e| ToolOutput::err(e.to_string()));
+    }
+    let name2 = name.to_string();
+    let input2 = input.clone();
+    let c2 = cancel.clone();
+    let task = tokio::task::spawn_blocking(move || match name2.as_str() {
+        "Read" => read(&s, &input2),
+        "Write" => write(&s, &input2),
+        "Edit" => edit(&s, &input2),
+        "Glob" => glob(&s, &input2, &c2),
+        "Grep" => grep(&s, &input2, &c2),
+        "TodoWrite" => todo(&input2),
         other => Err(AppError::msg(format!("Unknown tool {other}"))),
+    });
+    let r = tokio::select! {
+        r = task => r.unwrap_or_else(|e| Err(AppError::msg(format!("The tool failed unexpectedly: {e}")))),
+        _ = cancel.cancelled() => Ok(ToolOutput::err("The user interrupted this tool call.")),
     };
     r.unwrap_or_else(|e| ToolOutput::err(e.to_string()))
 }
@@ -323,6 +512,27 @@ fn todo(input: &Value) -> AppResult<ToolOutput> {
 
 // ---------------------------------------------------------------- Bash
 
+const BASH_OUTPUT_CAP: usize = 2_000_000;
+
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        match r.read(&mut chunk).await {
+            Ok(0) | Err(_) => return (buf, false),
+            Ok(n) => {
+                if buf.len() + n > BASH_OUTPUT_CAP {
+                    let room = BASH_OUTPUT_CAP - buf.len();
+                    buf.extend_from_slice(&chunk[..room]);
+                    return (buf, true);
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+    }
+}
+
 async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, default_timeout: Duration) -> AppResult<ToolOutput> {
     let command = input["command"].as_str().unwrap_or("").to_string();
     if command.trim().is_empty() {
@@ -330,6 +540,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
     }
     let timeout = input["timeout"]
         .as_f64()
+        .filter(|v| v.is_finite())
         .map(|ms| Duration::from_millis(ms.clamp(1000.0, 600_000.0) as u64))
         .unwrap_or(default_timeout);
     let cwd = s.cwd.lock().clone();
@@ -361,28 +572,51 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         (c, None)
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| AppError::msg(format!("Failed to start shell: {e}")))?;
+    let mut child = cmd.spawn().map_err(|e| AppError::msg(format!("Failed to start shell: {e}")))?;
     let pid = child.id();
     let kill_group = move || {
         #[cfg(unix)]
         if let Some(p) = pid {
-            let _ = std::process::Command::new("kill").args(["-TERM", &format!("-{p}")]).status();
+            let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{p}")]).status();
         }
         #[cfg(windows)]
         if let Some(p) = pid {
             let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &p.to_string()]).status();
         }
     };
-    let out = tokio::select! {
-        r = tokio::time::timeout(timeout, child.wait_with_output()) => r,
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let run = async {
+        let (o, e) = tokio::join!(
+            async {
+                match stdout {
+                    Some(x) => read_capped(x).await,
+                    None => (vec![], false),
+                }
+            },
+            async {
+                match stderr {
+                    Some(x) => read_capped(x).await,
+                    None => (vec![], false),
+                }
+            }
+        );
+        let capped = o.1 || e.1;
+        if capped {
+            kill_group();
+        }
+        let status = child.wait().await;
+        (o.0, e.0, capped, status)
+    };
+    let res = tokio::select! {
+        r = tokio::time::timeout(timeout, run) => r,
         _ = cancel.cancelled() => {
             kill_group();
             return Ok(ToolOutput::err("Command was interrupted by the user."));
         }
     };
-    let out = match out {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(AppError::msg(format!("Command failed: {e}"))),
+    let (out, err, capped, status) = match res {
+        Ok(v) => v,
         Err(_) => {
             kill_group();
             return Ok(ToolOutput::err(format!("Command timed out after {} seconds.", timeout.as_secs())));
@@ -397,9 +631,9 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         }
         let _ = std::fs::remove_file(pf);
     }
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let code = out.status.code().unwrap_or(-1);
+    let code = status.ok().and_then(|st| st.code()).unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out).to_string();
+    let stderr = String::from_utf8_lossy(&err).to_string();
     let mut text = String::new();
     if !stdout.trim_end().is_empty() {
         text.push_str(stdout.trim_end());
@@ -410,7 +644,9 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         }
         text.push_str(stderr.trim_end());
     }
-    if code != 0 {
+    if capped {
+        text.push_str("\n[Output exceeded 2 MB; the command was stopped.]");
+    } else if code != 0 {
         if !text.is_empty() {
             text.push('\n');
         }
@@ -421,7 +657,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
     }
     Ok(ToolOutput {
         content: vec![json!({"type": "text", "text": truncate_middle(&text, MAX_OUTPUT_CHARS)})],
-        is_error: code != 0,
+        is_error: code != 0 || capped,
     })
 }
 
@@ -431,7 +667,16 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8000).any(|b| *b == 0)
 }
 
+fn num_arg(input: &Value, key: &str, default: usize, max: usize) -> usize {
+    input[key]
+        .as_f64()
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(1.0, max as f64) as usize)
+        .unwrap_or(default)
+}
+
 fn read(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
+    use std::io::BufRead;
     let path = s.resolve(input["file_path"].as_str().unwrap_or(""));
     if path.is_dir() {
         return Err(AppError::msg(format!(
@@ -439,37 +684,53 @@ fn read(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
             path.display()
         )));
     }
-    if !path.exists() {
-        return Err(AppError::msg(format!("File does not exist: {}", path.display())));
+    let meta = std::fs::metadata(&path).map_err(|_| AppError::msg(format!("File does not exist: {}", path.display())))?;
+    if !meta.is_file() {
+        return Err(AppError::msg(format!("{} is not a regular file.", path.display())));
     }
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf") {
         let a = attachments::from_path(&path)?;
         s.read_files.lock().insert(path.clone());
-        return Ok(ToolOutput {
-            content: vec![attachments::to_block(&a)],
-            is_error: false,
-        });
+        if a.kind != "text" {
+            return Ok(ToolOutput {
+                content: vec![attachments::to_block(&a)],
+                is_error: false,
+            });
+        }
     }
-    let bytes = std::fs::read(&path)?;
-    if is_binary(&bytes) {
+    let file = std::fs::File::open(&path)?;
+    let mut reader = std::io::BufReader::new(std::io::Read::take(file, 512 * 1024 * 1024));
+    if is_binary(reader.fill_buf()?) {
         return Err(AppError::msg(format!("{} appears to be a binary file.", path.display())));
     }
-    let text = String::from_utf8_lossy(&bytes);
     s.read_files.lock().insert(path.clone());
-    if text.is_empty() {
+    if meta.len() == 0 {
         return Ok(ToolOutput::text("<system-reminder>The file exists but is empty.</system-reminder>"));
     }
-    let offset = input["offset"].as_f64().map(|v| v.max(1.0) as usize).unwrap_or(1);
-    let limit = input["limit"].as_f64().map(|v| v.max(1.0) as usize).unwrap_or(2000);
+    let offset = num_arg(input, "offset", 1, 1_000_000_000);
+    let limit = num_arg(input, "limit", 2000, 10_000);
+    let end = offset.saturating_add(limit);
+    let count_all = meta.len() <= 20 * 1024 * 1024;
     let mut out = String::new();
     let mut total = 0usize;
-    for (i, line) in text.lines().enumerate() {
-        total = i + 1;
+    let mut more = false;
+    for (i, line) in reader.split(b'\n').enumerate() {
+        let Ok(line) = line else { break };
         let n = i + 1;
-        if n < offset || n >= offset + limit {
+        total = n;
+        if n < offset {
             continue;
         }
+        if n >= end {
+            more = true;
+            if count_all {
+                continue;
+            }
+            break;
+        }
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim_end_matches('\r');
         let line = if line.chars().count() > 2000 {
             format!("{}… [line truncated]", line.chars().take(2000).collect::<String>())
         } else {
@@ -477,13 +738,12 @@ fn read(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
         };
         out.push_str(&format!("{n:>6}\t{line}\n"));
     }
-    if offset + limit <= total {
-        out.push_str(&format!(
-            "\n[Showing lines {}-{} of {}. Use offset/limit to read more.]",
-            offset,
-            offset + limit - 1,
-            total
-        ));
+    if more {
+        if count_all {
+            out.push_str(&format!("\n[Showing lines {}-{} of {}. Use offset/limit to read more.]", offset, end - 1, total));
+        } else {
+            out.push_str(&format!("\n[Showing lines {}-{}. The file is large; use offset/limit to read more.]", offset, end - 1));
+        }
     }
     if out.is_empty() {
         out = format!("<system-reminder>The file has only {total} lines; offset {offset} is past the end.</system-reminder>");
@@ -540,6 +800,9 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     }
     if old == new {
         return Err(AppError::msg("old_string and new_string are identical; nothing to change."));
+    }
+    if std::fs::metadata(&path)?.len() > 50 * 1024 * 1024 {
+        return Err(AppError::msg("The file is too large to edit with this tool."));
     }
     let text = std::fs::read_to_string(&path)?;
     let count = if old.is_empty() { 0 } else { text.matches(old).count() };
@@ -623,7 +886,7 @@ fn walker(base: &Path) -> ignore::Walk {
         .build()
 }
 
-fn glob(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
+fn glob(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult<ToolOutput> {
     let pattern = input["pattern"].as_str().unwrap_or("");
     if pattern.is_empty() {
         return Err(AppError::msg("pattern is required"));
@@ -641,7 +904,10 @@ fn glob(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     let g = Glob::new(&pat).map_err(|e| AppError::msg(format!("Invalid glob: {e}")))?;
     let set = GlobSetBuilder::new().add(g).build().map_err(|e| AppError::msg(e.to_string()))?;
     let mut hits: Vec<(SystemTime, PathBuf)> = vec![];
-    for e in walker(&base).flatten() {
+    for (visited, e) in walker(&base).flatten().enumerate() {
+        if cancel.is_cancelled() || visited > 400_000 {
+            break;
+        }
         if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
@@ -692,7 +958,7 @@ fn type_exts(t: &str) -> Vec<&'static str> {
     }
 }
 
-fn grep(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
+fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult<ToolOutput> {
     let pattern = input["pattern"].as_str().unwrap_or("");
     if pattern.is_empty() {
         return Err(AppError::msg("pattern is required"));
@@ -701,10 +967,11 @@ fn grep(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     let ci = input["-i"].as_bool().unwrap_or(false);
     let multiline = input["multiline"].as_bool().unwrap_or(false);
     let show_n = input["-n"].as_bool().unwrap_or(true);
-    let ctx = input["-C"].as_f64().map(|v| v as usize);
-    let after = input["-A"].as_f64().map(|v| v as usize).or(ctx).unwrap_or(0);
-    let before = input["-B"].as_f64().map(|v| v as usize).or(ctx).unwrap_or(0);
-    let head_limit = input["head_limit"].as_f64().map(|v| v as usize);
+    let ctx_arg = |k: &str| input[k].as_f64().filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1000.0) as usize);
+    let ctx = ctx_arg("-C");
+    let after = ctx_arg("-A").or(ctx).unwrap_or(0);
+    let before = ctx_arg("-B").or(ctx).unwrap_or(0);
+    let head_limit = input["head_limit"].as_f64().filter(|v| v.is_finite()).map(|v| v.clamp(1.0, 100_000.0) as usize);
     let re = RegexBuilder::new(pattern)
         .case_insensitive(ci)
         .multi_line(true)
@@ -733,6 +1000,7 @@ fn grep(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     } else {
         walker(&base)
             .flatten()
+            .take(400_000)
             .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
             .map(|e| e.into_path())
             .filter(|p| {
@@ -748,8 +1016,13 @@ fn grep(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
 
     let mut file_hits: Vec<(SystemTime, PathBuf, usize)> = vec![];
     let mut lines_out: Vec<String> = vec![];
+    let mut scanned: u64 = 0;
     for f in files {
+        if cancel.is_cancelled() || scanned > 2_000_000_000 {
+            break;
+        }
         let Ok(meta) = std::fs::metadata(&f) else { continue };
+        scanned += meta.len();
         if meta.len() > 10 * 1024 * 1024 {
             continue;
         }
@@ -781,7 +1054,7 @@ fn grep(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
             let mut shown: Vec<usize> = vec![];
             for &m in &matched_lines {
                 let from = m.saturating_sub(before);
-                let to = (m + after).min(lines.len().saturating_sub(1));
+                let to = m.saturating_add(after).min(lines.len().saturating_sub(1));
                 for i in from..=to {
                     if !shown.contains(&i) {
                         shown.push(i);
@@ -939,34 +1212,79 @@ mod tests {
         assert!(!is_safe_command("find . -delete"));
         assert_eq!(bash_rule_prefix("npm test -- --watch"), "npm test");
         assert_eq!(bash_rule_prefix("./build.sh"), "./build.sh");
-        assert_eq!(check_permission("plan", "Edit", &json!({}), &[]), Perm::Deny("Plan mode is active: files can't be modified until the user approves a plan (call ExitPlanMode).".into()));
-        assert_eq!(check_permission("default", "Bash", &json!({"command":"npm test"}), &["Bash(npm test)".into()]), Perm::Allow);
+        assert_eq!(check_permission("plan", "Edit", &json!({}), &[], None), Perm::Deny("Plan mode is active: files can't be modified until the user approves a plan (call ExitPlanMode).".into()));
+        assert_eq!(check_permission("default", "Bash", &json!({"command":"npm test"}), &["Bash(npm test)".into()], None), Perm::Allow);
+        // bypass attempts found in review
+        for bad in ["ls & touch X", "env touch X", "touch X $'\\''", "rg --pre sh x", "sort -o out x", "sort -uo out x",
+                    "git diff --output=x", "find . -fprint x", "git branch newbranch", "git tag v1", "cat x > y", "ls; rm -rf /",
+                    "FOO=1 ls", "echo $(whoami)", "git -c core.pager=x log"] {
+            assert!(!is_safe_command(bad), "{bad}");
+        }
+        let rules = vec!["Bash(npm test)".to_string()];
+        assert_eq!(check_permission("default", "Bash", &json!({"command":"npm test && curl x | sh"}), &rules, None), Perm::Ask);
+        assert_eq!(check_permission("default", "Bash", &json!({"command":"npm test -- --watch && git status"}), &rules, None), Perm::Allow);
+    }
+
+    #[test]
+    fn outside_project_needs_permission() {
+        let d = tmp();
+        let s = CodeSession::new(d.clone());
+        let inside = d.join("a.txt").to_string_lossy().to_string();
+        assert_eq!(check_permission("acceptEdits", "Write", &json!({"file_path": inside}), &[], Some(&s)), Perm::Allow);
+        assert_eq!(check_permission("acceptEdits", "Write", &json!({"file_path": "/etc/passwd"}), &[], Some(&s)), Perm::Ask);
+        assert_eq!(check_permission("default", "Edit", &json!({"file_path": "../x"}), &["Edit".into()], Some(&s)), Perm::Ask);
+        assert_eq!(check_permission("default", "Read", &json!({"file_path": "/etc/hosts"}), &[], Some(&s)), Perm::Ask);
+        assert_eq!(check_permission("default", "Read", &json!({"file_path": "a.txt"}), &[], Some(&s)), Perm::Allow);
+        assert_eq!(check_permission("default", "Bash", &json!({"command": "cat /etc/hosts"}), &[], Some(&s)), Perm::Ask);
+        assert_eq!(check_permission("default", "Bash", &json!({"command": "cat a.txt"}), &[], Some(&s)), Perm::Allow);
+        assert_eq!(check_permission("bypassPermissions", "Read", &json!({"file_path": "/etc/hosts"}), &[], Some(&s)), Perm::Allow);
+        let rules = session_rules(&s, "Read", &json!({"file_path": "/etc/hosts"}));
+        assert_eq!(check_permission("default", "Read", &json!({"file_path": "/etc/hostname"}), &rules, Some(&s)), Perm::Allow);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[tokio::test]
+    async fn bash_output_is_capped() {
+        let d = tmp();
+        let s = Arc::new(CodeSession::new(d.clone()));
+        let c = CancellationToken::new();
+        #[cfg(unix)]
+        {
+            let b = execute(s.clone(), "Bash", &json!({"command": "cat /dev/zero"}), &c, Duration::from_secs(20)).await;
+            assert!(b.is_error);
+            assert!(b.content[0]["text"].as_str().unwrap().contains("exceeded"));
+            let r = execute(s.clone(), "Read", &json!({"file_path": "/dev/zero"}), &c, Duration::from_secs(5)).await;
+            assert!(r.is_error);
+            let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5)).await;
+            assert!(r.is_error); // missing file, but must not panic
+        }
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[tokio::test]
     async fn read_edit_write_glob_grep_bash() {
         let d = tmp();
-        let s = CodeSession::new(d.clone());
+        let s = Arc::new(CodeSession::new(d.clone()));
         let c = CancellationToken::new();
         let t = Duration::from_secs(20);
         let f = d.join("src/main.rs");
-        let w = execute(&s, "Write", &json!({"file_path": f.to_string_lossy(), "content": "fn main() {\n    println!(\"hi\");\n}\n"}), &c, t).await;
+        let w = execute(s.clone(), "Write", &json!({"file_path": f.to_string_lossy(), "content": "fn main() {\n    println!(\"hi\");\n}\n"}), &c, t).await;
         assert!(!w.is_error, "{:?}", w.content);
-        let e = execute(&s, "Edit", &json!({"file_path": "src/main.rs", "old_string": "\"hi\"", "new_string": "\"hello\""}), &c, t).await;
+        let e = execute(s.clone(), "Edit", &json!({"file_path": "src/main.rs", "old_string": "\"hi\"", "new_string": "\"hello\""}), &c, t).await;
         assert!(!e.is_error, "{:?}", e.content);
         assert!(std::fs::read_to_string(&f).unwrap().contains("hello"));
-        let r = execute(&s, "Read", &json!({"file_path": f.to_string_lossy()}), &c, t).await;
+        let r = execute(s.clone(), "Read", &json!({"file_path": f.to_string_lossy()}), &c, t).await;
         assert!(r.content[0]["text"].as_str().unwrap().contains("     2\t    println!(\"hello\");"));
-        let g = execute(&s, "Glob", &json!({"pattern": "*.rs"}), &c, t).await;
+        let g = execute(s.clone(), "Glob", &json!({"pattern": "*.rs"}), &c, t).await;
         assert!(g.content[0]["text"].as_str().unwrap().contains("main.rs"));
-        let g = execute(&s, "Grep", &json!({"pattern": "hel+o", "output_mode": "content"}), &c, t).await;
+        let g = execute(s.clone(), "Grep", &json!({"pattern": "hel+o", "output_mode": "content"}), &c, t).await;
         assert!(g.content[0]["text"].as_str().unwrap().contains(":2:"), "{:?}", g.content);
         #[cfg(unix)]
         {
-            let b = execute(&s, "Bash", &json!({"command": "mkdir -p sub && cd sub && pwd"}), &c, t).await;
+            let b = execute(s.clone(), "Bash", &json!({"command": "mkdir -p sub && cd sub && pwd"}), &c, t).await;
             assert!(!b.is_error);
             assert!(s.cwd.lock().ends_with("sub"));
-            let b = execute(&s, "Bash", &json!({"command": "exit 3"}), &c, t).await;
+            let b = execute(s.clone(), "Bash", &json!({"command": "exit 3"}), &c, t).await;
             assert!(b.is_error);
             assert!(b.content[0]["text"].as_str().unwrap().contains("Exit code 3"));
         }

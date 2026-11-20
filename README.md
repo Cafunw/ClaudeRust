@@ -90,6 +90,9 @@ cargo test -p clauderust --lib   # birim testleri
   ```
   Claude Desktop'ta zaten sunucularınız varsa *Claude Desktop'tan içe aktar* düğmesi onları kopyalar. GUI uygulamaları kabuk PATH'ini devralmadığı için ClaudeRust, `npx`/`uvx` gibi komutları giriş kabuğunuzun PATH'i ile çözer.
 - **Kod modu**: Kenar çubuğu → Kod → klasör seçin (veya yolu yapıştırın) → görev yazın. Dosya düzenlemeleri ve komutlar izin kartıyla onaylanır. Proje kökündeki `CLAUDE.md` ve `~/.claude/CLAUDE.md` talimat olarak yüklenir.
+  - Seçilen klasörün **dışındaki** her dosya erişimi (okuma dahil) izin ister; "Düzenlemeleri otomatik kabul et" modu yalnızca proje klasörü içinde geçerlidir.
+  - Yalnızca okuma yapan basit komutlar (`ls`, `cat`, `git status`, `rg` …) sorulmadan çalışır; yönlendirme (`>`), komut ikamesi (`$(...)`), arka plan (`&`) ya da proje dışı yol içeren her komut izin ister. "Bu oturum için izin ver" kuralları zincirdeki her komutu ayrı ayrı denetler.
+  - Komut çıktısı 2 MB ile, süre 2 dakika (en fazla 10) ile sınırlıdır; "Durdur" çalışan komutu ve alt süreçlerini sonlandırır.
 - **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama `Ctrl/⌘+K`, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`.
 
 ---

@@ -718,3 +718,10 @@ html:has(body.quick), body.quick { background: transparent !important; overflow:
   .page-inner { padding: 20px 16px 40px; }
   .settings-nav { width: 150px; }
 }
+
+/* Desktop-app behaviour: chrome isn't selectable, content is. */
+body { -webkit-user-select: none; user-select: none; }
+.md, .user-text, .thinking-body, .tool-body, .perm-card pre, .ap-body, .code-block, input, textarea, .logs,
+.page .d, .setting-row .d, .help, .notice .grow, .palette .s {
+  -webkit-user-select: text; user-select: text;
+}

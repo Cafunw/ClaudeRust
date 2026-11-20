@@ -605,7 +605,11 @@ pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str
     let conv_id = conv_id.to_string();
     let parent_id = parent_id.to_string();
     tauri::async_runtime::spawn(async move {
-        let res = run(&app, &st, &conv_id, parent_id, &cancel).await;
+        use futures_util::FutureExt;
+        let res = std::panic::AssertUnwindSafe(run(&app, &st, &conv_id, parent_id, &cancel))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(AppError::msg("Something went wrong while generating this response.")));
         st.runs.lock().remove(&conv_id);
         st.live.lock().remove(&conv_id);
         st.pending_perms.lock().retain(|_, v| v["conversation_id"] != conv_id.as_str());
@@ -1077,7 +1081,7 @@ async fn execute_tool(
             };
         }
         let rules = opt_strs(&conv.options, "allowed_rules");
-        match codetools::check_permission(&mode, name, input, &rules) {
+        match codetools::check_permission(&mode, name, input, &rules, Some(session)) {
             Perm::Deny(msg) => return (text_block(msg), true),
             Perm::Ask => {
                 let diff = codetools::preview_diff(Some(session), name, input);
@@ -1090,11 +1094,13 @@ async fn execute_tool(
                 match reply.as_ref().map(|r| r.decision.as_str()) {
                     Some("once") => {}
                     Some("session") | Some("chat") | Some("always") => {
-                        let rule = codetools::session_rule(name, input);
+                        let new_rules = codetools::session_rules(session, name, input);
                         update_conv_options(st, conv_id, |o| {
                             let mut arr = o["allowed_rules"].as_array().cloned().unwrap_or_default();
-                            if !arr.iter().any(|x| x == &json!(rule)) {
-                                arr.push(json!(rule));
+                            for rule in new_rules {
+                                if !arr.iter().any(|x| x == &json!(rule)) {
+                                    arr.push(json!(rule));
+                                }
                             }
                             o["allowed_rules"] = json!(arr);
                         });
@@ -1109,7 +1115,7 @@ async fn execute_tool(
             Perm::Allow => {}
         }
         let timeout = Duration::from_secs(settings.bash_timeout_secs);
-        let out = codetools::execute(session, name, input, cancel, timeout).await;
+        let out = codetools::execute(session.clone(), name, input, cancel, timeout).await;
         return (out.content, out.is_error);
     }
 
