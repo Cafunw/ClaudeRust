@@ -1,5 +1,15 @@
 // UI strings: English and Turkish.
 const en = {
+  budget_off: "No spending limit for turns in this session.",
+  cmd_budget: "Spending limit for each agent turn here",
+  budget_none: "no limit",
+  budget_current: "Spending limit per turn in this session: {amount}",
+  budget_current_default: "Spending limit per turn in this session: {amount} (the default from Settings → Code)",
+  budget_set: "Each turn in this session now pauses at {amount}.",
+  budget_invalid: "Give an amount in dollars, e.g. /budget 2.50, or off.",
+  budget_stop: "Paused: this turn has cost {spent}, reaching its {budget} spending limit. Continue to let Claude carry on.",
+  budget_setting: "Spending limit per turn",
+  budget_setting_d: "Pause an agent turn once it has cost this much (USD, estimated from list prices; empty = no limit). /budget changes it for one session.",
   att_digest: "digest",
   att_digest_tip: "Too large to send whole: Claude gets a digest of its {lines} lines — overview, {errors} errors and {warnings} warnings grouped with context, and the start and end of the file.",
   fork_here: "Continue in a new conversation from here",
@@ -404,6 +414,16 @@ const en = {
 };
 
 const tr = {
+  budget_off: "Bu oturumdaki turlar için harcama sınırı yok.",
+  cmd_budget: "Buradaki her ajan turu için harcama sınırı",
+  budget_none: "sınır yok",
+  budget_current: "Bu oturumda tur başına harcama sınırı: {amount}",
+  budget_current_default: "Bu oturumda tur başına harcama sınırı: {amount} (Ayarlar → Kod'daki varsayılan)",
+  budget_set: "Bu oturumdaki her tur artık {amount} tutarında duraklar.",
+  budget_invalid: "Dolar cinsinden bir tutar girin, ör. /budget 2.50 ya da off.",
+  budget_stop: "Duraklatıldı: bu tur {spent} tuttu ve {budget} harcama sınırına ulaştı. Claude'un sürdürmesi için Devam edin.",
+  budget_setting: "Tur başına harcama sınırı",
+  budget_setting_d: "Bir ajan turu bu tutara ulaşınca duraklatılır (USD, liste fiyatlarından tahmini; boş = sınır yok). /budget tek bir oturum için değiştirir.",
   att_digest: "özet",
   att_digest_tip: "Tamamı gönderilemeyecek kadar büyük: Claude {lines} satırın özetini alır — genel bakış, bağlamıyla gruplanmış {errors} hata ve {warnings} uyarı, dosyanın başı ve sonu.",
   fork_here: "Buradan yeni bir sohbette devam et",

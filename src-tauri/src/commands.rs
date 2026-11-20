@@ -1050,24 +1050,17 @@ pub async fn usage_stats(state: St<'_>, conversation_id: String) -> AppResult<Va
     let mut tot = (0u64, 0u64, 0u64, 0u64, 0.0f64);
     // answers copied by a fork were paid for in the original conversation
     for m in path.iter().filter(|m| m.role == "assistant" && m.meta["forked_from"].is_null()) {
-        let u = &m.meta["usage"];
-        let model = models::info(m.meta["model"].as_str().unwrap_or(&conv.model));
-        let i = u["input_tokens"].as_u64().unwrap_or(0);
-        let o = u["output_tokens"].as_u64().unwrap_or(0);
-        let cr = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-        let cw = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-        let su = &m.meta["subagent_usage"];
-        let (i, o, cr, cw) = (
-            i + su["input_tokens"].as_u64().unwrap_or(0),
-            o + su["output_tokens"].as_u64().unwrap_or(0),
-            cr + su["cache_read_input_tokens"].as_u64().unwrap_or(0),
-            cw + su["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-        );
-        tot.0 += i;
-        tot.1 += o;
-        tot.2 += cr;
-        tot.3 += cw;
-        tot.4 += (i as f64 * model.price.0 + o as f64 * model.price.1 + cr as f64 * model.price.0 * 0.1 + cw as f64 * model.price.0 * 1.25) / 1_000_000.0;
+        let model = m.meta["model"].as_str().unwrap_or(&conv.model);
+        for key in ["usage", "subagent_usage"] {
+            let u = &m.meta[key];
+            tot.0 += u["input_tokens"].as_u64().unwrap_or(0);
+            tot.1 += u["output_tokens"].as_u64().unwrap_or(0);
+            tot.2 += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            tot.3 += u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            if u.is_object() && !model.starts_with(crate::oai::PREFIX) {
+                tot.4 += usage_cost(model, u);
+            }
+        }
     }
     let start = crate::compact::start_index(&path).unwrap_or(0);
     let context = crate::compact::context_tokens(&path[start..]);

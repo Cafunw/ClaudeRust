@@ -363,6 +363,11 @@ async fn run_once(
         args.push("--model".into());
         args.push(conv.model.clone());
     }
+    let budget = crate::engine::turn_budget(&conv, &st.settings.read());
+    if budget > 0.0 {
+        args.push("--max-budget-usd".into());
+        args.push(budget.to_string());
+    }
     let mut with_history = false;
     if let Some(p) = prev {
         if let Some(sid) = p.meta["cc_session"].as_str() {
@@ -748,7 +753,12 @@ async fn run_once(
         t.iter().rev().take(8).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
     };
     let mut error: Option<String> = None;
+    let mut budget_stop: Option<Value> = None;
     match &result {
+        // the CLI stopped at the spending limit: a pause, not a failure
+        Some(r) if r["subtype"].as_str().is_some_and(|t| t.contains("budget")) && !interrupted => {
+            budget_stop = Some(json!({"budget": crate::engine::turn_budget(&conv, &st.settings.read()), "spent": r["total_cost_usd"]}));
+        }
         Some(r) => {
             if r["is_error"].as_bool() == Some(true) && !interrupted {
                 error = Some(
@@ -789,6 +799,9 @@ async fn run_once(
             }
             if let Some(e) = &error {
                 row.meta["error"] = json!({"message": e, "kind": "claude_code"});
+            }
+            if let Some(b) = &budget_stop {
+                row.meta["budget_stop"] = b.clone();
             }
             st.db.msg_update(&row.id, &row.content, &row.meta)?;
             let text = render::plain_text(&row.content);

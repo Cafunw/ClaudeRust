@@ -255,6 +255,12 @@ const RENDER = {
       ac.addEventListener('change', () => save({ auto_compact_pct: Number(ac.value) }));
       body.appendChild(row(t('auto_compact_setting'), t('auto_compact_setting_d'), ac));
     }
+    {
+      const cur = Number(store.settings.turn_budget_usd || 0);
+      const bi = h(`<input class="input" type="number" min="0" step="0.5" style="width:120px" placeholder="${esc(t('budget_none'))}" value="${cur > 0 ? cur : ''}">`);
+      bi.addEventListener('change', () => { const v = Number(bi.value); save({ turn_budget_usd: Number.isFinite(v) && v > 0 ? v : 0 }); });
+      body.appendChild(row(t('budget_setting'), t('budget_setting_d'), bi));
+    }
     body.appendChild(row(t('worktree_setting'), t('worktree_setting_d'), select('code_worktree', [['parallel', t('worktree_parallel')], ['always', t('worktree_always')], ['off', t('worktree_never')]])));
     const pathIn = textField('claude_code_path', { placeholder: t('cc_path_help') });
     pathIn.classList.add('mono');

@@ -74,6 +74,9 @@ pub struct Settings {
     pub code_checkpoints: bool,
     /// Summarize older messages when the context window is this full (percent; 0 = never).
     pub auto_compact_pct: u32,
+    /// Pause an agent turn once it has cost this much (USD; 0 = no limit).
+    /// A conversation can override it (`/budget`).
+    pub turn_budget_usd: f64,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -131,6 +134,7 @@ impl Default for Settings {
             code_worktree: "parallel".into(),
             code_checkpoints: true,
             auto_compact_pct: 85,
+            turn_budget_usd: 0.0,
             tool_policies: Default::default(),
             trusted_hooks: Default::default(),
             oai_base_url: String::new(),

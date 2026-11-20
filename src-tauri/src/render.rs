@@ -602,6 +602,9 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
     if let Some(err) = last_meta.get("error").filter(|e| !e.is_null()) {
         parts.push(json!({"kind": "notice", "code": "error", "error": err}));
     }
+    if last_meta["budget_stop"].is_object() {
+        parts.push(json!({"kind": "notice", "code": "budget", "budget": last_meta["budget_stop"]["budget"], "spent": last_meta["budget_stop"]["spent"]}));
+    }
     if last_meta["stopped"].as_bool() == Some(true) {
         parts.push(json!({"kind": "notice", "code": "stopped"}));
     }

@@ -1,7 +1,7 @@
 // Rendering of assistant message parts (text, thinking, tools, notices).
 import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
-import { esc, h, morph, toast } from './util.js';
+import { esc, h, morph, toast, fmtUsd } from './util.js';
 import { call } from './api.js';
 import { store, modelInfo } from './store.js';
 
@@ -363,6 +363,10 @@ function renderNotice(el, p, ctx) {
     case 'fallback':
       html = `${icon('info', 16)}<div class="grow small">${esc(t('fallback_notice', { from: modelInfo(p.from || '').name || p.from, to: modelInfo(p.to || '').name || p.to }))}</div>`;
       break;
+    case 'budget':
+      el.classList.add('warn');
+      html = `${icon('zap', 16)}<div class="grow"><div>${esc(t('budget_stop', { spent: fmtUsd(p.spent), budget: fmtUsd(p.budget) }))}</div><div class="actions"></div></div>`;
+      break;
     case 'compaction':
       html = `${icon('history', 16)}<div class="grow small">${esc(t('compaction'))}</div>`;
       break;
@@ -384,7 +388,7 @@ function renderNotice(el, p, ctx) {
         actions.appendChild(b);
       }
     }
-    if (p.code === 'max_tokens' && ctx.onContinue) {
+    if ((p.code === 'max_tokens' || p.code === 'budget') && ctx.onContinue) {
       const b = h(`<button class="btn sm">${t('continue')}</button>`);
       b.onclick = () => ctx.onContinue();
       actions.appendChild(b);

@@ -390,7 +390,9 @@ pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
                 .filter_map(|b| b["id"].as_str().map(|s| s.to_string()))
                 .collect();
             if blocks.is_empty() {
-                if !m.meta["error"].is_null() {
+                // a failed response, or one paused at the spending limit
+                // before its request was sent
+                if !m.meta["error"].is_null() || m.meta["budget_stop"].is_object() {
                     continue;
                 }
                 blocks.push(json!({"type": "text", "text": "(no response)"}));
@@ -662,7 +664,11 @@ pub(crate) fn notify_attention(app: &AppHandle, st: &AppState, conv_id: &str, pa
         .or(payload["input"]["file_path"].as_str())
         .map(|d| format!(": {}", d.chars().take(80).collect::<String>()))
         .unwrap_or_default();
-    let body = if payload["kind"] == "plan" { "Claude has a plan ready for your review.".to_string() } else { format!("Claude wants to use {tool}{detail}") };
+    let body = match payload["kind"].as_str() {
+        Some("plan") => "Claude has a plan ready for your review.".to_string(),
+        Some("budget") => format!("Paused: this turn reached its ${:.2} spending limit.", payload["budget"].as_f64().unwrap_or(0.0)),
+        _ => format!("Claude wants to use {tool}{detail}"),
+    };
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
 }
@@ -789,6 +795,13 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
     }
 }
 
+/// Spending limit for one agent turn in this conversation (USD; 0 = none):
+/// the conversation's own (`/budget`) or the setting.
+pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
+    let b = conv.options["budget_usd"].as_f64().unwrap_or(settings.turn_budget_usd);
+    if b.is_finite() && b > 0.0 { b } else { 0.0 }
+}
+
 async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
     checkpoint_turn(st, conv_id, &parent).await;
     auto_compact(app, st, conv_id, &parent).await;
@@ -803,6 +816,8 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
     }
     let mut steps = 0usize;
     let mut stop_continues = 0usize;
+    // what this turn has cost so far (responses and sub-agents)
+    let mut turn_cost = 0.0f64;
     loop {
         steps += 1;
         let conv = st.db.conv_get(conv_id)?;
@@ -857,6 +872,14 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             am.meta["error"] = json!({"message": "Stopped after too many tool calls in one response.", "kind": "error"});
             st.db.msg_update(&am_id, &am.content, &am.meta)?;
             emit_turn(app, conv_id, &renderer.render(&am, &live));
+            return Ok(());
+        }
+        let budget = turn_budget(&conv, &settings);
+        if budget > 0.0 && turn_cost >= budget {
+            am.meta["budget_stop"] = json!({"budget": budget, "spent": turn_cost});
+            st.db.msg_update(&am_id, &am.content, &am.meta)?;
+            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            notify_attention(app, st, conv_id, &json!({"kind": "budget", "budget": budget}));
             return Ok(());
         }
 
@@ -956,6 +979,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             am.meta["model"] = json!(m);
         }
         am.meta["usage"] = Value::Object(usage);
+        turn_cost += crate::commands::usage_cost(am.meta["model"].as_str().unwrap_or(&conv.model), &am.meta["usage"]);
         am.meta["stop_reason"] = json!(stop_reason);
         if !stop_details.is_null() {
             am.meta["stop_details"] = stop_details;
@@ -1046,7 +1070,9 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             }
             let su = st.subagents.usage_for(&am_id);
             if !su.is_empty() {
-                am.meta["subagent_usage"] = Value::Object(su);
+                let su = Value::Object(su);
+                turn_cost += crate::commands::usage_cost(am.meta["model"].as_str().unwrap_or(&conv.model), &su);
+                am.meta["subagent_usage"] = su;
                 st.db.msg_update(&am_id, &am.content, &am.meta)?;
             }
         }
@@ -1682,5 +1708,40 @@ mod tests {
         let msgs = build_messages(&path, &r);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn budget_pause_then_continue() {
+        let path = vec![
+            m("u1", "user", json!([{"type":"text","text":"build it"}]), json!({})),
+            m("a1", "assistant", json!([{"type":"tool_use","id":"t1","name":"Bash","input":{}}]), json!({})),
+            m("u2", "user", json!([{"type":"tool_result","tool_use_id":"t1","content":"ok"}]), json!({"tool_results":true})),
+            m("a2", "assistant", json!([]), json!({"budget_stop":{"budget":1.0,"spent":1.2}})),
+            m("u3", "user", json!([{"type":"text","text":"Continue"}]), json!({})),
+        ];
+        let mut r = rc("f");
+        r.prefix_blocks.clear();
+        let msgs = build_messages(&path, &r);
+        // the paused (empty) response is left out; the tool result and
+        // "Continue" go in one user message
+        assert_eq!(msgs.len(), 3);
+        let last = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(last[0]["type"], "tool_result");
+        assert_eq!(last[1]["text"], "Continue");
+    }
+
+    #[test]
+    fn turn_budget_prefers_the_conversation() {
+        let mut s = Settings::default();
+        let mut c = Conversation { options: json!({}), ..Default::default() };
+        assert_eq!(turn_budget(&c, &s), 0.0);
+        s.turn_budget_usd = 2.0;
+        assert_eq!(turn_budget(&c, &s), 2.0);
+        c.options = json!({"budget_usd": 0.5});
+        assert_eq!(turn_budget(&c, &s), 0.5);
+        c.options = json!({"budget_usd": 0});
+        assert_eq!(turn_budget(&c, &s), 0.0);
+        c.options = json!({"budget_usd": null});
+        assert_eq!(turn_budget(&c, &s), 2.0);
     }
 }

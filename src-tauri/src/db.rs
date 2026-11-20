@@ -20,7 +20,7 @@ pub struct Db {
     fts: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
     pub kind: String,

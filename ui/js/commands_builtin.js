@@ -2,8 +2,8 @@
 // them: /compact, /init, /review, /doctor, /memory, /rewind …).
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { emit, modelInfo } from './store.js';
-import { modal, fmtTokens, errorToast } from './util.js';
+import { emit, modelInfo, store } from './store.js';
+import { modal, fmtTokens, errorToast, toast, fmtUsd } from './util.js';
 import { registerCommand } from './slash.js';
 import * as workspace from './workspace.js';
 
@@ -43,6 +43,37 @@ registerCommand({
           ${u.context_tokens != null ? `<tr><td>${t('context_used')}</td><td>${fmtTokens(u.context_tokens)} / ${fmtTokens(u.context_window || 0)}</td></tr>` : ''}
         </table>`,
       });
+    } catch (e) { errorToast(e); }
+  },
+});
+
+// /budget [amount | off | default]: spending limit for each agent turn here.
+registerCommand({
+  name: 'budget',
+  description: () => t('cmd_budget'),
+  hint: '[USD | off | default]',
+  kinds: ['code'],
+  run: async (args, ctx) => {
+    if (!ctx.conversationId) return;
+    const a = (args || '').trim().replace(/^\$/, '').replace(',', '.').toLowerCase();
+    const own = ((ctx.conv && ctx.conv.options) || {}).budget_usd;
+    const global = Number(store.settings.turn_budget_usd || 0);
+    const fmt = (n) => (n > 0 ? fmtUsd(n) : t('budget_none'));
+    if (!a) {
+      toast(own != null ? t('budget_current', { amount: fmt(own) }) : t('budget_current_default', { amount: fmt(global) }));
+      return;
+    }
+    let value;
+    if (a === 'off' || a === '0') value = 0;
+    else if (a === 'default' || a === 'reset') value = null;
+    else {
+      value = Number(a);
+      if (!Number.isFinite(value) || value < 0) { errorToast(new Error(t('budget_invalid'))); return; }
+    }
+    try {
+      await call('update_conversation', { req: { id: ctx.conversationId, options: { budget_usd: value } } });
+      if (ctx.conv) ctx.conv.options = { ...(ctx.conv.options || {}), budget_usd: value };
+      toast(value == null ? t('budget_current_default', { amount: fmt(global) }) : value === 0 ? t('budget_off') : t('budget_set', { amount: fmt(value) }));
     } catch (e) { errorToast(e); }
   },
 });

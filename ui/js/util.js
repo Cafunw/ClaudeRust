@@ -46,6 +46,12 @@ export function attachmentSub(a) {
   return `${esc(size)} · <span class="att-digest" title="${esc(t('att_digest_tip', { lines: a.digest.lines, errors: a.digest.errors, warnings: a.digest.warnings }))}">${esc(t('att_digest'))}</span>`;
 }
 
+/** Dollar amount: cents, or more digits for amounts under a cent. */
+export function fmtUsd(n) {
+  const v = Number(n) || 0;
+  return `$${v > 0 && v < 0.01 ? v.toPrecision(2) : v.toFixed(2)}`;
+}
+
 export function humanSize(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
