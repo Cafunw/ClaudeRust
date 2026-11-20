@@ -323,6 +323,7 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::plan_state,
             commands::rewind,
             commands::rewind_info,
             commands::rewind_undo,

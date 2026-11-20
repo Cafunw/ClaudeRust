@@ -1,5 +1,12 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_plan: "Plan",
+  plan_empty: "No plan or todo list yet. In plan mode Claude researches first and proposes a plan here.",
+  plan_start: "Switch to plan mode",
+  plan_title: "Plan",
+  plan_pending: "awaiting approval",
+  plan_approved: "approved",
+  plan_rejected: "not approved",
   review_prompt_intro: "Please address these review comments on the current changes:",
   review_prompt_outro: "Make the changes, then summarize what you did for each comment.",
   review_placeholder: "Leave a comment for Claude… (Ctrl+Enter to add)",
@@ -187,6 +194,13 @@ const en = {
 };
 
 const tr = {
+  ws_plan: "Plan",
+  plan_empty: "Henüz plan ya da yapılacaklar listesi yok. Plan modunda Claude önce araştırır ve planını burada önerir.",
+  plan_start: "Plan moduna geç",
+  plan_title: "Plan",
+  plan_pending: "onay bekliyor",
+  plan_approved: "onaylandı",
+  plan_rejected: "onaylanmadı",
   review_prompt_intro: "Lütfen mevcut değişikliklerle ilgili şu inceleme yorumlarını ele al:",
   review_prompt_outro: "Değişiklikleri yap, sonra her yorum için ne yaptığını özetle.",
   review_placeholder: "Claude için bir yorum bırakın… (eklemek için Ctrl+Enter)",

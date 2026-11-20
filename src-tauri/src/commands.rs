@@ -1253,3 +1253,82 @@ pub async fn rewind_info(state: St<'_>, conversation_id: String, message_id: Str
         .unwrap_or_default();
     Ok(json!({"checkpoint": true, "files": files}))
 }
+
+// ------------------------------------------------------------- plan & todos
+
+/// Latest todo list and plan of a conversation's current branch.
+pub fn plan_state_of(path: &[crate::db::Message]) -> Value {
+    let mut todos = Value::Null;
+    let mut plan: Option<(String, String)> = None; // (tool_use_id, text)
+    let mut results: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for m in path {
+        for b in m.content.as_array().into_iter().flatten() {
+            match b["type"].as_str() {
+                Some("tool_use") => match b["name"].as_str() {
+                    Some("TodoWrite") if b["input"]["todos"].is_array() => todos = b["input"]["todos"].clone(),
+                    Some("ExitPlanMode") => {
+                        if let Some(p) = b["input"]["plan"].as_str() {
+                            plan = Some((b["id"].as_str().unwrap_or("").to_string(), p.to_string()));
+                        }
+                    }
+                    _ => {}
+                },
+                Some("tool_result") => {
+                    if let Some(id) = b["tool_use_id"].as_str() {
+                        results.insert(id.to_string(), b["is_error"].as_bool() == Some(true));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (plan_text, plan_status) = match &plan {
+        Some((id, text)) => (
+            json!(text),
+            json!(match results.get(id) {
+                Some(false) => "approved",
+                Some(true) => "rejected",
+                None => "pending",
+            }),
+        ),
+        None => (Value::Null, Value::Null),
+    };
+    json!({"todos": todos, "plan": plan_text, "plan_status": plan_status})
+}
+
+#[tauri::command]
+pub async fn plan_state(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let conv = state.db.conv_get(&conversation_id)?;
+    let path = match &conv.current_leaf {
+        Some(leaf) => state.db.path_to(leaf)?,
+        None => vec![],
+    };
+    let mut v = plan_state_of(&path);
+    v["mode"] = conv.options["permission_mode"].clone();
+    Ok(v)
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn latest_todos_and_plan_status() {
+        let m = |id: &str, role: &str, content: Value| crate::db::Message {
+            id: id.into(), conversation_id: "c".into(), parent_id: None, role: role.into(), content, meta: json!({}), created_at: 0,
+        };
+        let path = vec![
+            m("a1", "assistant", json!([{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"x","status":"pending"}]}}])),
+            m("u1", "user", json!([{"type":"tool_result","tool_use_id":"t1","content":"ok"}])),
+            m("a2", "assistant", json!([{"type":"tool_use","id":"p1","name":"ExitPlanMode","input":{"plan":"1. do it"}},
+                                         {"type":"tool_use","id":"t2","name":"TodoWrite","input":{"todos":[{"content":"x","status":"completed"}]}}])),
+            m("u2", "user", json!([{"type":"tool_result","tool_use_id":"p1","content":"approved"}])),
+        ];
+        let v = plan_state_of(&path);
+        assert_eq!(v["todos"][0]["status"], "completed");
+        assert_eq!(v["plan"], "1. do it");
+        assert_eq!(v["plan_status"], "approved");
+        let v2 = plan_state_of(&path[..3]);
+        assert_eq!(v2["plan_status"], "pending");
+    }
+}

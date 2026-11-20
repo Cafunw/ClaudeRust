@@ -862,3 +862,17 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .rc-edit { display: flex; flex-direction: column; gap: 6px; font-family: var(--font-ui); }
 .rc-edit textarea { width: 100%; resize: vertical; font: inherit; font-size: 12.5px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-0); color: var(--text-0); }
 .rc-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+/* plan pane */
+.plan-pane { padding: 4px 0 20px; }
+.plan-sec { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.plan-h { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.progress { height: 4px; background: var(--bg-2); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+.progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+.todos.big li { font-size: 13px; padding: 4px 0; }
+.plan-badge { font-size: 11px; font-weight: 500; padding: 1px 8px; border-radius: 10px; background: var(--bg-2); color: var(--text-2); }
+.plan-badge.approved { background: rgba(58, 154, 91, .14); color: #2f8a5b; }
+.plan-badge.pending { background: rgba(47, 109, 181, .12); color: #2f6db5; }
+.plan-badge.rejected { background: var(--danger-soft); color: var(--danger); }
+.plan-md { font-size: 13.5px; }
+.spinner.tiny { width: 9px; height: 9px; border-width: 1.5px; }
