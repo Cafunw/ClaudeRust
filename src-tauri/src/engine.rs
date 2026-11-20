@@ -327,11 +327,10 @@ pub fn sanitize_assistant(content: &Value, answered: &HashSet<String>) -> Vec<Va
                     continue;
                 }
             }
-            "server_tool_use" => {
-                if !server_results.contains(b["id"].as_str().unwrap_or("")) {
+            "server_tool_use"
+                if !server_results.contains(b["id"].as_str().unwrap_or("")) => {
                     continue;
                 }
-            }
             _ => {}
         }
         out.push(b);
@@ -1121,7 +1120,15 @@ async fn execute_tool(
             Perm::Allow => {}
         }
         let timeout = Duration::from_secs(settings.bash_timeout_secs);
-        let out = codetools::execute(session.clone(), name, input, cancel, timeout).await;
+        let progress: Option<codetools::ProgressFn> = if name == "Bash" {
+            let (app2, conv2, id2) = (app.clone(), conv_id.to_string(), id.to_string());
+            Some(Arc::new(move |text: &str| {
+                let _ = app2.emit("tool-progress", json!({"conversation_id": conv2, "tool_use_id": id2, "text": text}));
+            }))
+        } else {
+            None
+        };
+        let out = codetools::execute(session.clone(), name, input, cancel, timeout, progress).await;
         return (out.content, out.is_error);
     }
 

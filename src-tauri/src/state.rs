@@ -44,6 +44,7 @@ pub struct AppState {
     pub staged: Mutex<HashMap<String, Attachment>>,
     pub served: Mutex<HashMap<String, (String, Vec<u8>)>>,
     pub code_sessions: Mutex<HashMap<String, Arc<CodeSession>>>,
+    pub shells: Arc<crate::shells::Shells>,
     pub models: Mutex<Option<Vec<Value>>>,
     /// Set when the configured endpoint rejected optional request features.
     pub degraded: AtomicBool,
@@ -67,6 +68,7 @@ impl AppState {
             staged: Mutex::new(HashMap::new()),
             served: Mutex::new(HashMap::new()),
             code_sessions: Mutex::new(HashMap::new()),
+            shells: Arc::new(crate::shells::Shells::default()),
             models: Mutex::new(None),
             degraded: AtomicBool::new(false),
             data_dir,
@@ -90,7 +92,7 @@ impl AppState {
     pub fn code_session(&self, conv_id: &str, cwd: &str) -> Arc<CodeSession> {
         let mut m = self.code_sessions.lock();
         m.entry(conv_id.to_string())
-            .or_insert_with(|| Arc::new(CodeSession::new(PathBuf::from(cwd))))
+            .or_insert_with(|| Arc::new(CodeSession::for_conversation(PathBuf::from(cwd), conv_id, self.shells.clone())))
             .clone()
     }
 }

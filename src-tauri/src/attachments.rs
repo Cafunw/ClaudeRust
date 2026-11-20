@@ -100,7 +100,7 @@ fn downscale(bytes: &[u8], mime: &str) -> AppResult<(Vec<u8>, String)> {
 /// Make a base64 image safe to send to the API (size/dimension limits).
 /// Returns `None` if it can't be decoded.
 pub fn normalize_image_b64(data: &str, mime: &str) -> Option<(String, String)> {
-    if data.len() <= 4_000_000 && data.len() > 0 {
+    if data.len() <= 4_000_000 && !data.is_empty() {
         // small enough: still verify dimensions cheaply
         let bytes = B64.decode(data.trim()).ok()?;
         if let Ok((w, h)) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions() {

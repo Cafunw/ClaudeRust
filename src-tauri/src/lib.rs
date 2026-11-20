@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod codetools;
 pub mod commands;
 pub mod db;
+pub mod devtools;
 pub mod display;
 pub mod engine;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod prompts;
 pub mod render;
 pub mod settings;
 pub mod shellenv;
+pub mod shells;
 pub mod state;
 pub mod util;
 pub mod view;
@@ -211,6 +213,8 @@ pub fn run() {
             let _ = db.mark_interrupted();
             let _ = db.delete_unfinished_imports();
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
+            st.shells.set_app(app.handle().clone());
+            devtools::start(app.handle());
             app.manage(st.clone());
 
             // Resolve the login-shell PATH, then start MCP servers.
@@ -312,6 +316,11 @@ pub fn run() {
             commands::mcp_read_resource,
             commands::pick_extension,
             commands::claude_code_info,
+            commands::shells_list,
+            devtools::dev_report,
+            commands::shell_output,
+            commands::shell_kill,
+            commands::shells_clear,
             commands::claude_code_login,
             commands::extension_inspect,
             commands::extension_install,
@@ -342,6 +351,7 @@ pub fn run() {
         RunEvent::Exit => {
             if let Some(st) = handle.try_state::<Arc<AppState>>() {
                 let st = st.inner().clone();
+                st.shells.kill_all();
                 tauri::async_runtime::block_on(async move { st.mcp.stop_all().await });
             }
         }

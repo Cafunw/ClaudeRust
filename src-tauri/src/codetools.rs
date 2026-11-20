@@ -16,13 +16,20 @@ use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 
-pub const TOOL_NAMES: &[&str] = &["Bash", "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "ExitPlanMode"];
+pub const TOOL_NAMES: &[&str] = &["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite", "ExitPlanMode"];
+
+/// Receives live output of a running command (the text so far, tail-capped).
+pub type ProgressFn = Arc<dyn Fn(&str) + Send + Sync>;
 const MAX_OUTPUT_CHARS: usize = 30_000;
 
 pub struct CodeSession {
     pub root: PathBuf,
     pub cwd: Mutex<PathBuf>,
     pub read_files: Mutex<HashSet<PathBuf>>,
+    /// The conversation this session belongs to ("" outside a conversation).
+    pub conv_id: String,
+    /// Registry for background commands (absent in previews and tests).
+    pub shells: Option<Arc<crate::shells::Shells>>,
 }
 
 impl CodeSession {
@@ -31,7 +38,16 @@ impl CodeSession {
             cwd: Mutex::new(root.clone()),
             root,
             read_files: Mutex::new(HashSet::new()),
+            conv_id: String::new(),
+            shells: None,
         }
+    }
+
+    pub fn for_conversation(root: PathBuf, conv_id: &str, shells: Arc<crate::shells::Shells>) -> Self {
+        let mut s = CodeSession::new(root);
+        s.conv_id = conv_id.to_string();
+        s.shells = Some(shells);
+        s
     }
 
     fn resolve(&self, p: &str) -> PathBuf {
@@ -79,9 +95,33 @@ pub fn definitions(eager: bool) -> Vec<Value> {
                 "properties": {
                     "command": {"type": "string", "description": "The command to run."},
                     "description": {"type": "string", "description": "Short description (5-10 words) of what the command does."},
-                    "timeout": {"type": "number", "description": "Optional timeout in milliseconds (max 600000)."}
+                    "timeout": {"type": "number", "description": "Optional timeout in milliseconds (max 600000)."},
+                    "run_in_background": {"type": "boolean", "description": "Run the command in the background and return immediately with a shell id. Use for dev servers, watchers and other long-running commands; read its output later with BashOutput and stop it with KillShell."}
                 },
                 "required": ["command"]
+            }
+        }),
+        json!({
+            "name": "BashOutput",
+            "description": "Get new output from a background shell started with Bash run_in_background, plus whether it is still running. Returns only output produced since the last call.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "bash_id": {"type": "string", "description": "The id of the background shell."},
+                    "filter": {"type": "string", "description": "Optional regular expression; only matching lines are returned."}
+                },
+                "required": ["bash_id"]
+            }
+        }),
+        json!({
+            "name": "KillShell",
+            "description": "Stop a background shell (and everything it started) by its id.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The id of the background shell to stop."}
+                },
+                "required": ["shell_id"]
             }
         }),
         json!({
@@ -285,7 +325,7 @@ fn args_inside(w: &[String], s: Option<&CodeSession>) -> bool {
     let Some(s) = s else { return true };
     w[1..].iter().all(|a| {
         let looks_like_path = a.starts_with('/') || a.starts_with('~') || a.contains("..") || (cfg!(windows) && a.contains(':'));
-        !looks_like_path || s.is_inside(&s.resolve(a.trim_start_matches(|c| c == '=' )))
+        !looks_like_path || s.is_inside(&s.resolve(a.trim_start_matches('=' )))
     })
 }
 
@@ -394,7 +434,7 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String],
         }
     };
     match name {
-        "TodoWrite" | "ExitPlanMode" => Perm::Allow,
+        "TodoWrite" | "ExitPlanMode" | "BashOutput" | "KillShell" => Perm::Allow,
         "Read" | "Glob" | "Grep" => {
             let key = if name == "Read" { "file_path" } else { "path" };
             if !bypass && outside(key) {
@@ -470,11 +510,17 @@ pub async fn execute(
     input: &Value,
     cancel: &CancellationToken,
     default_timeout: Duration,
+    progress: Option<ProgressFn>,
 ) -> ToolOutput {
-    if name == "Bash" {
-        return bash(&s, input, cancel, default_timeout)
-            .await
-            .unwrap_or_else(|e| ToolOutput::err(e.to_string()));
+    match name {
+        "Bash" => {
+            return bash(&s, input, cancel, default_timeout, progress)
+                .await
+                .unwrap_or_else(|e| ToolOutput::err(e.to_string()))
+        }
+        "BashOutput" => return bash_output(&s, input),
+        "KillShell" => return kill_shell(&s, input),
+        _ => {}
     }
     let name2 = name.to_string();
     let input2 = input.clone();
@@ -514,7 +560,7 @@ fn todo(input: &Value) -> AppResult<ToolOutput> {
 
 const BASH_OUTPUT_CAP: usize = 2_000_000;
 
-async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, live: Option<&LiveOut>) -> (Vec<u8>, bool) {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; 16 * 1024];
@@ -522,6 +568,9 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, boo
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => return (buf, false),
             Ok(n) => {
+                if let Some(l) = live {
+                    l.push(&chunk[..n]);
+                }
                 if buf.len() + n > BASH_OUTPUT_CAP {
                     let room = BASH_OUTPUT_CAP - buf.len();
                     buf.extend_from_slice(&chunk[..room]);
@@ -529,6 +578,33 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, boo
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
+        }
+    }
+}
+
+/// Combined live output of a running command, reported to a `ProgressFn`
+/// at most every 120 ms.
+struct LiveOut {
+    text: Mutex<(Vec<u8>, std::time::Instant)>,
+    cb: ProgressFn,
+}
+
+const LIVE_TAIL: usize = 24_000;
+
+impl LiveOut {
+    fn push(&self, bytes: &[u8]) {
+        let mut g = self.text.lock();
+        g.0.extend_from_slice(bytes);
+        if g.0.len() > LIVE_TAIL * 2 {
+            let cut = g.0.len() - LIVE_TAIL;
+            g.0.drain(..cut);
+        }
+        if g.1.elapsed() >= Duration::from_millis(120) {
+            g.1 = std::time::Instant::now();
+            let tail = if g.0.len() > LIVE_TAIL { &g.0[g.0.len() - LIVE_TAIL..] } else { &g.0[..] };
+            let s = String::from_utf8_lossy(tail).to_string();
+            drop(g);
+            (self.cb)(&s);
         }
     }
 }
@@ -566,19 +642,10 @@ pub(crate) fn kill_process_tree(pid: u32) {
         .status();
 }
 
-async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, default_timeout: Duration) -> AppResult<ToolOutput> {
-    let command = input["command"].as_str().unwrap_or("").to_string();
-    if command.trim().is_empty() {
-        return Err(AppError::msg("command is required"));
-    }
-    let timeout = input["timeout"]
-        .as_f64()
-        .filter(|v| v.is_finite())
-        .map(|ms| Duration::from_millis(ms.clamp(1000.0, 600_000.0) as u64))
-        .unwrap_or(default_timeout);
-    let cwd = s.cwd.lock().clone();
-    let cwd = if cwd.is_dir() { cwd } else { s.root.clone() };
-
+/// The platform shell running `command` in `cwd`: bash/sh on Unix (in its
+/// own process group, writing its final directory to the returned file),
+/// PowerShell on Windows.
+pub(crate) fn shell_command(cwd: &Path, command: &str) -> (tokio::process::Command, Option<PathBuf>) {
     #[cfg(unix)]
     let (mut cmd, pwd_file) = {
         let pwd_file = std::env::temp_dir().join(format!("clauderust-pwd-{}", crate::util::new_id()));
@@ -586,8 +653,8 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         let mut c = tokio::process::Command::new(shell);
         c.arg("-c")
             .arg("cd \"$CR_CWD\" || exit 1\neval \"$CR_CMD\"\n__cr_ec=$?\npwd -P > \"$CR_PWD_FILE\" 2>/dev/null\nexit $__cr_ec")
-            .env("CR_CWD", &cwd)
-            .env("CR_CMD", &command)
+            .env("CR_CWD", cwd)
+            .env("CR_CMD", command)
             .env("CR_PWD_FILE", &pwd_file)
             .env("PATH", crate::shellenv::path())
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -598,13 +665,84 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
     #[cfg(windows)]
     let (mut cmd, pwd_file): (tokio::process::Command, Option<PathBuf>) = {
         let mut c = tokio::process::Command::new("powershell");
-        c.args(["-NoProfile", "-NonInteractive", "-Command", command.as_str()])
-            .current_dir(&cwd)
+        c.args(["-NoProfile", "-NonInteractive", "-Command", command])
+            .current_dir(cwd)
             .env("PATH", crate::shellenv::path());
         c.creation_flags(0x0800_0000);
         (c, None)
     };
     crate::display::scrub_child_env(&mut cmd);
+    (cmd, pwd_file)
+}
+
+fn bash_output(s: &CodeSession, input: &Value) -> ToolOutput {
+    let id = input["bash_id"].as_str().or(input["shell_id"].as_str()).unwrap_or("");
+    let Some(sh) = s.shells.as_ref().and_then(|r| r.get(id)).filter(|sh| sh.conv_id == s.conv_id) else {
+        return ToolOutput::err(format!("No background shell with id {id}."));
+    };
+    let mut out = sh.take_new();
+    if let Some(f) = input["filter"].as_str().filter(|f| !f.is_empty()) {
+        match RegexBuilder::new(f).size_limit(1 << 20).build() {
+            Ok(re) => out = out.lines().filter(|l| re.is_match(l)).collect::<Vec<_>>().join("\n"),
+            Err(e) => return ToolOutput::err(format!("Invalid filter: {e}")),
+        }
+    }
+    let status = sh.status();
+    let mut text = format!("<status>{status}</status>");
+    if let Some(c) = *sh.exit.lock() {
+        text.push_str(&format!("\n<exit_code>{c}</exit_code>"));
+    }
+    if out.trim().is_empty() {
+        text.push_str("\n(no new output)");
+    } else {
+        text.push_str(&format!("\n<output>\n{}\n</output>", truncate_middle(out.trim_end(), MAX_OUTPUT_CHARS)));
+    }
+    ToolOutput::text(text)
+}
+
+fn kill_shell(s: &CodeSession, input: &Value) -> ToolOutput {
+    let id = input["shell_id"].as_str().or(input["bash_id"].as_str()).unwrap_or("");
+    let Some(reg) = s.shells.as_ref() else { return ToolOutput::err("Background shells are not available here.") };
+    match reg.get(id).filter(|sh| sh.conv_id == s.conv_id) {
+        None => ToolOutput::err(format!("No background shell with id {id}.")),
+        Some(sh) if !sh.running() => ToolOutput::text(format!("Shell {id} is not running ({}).", sh.status())),
+        Some(_) => {
+            reg.kill(id);
+            ToolOutput::text(format!("Stopped background shell {id}."))
+        }
+    }
+}
+
+async fn bash(
+    s: &CodeSession,
+    input: &Value,
+    cancel: &CancellationToken,
+    default_timeout: Duration,
+    progress: Option<ProgressFn>,
+) -> AppResult<ToolOutput> {
+    let command = input["command"].as_str().unwrap_or("").to_string();
+    if command.trim().is_empty() {
+        return Err(AppError::msg("command is required"));
+    }
+    if input["run_in_background"].as_bool() == Some(true) {
+        let Some(reg) = s.shells.as_ref() else {
+            return Err(AppError::msg("Background commands are not available here."));
+        };
+        let sh = reg.spawn(s, &command, input["description"].as_str().unwrap_or(""))?;
+        return Ok(ToolOutput::text(format!(
+            "Command running in background with ID: {}. Use BashOutput to read its output and KillShell to stop it.",
+            sh.id
+        )));
+    }
+    let timeout = input["timeout"]
+        .as_f64()
+        .filter(|v| v.is_finite())
+        .map(|ms| Duration::from_millis(ms.clamp(1000.0, 600_000.0) as u64))
+        .unwrap_or(default_timeout);
+    let cwd = s.cwd.lock().clone();
+    let cwd = if cwd.is_dir() { cwd } else { s.root.clone() };
+    let (mut cmd, pwd_file) = shell_command(&cwd, &command);
+    let live = progress.map(|cb| LiveOut { text: Mutex::new((vec![], std::time::Instant::now())), cb });
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| AppError::msg(format!("Failed to start shell: {e}")))?;
     let pid = child.id();
@@ -624,13 +762,13 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         let (o, e) = tokio::join!(
             async {
                 match stdout {
-                    Some(x) => read_capped(x).await,
+                    Some(x) => read_capped(x, live.as_ref()).await,
                     None => (vec![], false),
                 }
             },
             async {
                 match stderr {
-                    Some(x) => read_capped(x).await,
+                    Some(x) => read_capped(x, live.as_ref()).await,
                     None => (vec![], false),
                 }
             }
@@ -966,7 +1104,7 @@ fn glob(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult
     if hits.is_empty() {
         return Ok(ToolOutput::text("No files found"));
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.sort_by_key(|h| std::cmp::Reverse(h.0));
     let total = hits.len();
     let mut out: Vec<String> = hits.into_iter().take(100).map(|(_, p)| p.display().to_string()).collect();
     if total > 100 {
@@ -1139,7 +1277,7 @@ fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult
         "content" => lines_out,
         "count" => file_hits.iter().map(|(_, p, n)| format!("{}:{n}", p.display())).collect(),
         _ => {
-            file_hits.sort_by(|a, b| b.0.cmp(&a.0));
+            file_hits.sort_by_key(|h| std::cmp::Reverse(h.0));
             file_hits.iter().map(|(_, p, _)| p.display().to_string()).collect()
         }
     };
@@ -1294,12 +1432,12 @@ mod tests {
         let c = CancellationToken::new();
         #[cfg(unix)]
         {
-            let b = execute(s.clone(), "Bash", &json!({"command": "cat /dev/zero"}), &c, Duration::from_secs(20)).await;
+            let b = execute(s.clone(), "Bash", &json!({"command": "cat /dev/zero"}), &c, Duration::from_secs(20), None).await;
             assert!(b.is_error);
             assert!(b.content[0]["text"].as_str().unwrap().contains("exceeded"));
-            let r = execute(s.clone(), "Read", &json!({"file_path": "/dev/zero"}), &c, Duration::from_secs(5)).await;
+            let r = execute(s.clone(), "Read", &json!({"file_path": "/dev/zero"}), &c, Duration::from_secs(5), None).await;
             assert!(r.is_error);
-            let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5)).await;
+            let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5), None).await;
             assert!(r.is_error); // missing file, but must not panic
         }
         let _ = std::fs::remove_dir_all(d);
@@ -1313,7 +1451,7 @@ mod tests {
         let c = CancellationToken::new();
         let marker = d.join("pid");
         let cmd = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
-        let b = execute(s.clone(), "Bash", &json!({"command": cmd, "timeout": 1000}), &c, Duration::from_secs(20)).await;
+        let b = execute(s.clone(), "Bash", &json!({"command": cmd, "timeout": 1000}), &c, Duration::from_secs(20), None).await;
         assert!(b.is_error && b.content[0]["text"].as_str().unwrap().contains("timed out"), "{:?}", b.content);
         let pid: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1337,23 +1475,23 @@ mod tests {
         let c = CancellationToken::new();
         let t = Duration::from_secs(20);
         let f = d.join("src/main.rs");
-        let w = execute(s.clone(), "Write", &json!({"file_path": f.to_string_lossy(), "content": "fn main() {\n    println!(\"hi\");\n}\n"}), &c, t).await;
+        let w = execute(s.clone(), "Write", &json!({"file_path": f.to_string_lossy(), "content": "fn main() {\n    println!(\"hi\");\n}\n"}), &c, t, None).await;
         assert!(!w.is_error, "{:?}", w.content);
-        let e = execute(s.clone(), "Edit", &json!({"file_path": "src/main.rs", "old_string": "\"hi\"", "new_string": "\"hello\""}), &c, t).await;
+        let e = execute(s.clone(), "Edit", &json!({"file_path": "src/main.rs", "old_string": "\"hi\"", "new_string": "\"hello\""}), &c, t, None).await;
         assert!(!e.is_error, "{:?}", e.content);
         assert!(std::fs::read_to_string(&f).unwrap().contains("hello"));
-        let r = execute(s.clone(), "Read", &json!({"file_path": f.to_string_lossy()}), &c, t).await;
+        let r = execute(s.clone(), "Read", &json!({"file_path": f.to_string_lossy()}), &c, t, None).await;
         assert!(r.content[0]["text"].as_str().unwrap().contains("     2\t    println!(\"hello\");"));
-        let g = execute(s.clone(), "Glob", &json!({"pattern": "*.rs"}), &c, t).await;
+        let g = execute(s.clone(), "Glob", &json!({"pattern": "*.rs"}), &c, t, None).await;
         assert!(g.content[0]["text"].as_str().unwrap().contains("main.rs"));
-        let g = execute(s.clone(), "Grep", &json!({"pattern": "hel+o", "output_mode": "content"}), &c, t).await;
+        let g = execute(s.clone(), "Grep", &json!({"pattern": "hel+o", "output_mode": "content"}), &c, t, None).await;
         assert!(g.content[0]["text"].as_str().unwrap().contains(":2:"), "{:?}", g.content);
         #[cfg(unix)]
         {
-            let b = execute(s.clone(), "Bash", &json!({"command": "mkdir -p sub && cd sub && pwd"}), &c, t).await;
+            let b = execute(s.clone(), "Bash", &json!({"command": "mkdir -p sub && cd sub && pwd"}), &c, t, None).await;
             assert!(!b.is_error);
             assert!(s.cwd.lock().ends_with("sub"));
-            let b = execute(s.clone(), "Bash", &json!({"command": "exit 3"}), &c, t).await;
+            let b = execute(s.clone(), "Bash", &json!({"command": "exit 3"}), &c, t, None).await;
             assert!(b.is_error);
             assert!(b.content[0]["text"].as_str().unwrap().contains("Exit code 3"));
         }
@@ -1361,4 +1499,58 @@ mod tests {
         assert!(diff.contains("-    println!(\"hello\");") && diff.contains("+    println!(\"bye\");"), "{diff}");
         let _ = std::fs::remove_dir_all(d);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_shell_output_and_kill() {
+        let dir = std::env::temp_dir().join(format!("cr-bg-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = Arc::new(crate::shells::Shells::default());
+        let s = Arc::new(CodeSession::for_conversation(dir.clone(), "conv1", reg.clone()));
+        let c = CancellationToken::new();
+        let r = execute(s.clone(), "Bash", &json!({"command": "echo first; sleep 30", "run_in_background": true}), &c, Duration::from_secs(5), None).await;
+        assert!(!r.is_error);
+        let text = r.content[0]["text"].as_str().unwrap().to_string();
+        let id = text.split("ID: ").nth(1).unwrap().split('.').next().unwrap().to_string();
+        let mut got = String::new();
+        for _ in 0..50 {
+            let o = execute(s.clone(), "BashOutput", &json!({"bash_id": id}), &c, Duration::from_secs(5), None).await;
+            got.push_str(o.content[0]["text"].as_str().unwrap());
+            if got.contains("first") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(got.contains("first") && got.contains("<status>running</status>"), "{got}");
+        // another conversation can't see it
+        let other = Arc::new(CodeSession::for_conversation(dir.clone(), "conv2", reg.clone()));
+        let o = execute(other, "KillShell", &json!({"shell_id": id}), &c, Duration::from_secs(5), None).await;
+        assert!(o.is_error);
+        let k = execute(s.clone(), "KillShell", &json!({"shell_id": id}), &c, Duration::from_secs(5), None).await;
+        assert!(!k.is_error, "{:?}", k.content);
+        for _ in 0..50 {
+            if reg.get(&id).unwrap().exit.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(reg.get(&id).unwrap().status(), "killed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_reports_live_output() {
+        let dir = std::env::temp_dir();
+        let s = Arc::new(CodeSession::new(dir));
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        let cb: ProgressFn = Arc::new(move |t: &str| seen2.lock().push(t.to_string()));
+        let c = CancellationToken::new();
+        let r = execute(s, "Bash", &json!({"command": "echo one; sleep 0.3; echo two"}), &c, Duration::from_secs(10), Some(cb)).await;
+        assert!(!r.is_error);
+        let seen = seen.lock();
+        assert!(seen.iter().any(|t| t.contains("one")), "{seen:?}");
+    }
+
 }

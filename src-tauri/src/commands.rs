@@ -408,6 +408,21 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     engine::stop(&st, &id);
     st.db.conv_delete(&id)?;
     st.code_sessions.lock().remove(&id);
+    st.shells.kill_conversation(&id);
+    st.live.lock().remove(&id);
+    // Prompts still waiting for this conversation: drop them (the run was
+    // cancelled above, so nothing will answer them).
+    let stale: Vec<String> = st
+        .pending_perms
+        .lock()
+        .iter()
+        .filter(|(_, p)| p["conversation_id"] == id.as_str())
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in stale {
+        st.pending_perms.lock().remove(&k);
+        st.permissions.lock().remove(&k);
+    }
     Ok(())
 }
 
@@ -952,4 +967,31 @@ mod tests {
         let c: ConvUpdate = serde_json::from_value(json!({"id": "x", "project_id": "p"})).unwrap();
         assert_eq!(c.project_id, Some(Some("p".to_string())));
     }
+}
+
+// ------------------------------------------------------------- background shells
+
+#[tauri::command]
+pub async fn shells_list(state: St<'_>, conversation_id: Option<String>) -> AppResult<Value> {
+    let list: Vec<Value> = state.shells.list(conversation_id.as_deref()).iter().map(|s| s.summary()).collect();
+    Ok(json!(list))
+}
+
+#[tauri::command]
+pub async fn shell_output(state: St<'_>, id: String) -> AppResult<Value> {
+    let sh = state.shells.get(&id).ok_or_else(|| AppError::msg("This background command is gone."))?;
+    let mut v = sh.summary();
+    v["output"] = json!(sh.tail(200_000));
+    Ok(v)
+}
+
+#[tauri::command]
+pub async fn shell_kill(state: St<'_>, id: String) -> AppResult<bool> {
+    Ok(state.shells.kill(&id))
+}
+
+#[tauri::command]
+pub async fn shells_clear(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    state.shells.clear_finished(&conversation_id);
+    Ok(())
 }

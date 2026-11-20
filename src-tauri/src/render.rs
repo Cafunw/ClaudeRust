@@ -75,9 +75,9 @@ pub fn close_partial_json(s: &str) -> Option<Value> {
                 last_comma = Some(i);
             }
         }
-        match last_comma {
-            Some(i) => candidate.truncate(i),
-            None => return None,
+        {
+            let i = last_comma?;
+            candidate.truncate(i)
         }
     }
     None

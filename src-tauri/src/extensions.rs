@@ -213,7 +213,7 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
     let name = name.to_string();
     // user config: provided values, else defaults; check required ones
     let mut user = Map::new();
-    let vars = base_vars(&dir);
+    let vars = base_vars(dir);
     if let Some(spec) = manifest["user_config"].as_object() {
         for (k, def) in spec {
             let provided = user_values.get(k).filter(|v| !v.is_null() && v.as_str() != Some(""));

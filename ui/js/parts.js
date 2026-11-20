@@ -184,11 +184,36 @@ function resultSection(p) {
   return `<div class="tool-section"><div class="lbl">${t('output')}</div>${s}</div>`;
 }
 
+// Live output of running commands, by tool_use_id (kept across re-renders).
+const liveOutput = new Map();
+
+function liveSection(p) {
+  if (p.status !== 'running' && p.status !== 'awaiting_permission') return '';
+  const text = liveOutput.get(p.id);
+  return `<div class="tool-section live-out${text ? '' : ' hidden'}"><div class="lbl">${t('output')}</div><pre>${esc(text || '')}</pre></div>`;
+}
+
+/** Show the latest output of a running command in its tool card. */
+export function setToolProgress(id, text) {
+  if (liveOutput.size > 50) liveOutput.delete(liveOutput.keys().next().value);
+  liveOutput.set(id, text);
+  for (const el of document.querySelectorAll(`.tool[data-tool-id="${CSS.escape(id)}"]`)) {
+    const sec = el.querySelector('.live-out');
+    if (!sec) continue;
+    sec.classList.remove('hidden');
+    const pre = sec.querySelector('pre');
+    const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+    pre.textContent = text;
+    if (atEnd) pre.scrollTop = pre.scrollHeight;
+    if (!el.dataset.userClosed) el.classList.add('open');
+  }
+}
+
 function toolBody(p) {
   const i = p.input || {};
   switch (p.tool) {
     case 'Bash':
-      return `<div class="tool-section"><pre>$ ${esc(i.command || '')}</pre></div>${resultSection(p)}`;
+      return `<div class="tool-section"><pre>$ ${esc(i.command || '')}</pre></div>${liveSection(p)}${resultSection(p)}`;
     case 'MultiEdit':
       return (i.edits || []).map((ed) => diffHtml(lineDiff(ed.old_string, ed.new_string))).join('') + (p.status === 'error' ? resultSection(p) : '');
     case 'Edit': {
@@ -256,9 +281,13 @@ function renderTool(el, p) {
   if (p.tool === 'Edit' && p.input) stat = diffStat(lineDiff(p.input.old_string, p.input.new_string));
   const ic = TOOL_ICONS[p.tool] || (p.server && p.server !== 'anthropic' ? 'plug' : 'wrench');
   el.className = 'tool' + (open || isTodo ? ' open' : '');
+  if (p.id) el.dataset.toolId = p.id;
+  if (p.status !== 'running') liveOutput.delete(p.id);
   el.innerHTML = `<button class="tool-head">${icon(ic, 15)}<span class="tname">${esc(sum.name)}</span><span class="targ">${esc(sum.arg)}</span>${stat}${statusHtml(p)}${isTodo ? '' : icon('chevRight', 14, 'class="chev"')}</button>
     <div class="tool-body">${isTodo ? todosHtml(p.input && p.input.todos) : toolBody(p)}</div>`;
-  if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => el.classList.toggle('open'));
+  if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => { el.classList.toggle('open'); if (!el.classList.contains('open')) el.dataset.userClosed = '1'; });
+  const pre = el.querySelector('.live-out pre');
+  if (pre) pre.scrollTop = pre.scrollHeight;
 }
 
 function favicon(domain) {

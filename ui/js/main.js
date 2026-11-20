@@ -6,6 +6,7 @@ import { $, closeMenu, debounce, errorToast } from './util.js';
 import { mountSidebar, refreshSidebar, toggleSidebar } from './sidebar.js';
 import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
+import { setToolProgress } from './parts.js';
 import * as artifacts from './artifacts.js';
 import { renderProjects, renderProject, refreshProjects } from './projects.js';
 import { renderCode, renderChats } from './code.js';
@@ -158,6 +159,7 @@ function bindBackend() {
       }).catch(() => {});
     }
   });
+  onBackend('tool-progress', (p) => setToolProgress(p.tool_use_id, p.text));
   onBackend('permission-request', (p) => chat.onPermissionRequest(p));
   onBackend('permission-resolved', (p) => chat.onPermissionResolved(p));
   onBackend('mcp-changed', () => refreshMcp());

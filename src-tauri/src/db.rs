@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
+/// (conversation id, title, updated_at, first user message, kind)
+pub type RecentChat = (String, String, i64, String, String);
+
 pub struct Db {
     conn: Mutex<Connection>,
     fts: bool,
@@ -624,7 +627,7 @@ impl Db {
     }
 
     /// Full-text search over past messages (for the conversation_search tool).
-    pub fn search_messages(&self, query: &str, exclude_conv: &str, limit: usize) -> AppResult<Vec<(String, String, i64, String, String)>> {
+    pub fn search_messages(&self, query: &str, exclude_conv: &str, limit: usize) -> AppResult<Vec<RecentChat>> {
         let c = self.conn.lock();
         let mut out = vec![];
         if self.fts {

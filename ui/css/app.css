@@ -754,3 +754,6 @@ label.imp-row { cursor: pointer; }
 .imp-status:not(:empty) { margin-top: 8px; }
 .sessions-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sessions-head .btn { text-transform: none; letter-spacing: 0; font-weight: 500; }
+
+/* live output of a running command */
+.tool .live-out pre { max-height: 260px; overflow: auto; }
