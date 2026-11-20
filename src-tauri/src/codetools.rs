@@ -537,7 +537,13 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, boo
 /// `process_group(0)`), so commands it started die with it. Signals nothing
 /// unless `pid` really leads its own group: never the app's own group.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
+    signal_process_group(pid, libc::SIGKILL);
+}
+
+/// Send `sig` to the process group led by `pid` (see `kill_process_group`).
+#[cfg(unix)]
+pub(crate) fn signal_process_group(pid: u32, sig: libc::c_int) {
     let Ok(pid) = libc::pid_t::try_from(pid) else { return };
     if pid <= 1 {
         return;
@@ -545,9 +551,19 @@ fn kill_process_group(pid: u32) {
     // SAFETY: plain syscalls on a pid we spawned; no memory is shared.
     unsafe {
         if libc::getpgid(pid) == pid && libc::getpgid(0) != pid {
-            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(-pid, sig);
         }
     }
+}
+
+/// Kill a process and everything it started (Windows: the whole tree).
+#[cfg(windows)]
+pub(crate) fn kill_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(0x0800_0000)
+        .status();
 }
 
 async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, default_timeout: Duration) -> AppResult<ToolOutput> {
@@ -588,6 +604,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         c.creation_flags(0x0800_0000);
         (c, None)
     };
+    crate::display::scrub_child_env(&mut cmd);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| AppError::msg(format!("Failed to start shell: {e}")))?;
     let pid = child.id();
@@ -598,7 +615,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
         }
         #[cfg(windows)]
         if let Some(p) = pid {
-            let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &p.to_string()]).status();
+            kill_process_tree(p);
         }
     };
     let stdout = child.stdout.take();
@@ -853,6 +870,16 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
 }
 
 /// Unified diff for an Edit/Write tool call (for permission prompts and UI).
+/// Current text of a file for a diff preview: regular files up to 4 MB only,
+/// so a path like /dev/zero or a FIFO can't hang or exhaust memory.
+fn read_for_preview(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 pub fn preview_diff(s: Option<&CodeSession>, name: &str, input: &Value) -> Option<String> {
     let path_str = input["file_path"].as_str()?;
     let (old_text, new_text) = match name {
@@ -860,8 +887,8 @@ pub fn preview_diff(s: Option<&CodeSession>, name: &str, input: &Value) -> Optio
             let path = s.map(|s| s.resolve(path_str)).unwrap_or_else(|| PathBuf::from(path_str));
             let old = input["old_string"].as_str().unwrap_or("");
             let new = input["new_string"].as_str().unwrap_or("");
-            match std::fs::read_to_string(&path) {
-                Ok(t) if !old.is_empty() && t.contains(old) => {
+            match read_for_preview(&path) {
+                Some(t) if !old.is_empty() && t.contains(old) => {
                     let all = input["replace_all"].as_bool().unwrap_or(false);
                     let u = if all { t.replace(old, new) } else { t.replacen(old, new, 1) };
                     (t, u)
@@ -871,7 +898,7 @@ pub fn preview_diff(s: Option<&CodeSession>, name: &str, input: &Value) -> Optio
         }
         "Write" => {
             let path = s.map(|s| s.resolve(path_str)).unwrap_or_else(|| PathBuf::from(path_str));
-            let old = std::fs::read_to_string(path).unwrap_or_default();
+            let old = read_for_preview(&path).unwrap_or_default();
             (old, input["content"].as_str().unwrap_or("").to_string())
         }
         _ => return None,

@@ -13,6 +13,26 @@ const IDENTIFIER: &str = "dev.clauderust.desktop";
 const FLAG_FILE: &str = "render.json";
 
 static INFO: OnceLock<Value> = OnceLock::new();
+/// Variables `prepare` set for our own WebView, removed again for child
+/// processes (shell commands, MCP servers, the Claude Code CLI) so a GL app
+/// or a WebView2 app the user runs isn't affected.
+static SET_VARS: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+
+fn set_ours(key: &'static str, val: &str) {
+    std::env::set_var(key, val);
+    if let Ok(mut v) = SET_VARS.lock() {
+        v.push(key);
+    }
+}
+
+/// Remove the rendering variables we set from a child's environment.
+pub fn scrub_child_env(cmd: &mut tokio::process::Command) {
+    if let Ok(v) = SET_VARS.lock() {
+        for k in v.iter() {
+            cmd.env_remove(k);
+        }
+    }
+}
 
 fn flag_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(IDENTIFIER).join(FLAG_FILE))
@@ -76,9 +96,9 @@ pub fn is_remote_session() -> bool {
 }
 
 #[allow(dead_code)]
-fn set_default(key: &str, val: &str) {
+fn set_default(key: &'static str, val: &str) {
     if std::env::var_os(key).is_none() {
-        std::env::set_var(key, val);
+        set_ours(key, val);
     }
 }
 
@@ -91,14 +111,20 @@ pub fn prepare() {
 
     #[cfg(windows)]
     if software {
+        let user_set = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok();
         // Keep wry's own defaults: this variable can take the place of the
         // arguments it passes.
-        let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
-            .unwrap_or_else(|_| "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection".into());
+        let mut args = user_set
+            .clone()
+            .unwrap_or_else(|| "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection".into());
         if !args.contains("--disable-gpu") {
             args.push_str(" --disable-gpu --disable-gpu-compositing");
+            if user_set.is_some() {
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args.trim());
+            } else {
+                set_ours("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args.trim());
+            }
         }
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args.trim());
     }
 
     #[cfg(target_os = "linux")]
@@ -131,6 +157,11 @@ pub fn info() -> Value {
 /// Remote Desktop resolution is smaller...) center it, and shrink it if it is
 /// larger than the screen.
 pub fn ensure_on_screen(w: &tauri::WebviewWindow) {
+    // The OS places maximized and fullscreen windows itself (and on Windows a
+    // maximized window's outer size includes borders larger than the screen).
+    if w.is_maximized().unwrap_or(false) || w.is_fullscreen().unwrap_or(false) {
+        return;
+    }
     let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else { return };
     // GTK reports a zero size for a window that isn't mapped yet; the
     // delayed check in `ensure_on_screen_soon` covers that case.
@@ -162,10 +193,6 @@ pub fn ensure_on_screen(w: &tauri::WebviewWindow) {
     if title_visible && !too_big {
         return;
     }
-    let maximized = w.is_maximized().unwrap_or(false);
-    if maximized {
-        let _ = w.unmaximize();
-    }
     if too_big || !title_visible {
         let width = size.width.min(ms.width * 9 / 10).max(400);
         let height = size.height.min(ms.height * 9 / 10).max(300);
@@ -175,9 +202,6 @@ pub fn ensure_on_screen(w: &tauri::WebviewWindow) {
         let x = m.position().x + (ms.width as i32 - width as i32) / 2;
         let y = m.position().y + (ms.height as i32 - height as i32) / 2;
         let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-    if maximized {
-        let _ = w.maximize();
     }
 }
 

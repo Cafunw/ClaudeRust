@@ -209,6 +209,7 @@ pub fn run() {
             let _ = mcp::ensure_config(&mcp_path);
             let db = db::Db::open(&data_dir.join("clauderust.db")).map_err(|e| e.to_string())?;
             let _ = db.mark_interrupted();
+            let _ = db.delete_unfinished_imports();
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             app.manage(st.clone());
 

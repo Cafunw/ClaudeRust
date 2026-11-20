@@ -756,7 +756,7 @@ pub async fn mcp_save_config(app: AppHandle, state: St<'_>, config: String) -> A
     if !v["mcpServers"].is_object() {
         return Err(AppError::msg("The config needs an \"mcpServers\" object."));
     }
-    std::fs::write(&st.mcp.config_path, serde_json::to_string_pretty(&v)?)?;
+    mcp::write_config(&st.mcp.config_path, &v)?;
     mcp_reload(app, state).await
 }
 

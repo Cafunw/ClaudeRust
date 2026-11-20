@@ -39,7 +39,7 @@ fn config_dir_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn claude_code_dir() -> Option<PathBuf> {
+pub(crate) fn claude_code_dir() -> Option<PathBuf> {
     config_dir_override().or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
 }
 
@@ -248,8 +248,9 @@ pub fn parse_cc_session(path: &Path) -> AppResult<ParsedSession> {
     let mut entries: Vec<Value> = vec![];
     let mut by_uuid: HashMap<String, usize> = HashMap::new();
     let (mut custom, mut ai, mut summary) = (None, None, None);
-    let mut session_id = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let mut sid_seen = false;
+    // The file name is the id `claude --resume` looks up (a forked session's
+    // file can start with entries copied from its parent session).
+    let session_id = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         match v["type"].as_str() {
@@ -259,12 +260,6 @@ pub fn parse_cc_session(path: &Path) -> AppResult<ParsedSession> {
             _ => {}
         }
         if let Some(u) = v["uuid"].as_str() {
-            if !sid_seen {
-                if let Some(s) = v["sessionId"].as_str() {
-                    session_id = s.to_string();
-                    sid_seen = true;
-                }
-            }
             by_uuid.insert(u.to_string(), entries.len());
             entries.push(v);
         }
@@ -433,20 +428,25 @@ fn import_cc_session(st: &AppState, path: &Path, done: &mut HashSet<String>) -> 
         "engine": crate::claudecode::ENGINE,
         "permission_mode": settings.code_permission_mode,
         "cc_session": p.session_id,
-        "imported_from": key,
         "date": crate::engine::today(),
+        // Removed when the import finishes; leftovers are deleted at startup.
+        "importing": true,
     });
     let conv = st.db.conv_create("code", &model, None, Some(&cwd), &options)?;
     let res = (|| -> AppResult<()> {
         let last = insert_chain(st, &conv.id, p.rows)?;
         st.db.conv_set_leaf(&conv.id, last.as_deref())?;
+        st.db.conv_set_title(&conv.id, &p.title)?;
+        st.db.conv_set_times(&conv.id, p.created_at, p.updated_at)?;
         let mut o = options.clone();
         if let Some(l) = &last {
             o["cc_tip"] = json!(l);
         }
+        o["imported_from"] = json!(key);
+        if let Some(m) = o.as_object_mut() {
+            m.remove("importing");
+        }
         st.db.conv_set_options(&conv.id, &o)?;
-        st.db.conv_set_title(&conv.id, &p.title)?;
-        st.db.conv_set_times(&conv.id, p.created_at, p.updated_at)?;
         Ok(())
     })();
     if let Err(e) = res {
@@ -688,7 +688,7 @@ fn import_ai_conversation(
         .or_else(|| c["project"]["uuid"].as_str())
         .and_then(|u| projects.get(u))
         .cloned();
-    let options = json!({"imported_from": key, "date": crate::engine::today()});
+    let options = json!({"date": crate::engine::today(), "importing": true});
     let conv = st.db.conv_create("chat", &model, project_id.as_deref(), None, &options)?;
     let res = (|| -> AppResult<()> {
         let tree = msgs.iter().any(|m| m["parent_message_uuid"].is_string());
@@ -759,6 +759,7 @@ fn import_ai_conversation(
         let created = ts_ms(&c["created_at"]).unwrap_or(last_ts);
         let updated = ts_ms(&c["updated_at"]).unwrap_or(last_ts).max(created);
         st.db.conv_set_times(&conv.id, created, updated)?;
+        st.db.conv_set_options(&conv.id, &json!({"date": crate::engine::today(), "imported_from": key}))?;
         Ok(())
     })();
     match res {
@@ -950,11 +951,7 @@ pub async fn import_mcp_servers(app: AppHandle, state: St<'_>, source: String, n
         "claude-code" => cc_mcp_servers(),
         _ => return Err(AppError::msg("Unknown import source.")),
     };
-    crate::mcp::ensure_config(&st.mcp.config_path)?;
-    let mut ours = crate::mcp::read_config(&st.mcp.config_path);
-    if !ours["mcpServers"].is_object() {
-        ours["mcpServers"] = json!({});
-    }
+    let mut ours = crate::mcp::read_config_for_update(&st.mcp.config_path)?;
     let mut n = 0;
     if let Some(dst) = ours["mcpServers"].as_object_mut() {
         for (k, v) in theirs {
@@ -965,8 +962,8 @@ pub async fn import_mcp_servers(app: AppHandle, state: St<'_>, source: String, n
             n += 1;
         }
     }
-    std::fs::write(&st.mcp.config_path, serde_json::to_string_pretty(&ours)?)?;
     if n > 0 {
+        crate::mcp::write_config(&st.mcp.config_path, &ours)?;
         crate::commands::reload_mcp_in_background(&app, &st);
     }
     Ok(json!({"imported": n}))

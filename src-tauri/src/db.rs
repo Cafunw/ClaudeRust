@@ -400,6 +400,25 @@ impl Db {
         Ok(out)
     }
 
+    /// Remove conversations whose import was cut off (app closed mid-import).
+    pub fn delete_unfinished_imports(&self) -> AppResult<usize> {
+        let c = self.conn.lock();
+        let ids: Vec<String> = {
+            let mut st = c.prepare(
+                "SELECT id FROM conversations WHERE options LIKE '%importing%' AND json_extract(options,'$.importing') = 1",
+            )?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for id in &ids {
+            if self.fts {
+                c.execute("DELETE FROM messages_fts WHERE conversation_id=?1", [id])?;
+            }
+            c.execute("DELETE FROM conversations WHERE id=?1", [id])?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn conv_touch(&self, id: &str) -> AppResult<()> {
         self.conn.lock().execute(
             "UPDATE conversations SET updated_at=?2 WHERE id=?1",

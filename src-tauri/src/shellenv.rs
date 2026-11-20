@@ -104,6 +104,7 @@ pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
         c
     };
     cmd.env("PATH", &path);
+    crate::display::scrub_child_env(&mut cmd);
     #[cfg(windows)]
     {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW

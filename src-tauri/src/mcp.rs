@@ -350,6 +350,41 @@ pub fn read_config(path: &Path) -> Value {
         .unwrap_or_else(|| json!({"mcpServers": {}}))
 }
 
+/// Read the config in order to change it. Unlike `read_config`, a file that
+/// exists but isn't valid JSON is an error, so it is never overwritten.
+pub fn read_config_for_update(path: &Path) -> AppResult<Value> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let mut v: Value = serde_json::from_str(&s).map_err(|e| {
+                AppError::msg(format!(
+                    "{} isn't valid JSON ({e}). Fix it in Settings → Developer → Edit config, then try again.",
+                    path.display()
+                ))
+            })?;
+            if !v.is_object() {
+                return Err(AppError::msg(format!("{} must contain a JSON object.", path.display())));
+            }
+            if !v["mcpServers"].is_object() {
+                v["mcpServers"] = json!({});
+            }
+            Ok(v)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({"mcpServers": {}})),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write the config through a temporary file so a crash can't truncate it.
+pub fn write_config(path: &Path, v: &Value) -> AppResult<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(v)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub fn ensure_config(path: &Path) -> AppResult<()> {
     if !path.exists() {
         if let Some(p) = path.parent() {

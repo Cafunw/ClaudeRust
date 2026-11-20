@@ -291,13 +291,9 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
         "display_name": manifest["display_name"].as_str().or(manifest["name"].as_str()),
     });
 
-    mcp::ensure_config(config_path)?;
-    let mut config = mcp::read_config(config_path);
-    if !config["mcpServers"].is_object() {
-        config["mcpServers"] = json!({});
-    }
+    let mut config = mcp::read_config_for_update(config_path)?;
     config["mcpServers"][&name] = entry;
-    std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+    mcp::write_config(config_path, &config)?;
     Ok(name)
 }
 

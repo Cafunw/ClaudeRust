@@ -222,15 +222,106 @@ async fn write_line(stdin: &mut Option<tokio::process::ChildStdin>, v: &Value) {
 }
 
 /// Run one user turn through the Claude Code CLI.
-#[allow(unused_assignments)]
+/// How a turn ended, when it didn't fail outright.
+enum Outcome {
+    Done,
+    /// The CLI no longer has the session we tried to resume (transcripts are
+    /// cleaned up after a while); nothing was stored for this attempt.
+    ResumeLost,
+}
+
 pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
+    match run_once(app, st, conv_id, user_msg_id.clone(), cancel, false).await? {
+        Outcome::Done => Ok(()),
+        // Start over in a new session that gets the earlier conversation as context.
+        Outcome::ResumeLost => run_once(app, st, conv_id, user_msg_id, cancel, true).await.map(|_| ()),
+    }
+}
+
+/// Is there still a transcript for this session id in Claude Code's data?
+fn transcript_exists(session_id: &str) -> bool {
+    let Some(dir) = crate::import::claude_code_dir() else { return true };
+    let Ok(projects) = std::fs::read_dir(dir.join("projects")) else { return true };
+    let file = format!("{session_id}.jsonl");
+    projects.flatten().any(|p| p.path().join(&file).is_file())
+}
+
+/// The earlier conversation as plain text, for a new session that can't
+/// resume the old one.
+fn history_context(path: &[Message]) -> String {
+    let mut parts: Vec<String> = vec![];
+    for m in path {
+        if m.meta["tool_results"] == true || render::is_tool_result_msg(m) {
+            continue;
+        }
+        let content = Value::Array(m.content.as_array().cloned().unwrap_or_default().into_iter().filter(|b| !is_reminder(b)).collect());
+        let text = render::plain_text(&content);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let who = if m.role == "user" { "User" } else { "Assistant" };
+        parts.push(format!("{who}: {}", text.trim()));
+    }
+    let all = parts.join("\n\n");
+    let n = all.chars().count();
+    if n > 40_000 {
+        all.chars().skip(n - 40_000).collect()
+    } else {
+        all
+    }
+}
+
+/// Permission rules the user allowed "for this session", turned into
+/// `--allowedTools` entries so they hold on every later turn of this chat.
+fn allowed_rules(suggestions: &Value) -> Vec<String> {
+    let mut out = vec![];
+    for sug in suggestions.as_array().into_iter().flatten() {
+        if sug["type"] != "addRules" || sug["behavior"] != "allow" {
+            continue;
+        }
+        for r in sug["rules"].as_array().into_iter().flatten() {
+            let Some(tool) = r["toolName"].as_str().filter(|t| !t.is_empty()) else { continue };
+            match r["ruleContent"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) => out.push(format!("{tool}({c})")),
+                None => out.push(tool.to_string()),
+            }
+        }
+    }
+    out
+}
+
+/// A finished (or cancelled) permission prompt, handed back to the loop that
+/// owns the CLI's stdin.
+struct PermDone {
+    cli_request_id: Value,
+    req_id: String,
+    tool: String,
+    input: Value,
+    tool_use_id: String,
+    suggestions: Value,
+    reply: Option<PermissionReply>,
+}
+
+fn is_resume_lost(text: &str) -> bool {
+    text.contains("No conversation found with session ID") || text.contains("No message found with message.uuid")
+}
+
+#[allow(unused_assignments)]
+async fn run_once(
+    app: &AppHandle,
+    st: &Arc<AppState>,
+    conv_id: &str,
+    user_msg_id: String,
+    cancel: &CancellationToken,
+    fresh: bool,
+) -> AppResult<Outcome> {
     let conv = st.db.conv_get(conv_id)?;
     let settings = st.settings.read().clone();
     let user = st.db.msg_get(&user_msg_id)?;
     let path = st.db.path_to(&user_msg_id)?;
     let cwd = conv.cwd.clone().unwrap_or_default();
 
-    let fail = |msg: String| -> AppResult<()> {
+    let fail = |msg: String| -> AppResult<Outcome> {
         let m = Message {
             id: new_id(),
             conversation_id: conv_id.to_string(),
@@ -270,20 +361,54 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
         args.push("--model".into());
         args.push(conv.model.clone());
     }
+    let mut with_history = false;
     if let Some(p) = prev {
         if let Some(sid) = p.meta["cc_session"].as_str() {
-            args.push("--resume".into());
-            args.push(sid.to_string());
-            let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
-            if !at_tip {
-                args.push("--resume-session-at".into());
-                args.push(p.meta["cc_uuid"].as_str().unwrap_or("").to_string());
-                args.push("--fork-session".into());
+            if fresh || !transcript_exists(sid) {
+                with_history = true;
+            } else {
+                args.push("--resume".into());
+                args.push(sid.to_string());
+                let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
+                if !at_tip {
+                    args.push("--resume-session-at".into());
+                    args.push(p.meta["cc_uuid"].as_str().unwrap_or("").to_string());
+                    args.push("--fork-session".into());
+                }
             }
         }
     }
+    // The session's tip moves with this turn; until it's known again, the
+    // next message must not assume it continues from the old tip.
+    update_conv_options(st, conv_id, |o| {
+        if let Some(m) = o.as_object_mut() {
+            m.remove("cc_tip");
+        }
+    });
+    // Grants from "allow for this session" (kept in this chat, not written
+    // to the project's Claude Code settings). Variadic flags go last.
+    let dirs: Vec<String> = conv.options["cc_add_dirs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.as_str().map(String::from))
+        .collect();
+    if !dirs.is_empty() {
+        args.push("--add-dir".into());
+        args.extend(dirs);
+    }
+    let rules: Vec<String> = conv.options["cc_allowed_tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.as_str().map(String::from))
+        .collect();
+    if !rules.is_empty() {
+        args.push("--allowedTools".into());
+        args.extend(rules);
+    }
 
-    let content: Vec<Value> = user
+    let mut content: Vec<Value> = user
         .content
         .as_array()
         .cloned()
@@ -291,6 +416,14 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
         .into_iter()
         .filter(|b| !is_reminder(b))
         .collect();
+    if with_history {
+        let h = history_context(&path[..path.len().saturating_sub(1)]);
+        if !h.is_empty() {
+            content.insert(0, json!({"type": "text", "text": format!(
+                "<earlier_conversation>\n{h}\n</earlier_conversation>\n\nThe Claude Code session for the conversation above is no longer available, so this continues in a new session. Use it as context for the message below."
+            )}));
+        }
+    }
     let first_line = json!({
         "type": "user",
         "message": {"role": "user", "content": content},
@@ -308,6 +441,10 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
     for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
         cmd.env_remove(k);
     }
+    // Own process group, so the CLI and everything it started (background
+    // shells, MCP servers) can be stopped together.
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return fail(format!("Could not start Claude Code ({}): {e}", cli.display())),
@@ -352,8 +489,15 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
     let mut result: Option<Value> = None;
     let mut interrupted = false;
     let mut interrupt_deadline: Option<Instant> = None;
+    // When the CLI reported its result. It can stay alive afterwards (for
+    // example while a background task runs); the turn still ends here.
+    let mut result_at: Option<Instant> = None;
     let mut lines = BufReader::new(stdout).lines();
     let mut awaiting: HashMap<String, String> = HashMap::new();
+    let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<PermDone>();
+    // Open permission prompts: CLI request id → (our request id, tool_use_id).
+    let mut open_perms: HashMap<String, (String, String)> = HashMap::new();
+    let rid_key = |v: &Value| v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
 
     // Parent for the next row we create.
     let mut parent = user_msg_id.clone();
@@ -391,8 +535,26 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
                 write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}})).await;
                 continue;
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)), if interrupt_deadline.is_some() => {
-                if interrupt_deadline.map(|d| Instant::now() > d).unwrap_or(false) {
+            Some(done) = perm_rx.recv() => {
+                let key = rid_key(&done.cli_request_id);
+                // Already cancelled by the CLI: nothing to answer.
+                if open_perms.remove(&key).is_none() {
+                    continue;
+                }
+                st.permissions.lock().remove(&done.req_id);
+                st.pending_perms.lock().remove(&done.req_id);
+                awaiting.remove(&done.tool_use_id);
+                let _ = app.emit("permission-resolved", json!({"request_id": done.req_id, "conversation_id": conv_id}));
+                let response = permission_response(app, st, conv_id, &done);
+                write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": done.cli_request_id, "response": response}})).await;
+                emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                continue;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)), if interrupt_deadline.is_some() || result_at.is_some() => {
+                let now = Instant::now();
+                let interrupt_over = interrupt_deadline.map(|d| now > d).unwrap_or(false);
+                let result_over = result_at.map(|t| now.duration_since(t) > Duration::from_secs(3)).unwrap_or(false);
+                if interrupt_over || result_over {
                     break;
                 }
                 continue;
@@ -481,7 +643,14 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
                     let input = req["input"].clone();
                     let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
                     let kind = if tool == "ExitPlanMode" { "plan" } else { "code" };
-                    let diff = crate::codetools::preview_diff(None, &tool, &input);
+                    let diff = {
+                        let session = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                        let (tool, input) = (tool.clone(), input.clone());
+                        tokio::task::spawn_blocking(move || crate::codetools::preview_diff(Some(&session), &tool, &input))
+                            .await
+                            .ok()
+                            .flatten()
+                    };
                     let req_id = new_id();
                     let (tx, rx) = oneshot::channel::<PermissionReply>();
                     st.permissions.lock().insert(req_id.clone(), tx);
@@ -492,56 +661,39 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
                     });
                     st.pending_perms.lock().insert(req_id.clone(), payload.clone());
                     awaiting.insert(tool_use_id.clone(), "awaiting_permission".into());
+                    open_perms.insert(rid_key(&rid), (req_id.clone(), tool_use_id.clone()));
                     emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
                     let _ = app.emit("permission-request", &payload);
-                    let reply = tokio::select! {
-                        r = rx => r.ok(),
-                        _ = cancel.cancelled() => None,
-                    };
-                    st.permissions.lock().remove(&req_id);
-                    st.pending_perms.lock().remove(&req_id);
-                    awaiting.remove(&tool_use_id);
-                    let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
+                    // Wait for the answer without blocking the event stream.
+                    let tx = perm_tx.clone();
+                    let cancel = cancel.clone();
                     let suggestions = req["permission_suggestions"].clone();
-                    let response = match reply.as_ref().map(|r| r.decision.as_str()) {
-                        Some("once") | Some("approve") => json!({"behavior": "allow", "updatedInput": input}),
-                        Some("session") | Some("chat") | Some("always") => {
-                            let mut r = json!({"behavior": "allow", "updatedInput": input});
-                            if suggestions.is_array() {
-                                r["updatedPermissions"] = suggestions;
-                            }
-                            r
-                        }
-                        Some("approve_edits") => {
-                            let m = "acceptEdits".to_string();
-                            update_conv_options(st, conv_id, |o| o["permission_mode"] = json!(m));
-                            emit_conv_updated(app, conv_id);
-                            json!({"behavior": "allow", "updatedInput": input,
-                                   "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]})
-                        }
-                        _ => {
-                            let mut msg = String::from("The user denied this tool call.");
-                            if let Some(m) = reply.as_ref().and_then(|r| r.message.clone()).filter(|m| !m.trim().is_empty()) {
-                                msg.push_str(&format!(" The user said: {}", m.trim()));
-                            }
-                            json!({"behavior": "deny", "message": msg, "interrupt": reply.is_none()})
-                        }
-                    };
-                    let mut response = response;
-                    response["toolUseID"] = json!(tool_use_id);
-                    if tool == "ExitPlanMode" && response["behavior"] == "allow" && reply.as_ref().map(|r| r.decision.as_str()) == Some("approve") {
-                        update_conv_options(st, conv_id, |o| o["permission_mode"] = json!("default"));
-                        emit_conv_updated(app, conv_id);
-                        response["updatedPermissions"] = json!([{"type": "setMode", "mode": "default", "destination": "session"}]);
-                    }
-                    write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": response}})).await;
-                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                    tokio::spawn(async move {
+                        let reply = tokio::select! {
+                            r = rx => r.ok(),
+                            _ = cancel.cancelled() => None,
+                        };
+                        let _ = tx.send(PermDone { cli_request_id: rid, req_id, tool, input, tool_use_id, suggestions, reply });
+                    });
                 } else {
                     write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "error", "request_id": rid, "error": "Not supported by ClaudeRust"}})).await;
                 }
             }
+            "control_cancel_request" => {
+                // The CLI no longer needs an answer (a hook decided, or the
+                // tool call was aborted): take the card down.
+                let rid = if ev["request_id"].is_null() { ev["request"]["request_id"].clone() } else { ev["request_id"].clone() };
+                if let Some((req_id, tool_use_id)) = open_perms.remove(&rid_key(&rid)) {
+                    st.permissions.lock().remove(&req_id);
+                    st.pending_perms.lock().remove(&req_id);
+                    awaiting.remove(&tool_use_id);
+                    let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
+                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                }
+            }
             "result" => {
                 result = Some(ev.clone());
+                result_at = Some(Instant::now());
                 // closing stdin lets the CLI exit
                 stdin = None;
             }
@@ -549,10 +701,30 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
         }
     }
 
-    // Wait for the process to finish (briefly), then make sure it's gone.
+    // Prompts the CLI never got an answer to.
+    for (_, (req_id, _)) in open_perms.drain() {
+        st.permissions.lock().remove(&req_id);
+        st.pending_perms.lock().remove(&req_id);
+        let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
+    }
+    // Let the CLI exit on its own, then stop it and everything it started.
     drop(stdin);
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-    let _ = child.start_kill();
+    if tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_err() {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            crate::codetools::signal_process_group(pid, libc::SIGTERM);
+        }
+        if tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+            if let Some(pid) = child.id() {
+                #[cfg(unix)]
+                crate::codetools::kill_process_group(pid);
+                #[cfg(windows)]
+                crate::codetools::kill_process_tree(pid);
+            }
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        }
+    }
     ts.streaming = None;
 
     // Bookkeeping on the last assistant row.
@@ -580,6 +752,12 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
             });
         }
         None => {}
+    }
+    if !fresh && ts.rows.is_empty() && !interrupted {
+        let text = format!("{} {}", error.clone().unwrap_or_default(), err_text);
+        if is_resume_lost(&text) {
+            return Ok(Outcome::ResumeLost);
+        }
     }
     match last_assistant {
         Some(i) => {
@@ -623,6 +801,131 @@ pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id
     emit(app, st, conv_id, &mut ts, &mcp, math, &HashMap::new(), true);
     match error {
         Some(e) => Err(AppError::Api { status: 0, kind: "claude_code".into(), message: e }),
-        None => Ok(()),
+        None => Ok(Outcome::Done),
+    }
+}
+
+/// The CLI's answer for a permission prompt the user (or Stop) resolved.
+fn permission_response(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, done: &PermDone) -> Value {
+    let decision = done.reply.as_ref().map(|r| r.decision.as_str());
+    let input = &done.input;
+    let mut response = match decision {
+        Some("once") | Some("approve") => json!({"behavior": "allow", "updatedInput": input}),
+        Some("session") | Some("chat") | Some("always") => {
+            // The CLI suggests rules saved to the project's
+            // .claude/settings.local.json; keep them to this chat instead.
+            let mut updates: Vec<Value> = done
+                .suggestions
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut u| {
+                    u["destination"] = json!("session");
+                    u
+                })
+                .collect();
+            let mut rules = allowed_rules(&Value::Array(updates.clone()));
+            if updates.is_empty() {
+                let rule = match (done.tool.as_str(), input["command"].as_str()) {
+                    ("Bash", Some(c)) => format!("Bash({c})"),
+                    (t, _) => t.to_string(),
+                };
+                rules.push(rule.clone());
+                let (tool, content) = match rule.split_once('(') {
+                    Some((t, c)) => (t.to_string(), Some(c.trim_end_matches(')').to_string())),
+                    None => (rule.clone(), None),
+                };
+                let mut r = json!({"toolName": tool});
+                if let Some(c) = content {
+                    r["ruleContent"] = json!(c);
+                }
+                updates.push(json!({"type": "addRules", "rules": [r], "behavior": "allow", "destination": "session"}));
+            }
+            let dirs: Vec<String> = updates
+                .iter()
+                .filter(|u| u["type"] == "addDirectories")
+                .flat_map(|u| u["directories"].as_array().cloned().unwrap_or_default())
+                .filter_map(|d| d.as_str().map(String::from))
+                .collect();
+            let mode = updates
+                .iter()
+                .find(|u| u["type"] == "setMode")
+                .and_then(|u| u["mode"].as_str().map(String::from));
+            update_conv_options(st, conv_id, |o| {
+                for (key, vals) in [("cc_allowed_tools", &rules), ("cc_add_dirs", &dirs)] {
+                    let mut list: Vec<Value> = o[key].as_array().cloned().unwrap_or_default();
+                    for v in vals {
+                        if !list.iter().any(|x| x.as_str() == Some(v)) {
+                            list.push(json!(v));
+                        }
+                    }
+                    o[key] = Value::Array(list);
+                }
+                if let Some(m) = &mode {
+                    o["permission_mode"] = json!(m);
+                }
+            });
+            if mode.is_some() {
+                emit_conv_updated(app, conv_id);
+            }
+            json!({"behavior": "allow", "updatedInput": input, "updatedPermissions": updates})
+        }
+        Some("approve_edits") => {
+            update_conv_options(st, conv_id, |o| o["permission_mode"] = json!("acceptEdits"));
+            emit_conv_updated(app, conv_id);
+            json!({"behavior": "allow", "updatedInput": input,
+                   "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]})
+        }
+        _ => {
+            let mut msg = String::from("The user denied this tool call.");
+            if let Some(m) = done.reply.as_ref().and_then(|r| r.message.clone()).filter(|m| !m.trim().is_empty()) {
+                msg.push_str(&format!(" The user said: {}", m.trim()));
+            }
+            json!({"behavior": "deny", "message": msg, "interrupt": done.reply.is_none()})
+        }
+    };
+    response["toolUseID"] = json!(done.tool_use_id);
+    if done.tool == "ExitPlanMode" && response["behavior"] == "allow" && decision == Some("approve") {
+        update_conv_options(st, conv_id, |o| o["permission_mode"] = json!("default"));
+        emit_conv_updated(app, conv_id);
+        response["updatedPermissions"] = json!([{"type": "setMode", "mode": "default", "destination": "session"}]);
+    }
+    response
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_grants_become_allowed_tools() {
+        let sugg = json!([
+            {"type": "addRules", "behavior": "allow", "destination": "localSettings",
+             "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}, {"toolName": "WebFetch"}]},
+            {"type": "addRules", "behavior": "deny", "destination": "localSettings", "rules": [{"toolName": "Bash", "ruleContent": "rm:*"}]},
+            {"type": "setMode", "mode": "acceptEdits", "destination": "session"}
+        ]);
+        assert_eq!(allowed_rules(&sugg), vec!["Bash(npm test:*)".to_string(), "WebFetch".to_string()]);
+        assert!(is_resume_lost("Error: No conversation found with session ID: abc"));
+        assert!(is_resume_lost("No message found with message.uuid of: x"));
+        assert!(!is_resume_lost("rate limited"));
+    }
+
+    #[test]
+    fn history_skips_tool_rows_and_reminders() {
+        let m = |id: &str, role: &str, content: Value, meta: Value| Message {
+            id: id.into(), conversation_id: "c".into(), parent_id: None, role: role.into(),
+            content, meta, created_at: 0,
+        };
+        let path = vec![
+            m("u1", "user", json!([{"type":"text","text":"<system-reminder>x</system-reminder>"},{"type":"text","text":"fix it"}]), json!({})),
+            m("a1", "assistant", json!([{"type":"text","text":"Looking."},{"type":"tool_use","id":"t","name":"Read","input":{}}]), json!({})),
+            m("r1", "user", json!([{"type":"tool_result","tool_use_id":"t","content":"data"}]), json!({"tool_results": true})),
+            m("a2", "assistant", json!([{"type":"text","text":"Done."}]), json!({})),
+        ];
+        let h = history_context(&path);
+        assert_eq!(h, "User: fix it\n\nAssistant: Looking.\n\nAssistant: Done.");
     }
 }
