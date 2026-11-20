@@ -4,7 +4,7 @@ import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
 import { h, esc, errorToast } from '../util.js';
-import { registerPane, refresh, context } from '../workspace.js';
+import { registerPane, refresh, context, updateTabs } from '../workspace.js';
 
 const expanded = new Set();
 const counts = new Map(); // convId -> running count
@@ -27,6 +27,7 @@ async function draw(el, ctx) {
   }));
   for (const fn of extra) { try { rows.push(...(await fn(ctx))); } catch { /* ignore */ } }
   counts.set(ctx.convId, rows.filter((r) => r.status === 'running').length);
+  updateTabs();
   el.innerHTML = '';
   const head = h(`<div class="pane-head"><span class="muted">${t('ws_tasks_d')}</span><div class="grow"></div><button class="btn sm ghost" data-a="clear">${t('clear_finished')}</button></div>`);
   head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); draw(el, ctx); };

@@ -1,0 +1,144 @@
+// Changes pane: files that differ from the baseline (git HEAD, or what the
+// agent changed outside git), a line-numbered diff viewer, and revert.
+import { t } from '../i18n.js';
+import { icon } from '../icons.js';
+import { call, on } from '../api.js';
+import { h, esc, errorToast, confirmDialog, debounce } from '../util.js';
+import { registerPane, refresh, context, updateTabs } from '../workspace.js';
+
+const state = new Map(); // convId -> { data, selected, diff, collapsed }
+const lineHooks = [];    // (rowEl, info, ctx) => void — e.g. inline comments
+const headerHooks = [];  // (headEl, ctx) => void
+
+export function onDiffLine(fn) { lineHooks.push(fn); }
+export function onChangesHeader(fn) { headerHooks.push(fn); }
+
+/** Parse a unified diff into rows with old/new line numbers. */
+export function parseUnified(text) {
+  const rows = [];
+  let o = 0, n = 0;
+  for (const l of String(text || '').split('\n')) {
+    if (l.startsWith('diff --git') || l.startsWith('index ') || l.startsWith('+++') || l.startsWith('---') || l.startsWith('new file') || l.startsWith('deleted file') || l.startsWith('similarity') || l.startsWith('rename ') || l.startsWith('old mode') || l.startsWith('new mode')) continue;
+    const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(l);
+    if (m) { o = +m[1]; n = +m[2]; rows.push({ type: 'hunk', text: l }); continue; }
+    if (l === '' || l.startsWith('\\')) continue;
+    if (l.startsWith('+')) rows.push({ type: 'add', newNo: n++, text: l.slice(1) });
+    else if (l.startsWith('-')) rows.push({ type: 'del', oldNo: o++, text: l.slice(1) });
+    else rows.push({ type: 'ctx', oldNo: o++, newNo: n++, text: l.slice(1) });
+  }
+  return rows;
+}
+
+function stateFor(convId) {
+  if (!state.has(convId)) state.set(convId, { data: null, selected: null, diff: null });
+  return state.get(convId);
+}
+
+const STATUS_LABEL = { M: 'M', A: 'A', D: 'D', R: 'R', '?': 'U' };
+
+async function load(el, ctx) {
+  const s = stateFor(ctx.convId);
+  try { s.data = await call('changes_list', { conversationId: ctx.convId }); } catch (e) { s.data = { error: e.message || String(e), files: [] }; }
+  if (s.selected && !s.data.files.some((f) => f.path === s.selected)) { s.selected = null; s.diff = null; }
+  updateTabs();
+  draw(el, ctx);
+  if (s.selected) loadDiff(el, ctx, s.selected, true);
+}
+
+async function loadDiff(el, ctx, path, quiet) {
+  const s = stateFor(ctx.convId);
+  s.selected = path;
+  if (!quiet) { s.diff = null; draw(el, ctx); }
+  try { s.diff = await call('change_diff', { conversationId: ctx.convId, path }); } catch (e) { s.diff = `error: ${e.message || e}`; }
+  if (s.selected === path) draw(el, ctx);
+}
+
+function draw(el, ctx) {
+  const s = stateFor(ctx.convId);
+  const d = s.data;
+  el.innerHTML = '';
+  if (!d) { el.appendChild(h(`<div class="pane-empty"><span class="spinner"></span></div>`)); return; }
+  const files = d.files || [];
+  const add = files.reduce((a, f) => a + (f.added || 0), 0);
+  const del = files.reduce((a, f) => a + (f.removed || 0), 0);
+  const head = h(`<div class="pane-head">
+    ${d.repo ? `<span class="branch">${icon('code', 13)} ${esc(d.branch || '')}</span>` : `<span class="muted">${t('changes_session')}</span>`}
+    <span class="diff-stat"><span class="a">+${add}</span> <span class="d">-${del}</span></span>
+    <div class="grow"></div>
+    <span class="hooks"></span>
+    <button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button>
+    ${files.length ? `<button class="btn sm ghost" data-a="revert-all">${t('revert_all')}</button>` : ''}
+  </div>`);
+  head.querySelector('[data-a=refresh]').onclick = () => load(el, ctx);
+  const ra = head.querySelector('[data-a=revert-all]');
+  if (ra) ra.onclick = async () => {
+    if (!(await confirmDialog(t('revert_all_confirm', { n: files.length }), { okLabel: t('revert_all') }))) return;
+    try { await call('change_revert', { conversationId: ctx.convId, paths: files.map((f) => f.path) }); } catch (e) { errorToast(e); }
+    load(el, ctx);
+  };
+  for (const fn of headerHooks) fn(head.querySelector('.hooks'), ctx);
+  el.appendChild(head);
+  if (d.error) el.appendChild(h(`<div class="pane-empty">${esc(d.error)}</div>`));
+  if (!files.length) {
+    if (!d.error) el.appendChild(h(`<div class="pane-empty">${icon('check', 22)}<div>${d.repo ? t('changes_none_repo') : t('changes_none')}</div></div>`));
+    return;
+  }
+  const list = h('<div class="change-list"></div>');
+  for (const f of files) {
+    const name = f.path.split('/').pop();
+    const dir = f.path.slice(0, f.path.length - name.length);
+    const row = h(`<div class="change-row ${s.selected === f.path ? 'on' : ''}" title="${esc(f.path)}">
+      <span class="cst s-${STATUS_LABEL[f.status] || 'M'}">${STATUS_LABEL[f.status] || f.status}</span>
+      <span class="cname ellipsis"><b>${esc(name)}</b> <span class="muted">${esc(dir)}</span></span>
+      <span class="diff-stat"><span class="a">+${f.added || 0}</span> <span class="d">-${f.removed || 0}</span></span>
+      <button class="icon-btn sm" data-a="open" title="${t('open_file')}">${icon('external', 13)}</button>
+      <button class="icon-btn sm" data-a="revert" title="${t('revert')}">${icon('retry', 13)}</button>
+    </div>`);
+    row.onclick = (e) => { if (e.target.closest('button')) return; if (s.selected === f.path) { s.selected = null; s.diff = null; draw(el, ctx); } else loadDiff(el, ctx, f.path); };
+    row.querySelector('[data-a=open]').onclick = () => call('open_path', { path: `${d.root}/${f.path}` }).catch(errorToast);
+    row.querySelector('[data-a=revert]').onclick = async () => {
+      if (!(await confirmDialog(t('revert_confirm', { file: f.path }), { okLabel: t('revert') }))) return;
+      try { await call('change_revert', { conversationId: ctx.convId, paths: [f.path] }); } catch (e) { errorToast(e); }
+      load(el, ctx);
+    };
+    list.appendChild(row);
+    if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx));
+  }
+  el.appendChild(list);
+}
+
+function diffView(text, path, ctx) {
+  const box = h('<div class="diff-view"></div>');
+  if (text == null) { box.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>'; return box; }
+  const rows = parseUnified(text);
+  if (!rows.length) { box.innerHTML = `<div class="muted" style="padding:10px">${t('no_textual_changes')}</div>`; return box; }
+  const tbl = h('<table class="dv"><tbody></tbody></table>');
+  const tb = tbl.querySelector('tbody');
+  for (const r of rows) {
+    if (r.type === 'hunk') { tb.appendChild(h(`<tr class="dv-hunk"><td colspan="3">${esc(r.text)}</td></tr>`)); continue; }
+    const tr = h(`<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`);
+    for (const fn of lineHooks) fn(tr, { path, ...r }, ctx);
+    tb.appendChild(tr);
+  }
+  box.appendChild(tbl);
+  return box;
+}
+
+const reloadSoon = debounce(() => {
+  const ctx = context();
+  if (!ctx) return;
+  refresh('changes');
+}, 600);
+
+registerPane({
+  id: 'changes',
+  order: 10,
+  icon: 'edit',
+  label: () => t('ws_changes'),
+  badge: (ctx) => { const s = state.get(ctx.convId); return s && s.data && s.data.files ? s.data.files.length || '' : ''; },
+  mount: (el, ctx) => { el.classList.add('changes-pane'); load(el, ctx); },
+  show: (el, ctx) => load(el, ctx),
+});
+
+on('files-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) reloadSoon(); });
+on('generation-state', ({ conversation_id, running }) => { const c = context(); if (c && c.convId === conversation_id && !running) reloadSoon(); });

@@ -14,7 +14,7 @@ use crate::view;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 type St<'a> = State<'a, Arc<AppState>>;
@@ -1032,4 +1032,34 @@ pub async fn term_close(state: St<'_>, id: String) -> AppResult<()> {
 #[tauri::command]
 pub async fn term_list(state: St<'_>, conversation_id: String) -> AppResult<Value> {
     Ok(json!(state.terminals.list(&conversation_id)))
+}
+
+// ------------------------------------------------------------- changes (git / session edits)
+
+fn session_for(st: &AppState, conversation_id: &str) -> AppResult<Arc<crate::codetools::CodeSession>> {
+    let conv = st.db.conv_get(conversation_id)?;
+    let cwd = conv.cwd.ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    Ok(st.code_session(conversation_id, &cwd))
+}
+
+#[tauri::command]
+pub async fn changes_list(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let s = session_for(&state, &conversation_id)?;
+    crate::gitops::changes(&s).await
+}
+
+#[tauri::command]
+pub async fn change_diff(state: St<'_>, conversation_id: String, path: String) -> AppResult<String> {
+    let s = session_for(&state, &conversation_id)?;
+    crate::gitops::file_diff(&s, &path).await
+}
+
+#[tauri::command]
+pub async fn change_revert(app: AppHandle, state: St<'_>, conversation_id: String, paths: Vec<String>) -> AppResult<()> {
+    let s = session_for(&state, &conversation_id)?;
+    for p in &paths {
+        crate::gitops::revert_file(&s, p).await?;
+    }
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(())
 }

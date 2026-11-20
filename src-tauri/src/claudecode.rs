@@ -630,6 +630,7 @@ async fn run_once(
                         "cc_session": ev["session_id"].as_str().or(session_id.as_deref()),
                     });
                     let _ = new_row!("user", Value::Array(c), meta);
+                    let _ = app.emit("files-changed", json!({"conversation_id": conv_id}));
                     ts.current = None;
                     ts.streaming = None;
                     emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);

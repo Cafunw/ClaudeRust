@@ -84,6 +84,8 @@ export function disposeConversation(convId) {
   }
 }
 
+export function updateTabs() { renderTabs(); }
+
 function renderTabs() {
   const el = aside();
   const tabs = el && el.querySelector('.ws-tabs');

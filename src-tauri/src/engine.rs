@@ -1129,6 +1129,9 @@ async fn execute_tool(
             None
         };
         let out = codetools::execute(session.clone(), name, input, cancel, timeout, progress).await;
+        if matches!(name, "Write" | "Edit" | "Bash") {
+            let _ = app.emit("files-changed", json!({"conversation_id": conv_id}));
+        }
         return (out.content, out.is_error);
     }
 

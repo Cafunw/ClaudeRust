@@ -30,6 +30,9 @@ pub struct CodeSession {
     pub conv_id: String,
     /// Registry for background commands (absent in previews and tests).
     pub shells: Option<Arc<crate::shells::Shells>>,
+    /// Content of each file before this session first changed it (`None`:
+    /// the file didn't exist). The baseline for diffs outside git.
+    pub originals: Mutex<std::collections::HashMap<PathBuf, Option<Vec<u8>>>>,
 }
 
 impl CodeSession {
@@ -40,7 +43,21 @@ impl CodeSession {
             read_files: Mutex::new(HashSet::new()),
             conv_id: String::new(),
             shells: None,
+            originals: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Record a file's current content before its first change in this session.
+    pub fn remember_original(&self, p: &Path) {
+        let mut m = self.originals.lock();
+        if m.contains_key(p) {
+            return;
+        }
+        let content = match std::fs::metadata(p) {
+            Ok(md) if md.is_file() && md.len() <= 20 * 1024 * 1024 => std::fs::read(p).ok(),
+            _ => None,
+        };
+        m.insert(p.to_path_buf(), content);
     }
 
     pub fn for_conversation(root: PathBuf, conv_id: &str, shells: Arc<crate::shells::Shells>) -> Self {
@@ -941,6 +958,7 @@ fn write(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    s.remember_original(&path);
     std::fs::write(&path, content)?;
     s.read_files.lock().insert(path.clone());
     Ok(ToolOutput::text(if existed {
@@ -961,6 +979,7 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            s.remember_original(&path);
             std::fs::write(&path, new)?;
             s.read_files.lock().insert(path.clone());
             return Ok(ToolOutput::text(format!("File created successfully at: {}", path.display())));
@@ -988,6 +1007,7 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     }
     let pos = text.find(old).unwrap_or(0);
     let updated = if all { text.replace(old, new) } else { text.replacen(old, new, 1) };
+    s.remember_original(&path);
     std::fs::write(&path, &updated)?;
     // snippet around the first change
     let start_line = text[..pos].matches('\n').count();

@@ -1,5 +1,9 @@
 // UI strings: English and Turkish.
 const en = {
+  ws_changes: 'Changes', changes_session: 'Changed in this session', revert_all: 'Revert all', revert: 'Revert', open_file: 'Open file',
+  revert_all_confirm: 'Revert all {n} changed files? This discards their changes.', revert_confirm: 'Revert {file}? This discards its changes.',
+  changes_none_repo: 'No changes — the working tree matches HEAD.', changes_none: 'No files changed in this session yet.', no_textual_changes: 'No textual changes (binary file or mode change).',
+  refresh: 'Refresh',
   ws_toggle: 'Toggle side panel', ws_terminal: 'Terminal', ws_tasks: 'Tasks', ws_tasks_d: 'Background commands and agents of this session',
   ws_tasks_empty: 'No background tasks. Commands Claude runs in the background appear here.', clear_finished: 'Clear finished', no_output: '(no output yet)',
   term_exited: '[process exited — press Enter to start a new shell]',
@@ -126,6 +130,10 @@ const en = {
 };
 
 const tr = {
+  ws_changes: 'Değişiklikler', changes_session: 'Bu oturumda değişenler', revert_all: 'Hepsini geri al', revert: 'Geri al', open_file: 'Dosyayı aç',
+  revert_all_confirm: 'Değişen {n} dosyanın tümü geri alınsın mı? Değişiklikleri silinir.', revert_confirm: '{file} geri alınsın mı? Değişiklikleri silinir.',
+  changes_none_repo: 'Değişiklik yok — çalışma ağacı HEAD ile aynı.', changes_none: 'Bu oturumda henüz dosya değişmedi.', no_textual_changes: 'Metin değişikliği yok (ikili dosya ya da izin değişikliği).',
+  refresh: 'Yenile',
   ws_toggle: 'Yan paneli aç/kapat', ws_terminal: 'Terminal', ws_tasks: 'Görevler', ws_tasks_d: 'Bu oturumun arka plan komutları ve ajanları',
   ws_tasks_empty: 'Arka plan görevi yok. Claude\'un arka planda çalıştırdığı komutlar burada görünür.', clear_finished: 'Bitenleri temizle', no_output: '(henüz çıktı yok)',
   term_exited: '[işlem sona erdi — yeni kabuk için Enter\'a basın]',

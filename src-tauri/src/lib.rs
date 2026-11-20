@@ -12,6 +12,7 @@ pub mod display;
 pub mod engine;
 pub mod error;
 pub mod extensions;
+pub mod gitops;
 pub mod highlight;
 pub mod import;
 pub mod markdown;
@@ -318,6 +319,9 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::changes_list,
+            commands::change_diff,
+            commands::change_revert,
             commands::term_open,
             commands::term_write,
             commands::term_resize,
