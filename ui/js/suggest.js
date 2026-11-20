@@ -53,11 +53,16 @@ export function attachSuggest(ta, { context, anchor, onPick }) {
         .map((c) => ({ label: '/' + c.name, sub: c.description, hint: c.hint, icon: c.kind === 'custom' ? 'fileText' : 'zap', value: c }));
     } else {
       try {
-        const r = await call('file_search', { conversationId: ctx.conversationId || null, cwd: ctx.cwd || null, query: tok.query });
-        list = r.map((f) => {
+        const args = { conversationId: ctx.conversationId || null, cwd: ctx.cwd || null, query: tok.query };
+        const [r, syms] = await Promise.all([
+          call('file_search', args),
+          tok.query.length >= 2 && !tok.query.includes('/') ? call('symbol_search', args).catch(() => []) : Promise.resolve([]),
+        ]);
+        list = r.slice(0, syms.length ? 10 : 30).map((f) => {
           const name = f.path.split('/').pop();
           return { label: name + (f.dir ? '/' : ''), sub: f.path, icon: f.dir ? 'folder' : 'file', value: f };
         });
+        for (const sy of syms) list.push({ label: sy.name, hint: sy.kind, sub: `${sy.path}:${sy.line}`, icon: 'code', value: { path: `${sy.path}#L${sy.line}`, symbol: true } });
       } catch { list = []; }
     }
     if (my !== seq) return;

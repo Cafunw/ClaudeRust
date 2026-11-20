@@ -33,6 +33,7 @@ pub mod slash;
 pub mod shells;
 pub mod state;
 pub mod subagent;
+pub mod symbols;
 pub mod terminal;
 pub mod util;
 pub mod view;
@@ -362,6 +363,7 @@ pub fn run() {
             commands::worktree_apply,
             commands::worktree_commit,
             commands::file_search,
+            commands::symbol_search,
             commands::slash_list,
             commands::slash_expand,
             commands::slash_save,

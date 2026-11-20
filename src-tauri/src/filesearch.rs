@@ -157,6 +157,11 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
     let mut blocks = vec![];
     let mut total = 0usize;
     for m in mentions(text).into_iter().take(10) {
+        // `path#L120` mentions a symbol: include the code around that line
+        let (m, line) = match m.rsplit_once("#L") {
+            Some((p, n)) if n.parse::<usize>().is_ok() => (p.to_string(), n.parse::<usize>().ok()),
+            _ => (m, None),
+        };
         let p = {
             let pb = PathBuf::from(&m);
             if pb.is_absolute() {
@@ -197,6 +202,20 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
             continue;
         }
         let content = String::from_utf8_lossy(&bytes);
+        if let Some(line) = line {
+            let from = line.saturating_sub(10).max(1);
+            let to = line + 80;
+            let numbered: String = content
+                .lines()
+                .enumerate()
+                .filter(|(i, _)| *i + 1 >= from && *i + 1 <= to)
+                .map(|(i, l)| format!("{:>6}\t{l}\n", i + 1))
+                .collect();
+            total += numbered.len();
+            blocks.push(json!({"type": "text", "text": format!(
+                "<system-reminder>The user mentioned the code at {}:{line}. Lines {from}-{to}:\n{}</system-reminder>", p.display(), numbered)}));
+            continue;
+        }
         total += bytes.len();
         let numbered: String = content
             .lines()
@@ -246,6 +265,8 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert!(b[0]["text"].as_str().unwrap().contains("fn main()"));
         assert!(s.read_files.lock().contains(&dir.join("src/main.rs")));
+        let b = expand("see @src/main.rs#L1", &s);
+        assert!(b[0]["text"].as_str().unwrap().contains("src/main.rs:1. Lines 1-81"), "{b:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

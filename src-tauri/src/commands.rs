@@ -1194,6 +1194,15 @@ pub async fn file_search(state: St<'_>, conversation_id: Option<String>, cwd: Op
 }
 
 #[tauri::command]
+pub async fn symbol_search(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, query: String) -> AppResult<Value> {
+    let Some(root) = root_of(&state, conversation_id.as_deref(), cwd) else { return Ok(json!([])) };
+    let r = tokio::task::spawn_blocking(move || crate::symbols::search(&root, &query, 12))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?;
+    Ok(json!(r))
+}
+
+#[tauri::command]
 pub async fn slash_list(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>) -> AppResult<Value> {
     let root = root_of(&state, conversation_id.as_deref(), cwd);
     Ok(crate::slash::to_json(&crate::slash::list(root.as_deref())))
