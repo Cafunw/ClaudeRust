@@ -45,6 +45,7 @@ function applyAppearance() {
   const theme = s.theme === 'light' || s.theme === 'dark' ? s.theme : (mq.matches ? 'dark' : 'light');
   document.documentElement.dataset.theme = theme;
   document.documentElement.dataset.font = s.chat_font || 'default';
+  document.documentElement.dataset.width = s.chat_width || 'normal';
 }
 mq.addEventListener('change', applyAppearance);
 

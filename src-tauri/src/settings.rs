@@ -29,6 +29,8 @@ pub struct Settings {
     // Appearance
     pub theme: String,     // system | light | dark
     pub chat_font: String, // default | sans | system | dyslexic
+    /// Width of the conversation column: normal | wide | full
+    pub chat_width: String,
     pub language: String,  // auto | en | tr
     pub zoom: f64,
 
@@ -103,6 +105,7 @@ impl Default for Settings {
             max_tokens: 32000,
             theme: "system".into(),
             chat_font: "default".into(),
+            chat_width: "normal".into(),
             language: "auto".into(),
             zoom: 1.0,
             full_name: String::new(),

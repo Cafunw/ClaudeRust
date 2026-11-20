@@ -146,6 +146,7 @@ const RENDER = {
     body.appendChild(field(t('theme'), cards));
     const fonts = [['default', t('font_default')], ['sans', t('font_sans')], ['system', t('font_system')], ['dyslexic', t('font_dyslexic')]];
     body.appendChild(row(t('chat_font'), '', select('chat_font', fonts)));
+    body.appendChild(row(t('chat_width'), t('chat_width_d'), select('chat_width', [['normal', t('width_normal')], ['wide', t('width_wide')], ['full', t('width_full')]])));
     const z = h(`<div class="segmented">${[0.8, 0.9, 1, 1.1, 1.25].map((v) => `<button data-z="${v}" class="${Math.abs((store.settings.zoom || 1) - v) < 0.01 ? 'on' : ''}">${Math.round(v * 100)}%</button>`).join('')}</div>`);
     z.querySelectorAll('button').forEach((b) => b.onclick = () => emit('set-zoom', Number(b.dataset.z)));
     body.appendChild(row(t('zoom'), '', z));

@@ -1077,3 +1077,8 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 /* Quote / explain a selection in an answer */
 .quote-bar { position: fixed; z-index: 60; display: flex; gap: 2px; padding: 3px; background: var(--bg-0); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
 .quote-bar .btn { gap: 5px; }
+
+/* Conversation width (Settings → Appearance) */
+:root[data-width="wide"] { --content-w: 1040px; }
+:root[data-width="full"] { --content-w: 100%; }
+:root[data-width="full"] .chat-col { padding-left: 32px; padding-right: 32px; }

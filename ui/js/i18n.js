@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  chat_width: "Conversation width",
+  chat_width_d: "How wide messages are shown on large windows.",
+  width_normal: "Normal",
+  width_wide: "Wide",
+  width_full: "Full width",
   quote_reply: "Quote",
   quote_explain: "Explain",
   quote_explain_p: "Explain this part in more detail.",
@@ -462,6 +467,11 @@ const en = {
 };
 
 const tr = {
+  chat_width: "Sohbet genişliği",
+  chat_width_d: "Geniş pencerelerde mesajların ne kadar geniş gösterileceği.",
+  width_normal: "Normal",
+  width_wide: "Geniş",
+  width_full: "Tam genişlik",
   quote_reply: "Alıntıla",
   quote_explain: "Açıkla",
   quote_explain_p: "Bu kısmı daha ayrıntılı açıkla.",
