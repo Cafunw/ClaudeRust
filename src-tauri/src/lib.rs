@@ -1,0 +1,306 @@
+//! ClaudeRust — a lightweight Claude desktop client written in Rust.
+
+pub mod anthropic;
+pub mod artifacts;
+pub mod attachments;
+pub mod codetools;
+pub mod commands;
+pub mod db;
+pub mod engine;
+pub mod error;
+pub mod highlight;
+pub mod markdown;
+pub mod mcp;
+pub mod models;
+pub mod prompts;
+pub mod render;
+pub mod settings;
+pub mod shellenv;
+pub mod state;
+pub mod util;
+pub mod view;
+
+use state::AppState;
+use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+pub fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+pub fn hide_quick_entry(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("quick") {
+        let _ = w.hide();
+    }
+}
+
+fn toggle_quick_entry(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("quick") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+            return;
+        }
+        let _ = w.center();
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = w.emit("quick-entry-shown", ());
+        return;
+    }
+    let built = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("quick.html".into()))
+        .title("Quick Entry")
+        .inner_size(680.0, 132.0)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .center()
+        .focused(true)
+        .build();
+    match built {
+        Ok(w) => {
+            let w2 = w.clone();
+            w.on_window_event(move |e| {
+                if let WindowEvent::Focused(false) = e {
+                    let _ = w2.hide();
+                }
+            });
+        }
+        Err(e) => log::error!("quick entry window: {e}"),
+    }
+}
+
+pub fn register_shortcut(app: &AppHandle, s: &settings::Settings) {
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    if !s.quick_entry_enabled || s.quick_entry_shortcut.trim().is_empty() {
+        return;
+    }
+    match s.quick_entry_shortcut.parse::<Shortcut>() {
+        Ok(sc) => {
+            if let Err(e) = gs.register(sc) {
+                log::warn!("could not register shortcut {}: {e}", s.quick_entry_shortcut);
+            }
+        }
+        Err(e) => log::warn!("invalid shortcut {}: {e}", s.quick_entry_shortcut),
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open ClaudeRust", true, None::<&str>)?;
+    let new_chat = MenuItem::with_id(app, "new", "New Chat", true, None::<&str>)?;
+    let quick = MenuItem::with_id(app, "quick", "Quick Entry", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit ClaudeRust", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &new_chat, &quick, &sep, &quit])?;
+    let mut b = TrayIconBuilder::with_id("main")
+        .tooltip("ClaudeRust")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, ev| match ev.id().as_ref() {
+            "open" => show_main(app),
+            "new" => {
+                show_main(app);
+                let _ = app.emit_to("main", "menu-new-chat", ());
+            }
+            "quick" => toggle_quick_entry(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, ev| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = ev
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        b = b.icon(icon.clone());
+    }
+    b.build(app)?;
+    Ok(())
+}
+
+fn artifact_protocol(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let token = req.uri().path().trim_start_matches('/').to_string();
+    let st = app.state::<Arc<AppState>>();
+    let found = st.served.lock().get(&token).cloned();
+    match found {
+        Some((mime, body)) => tauri::http::Response::builder()
+            .status(200)
+            .header("Content-Type", mime)
+            .header("Content-Security-Policy", artifacts::ARTIFACT_CSP)
+            .header("Cache-Control", "no-store")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(body)
+            .unwrap(),
+        None => tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Type", "text/plain")
+            .body(b"artifact not found".to_vec())
+            .unwrap(),
+    }
+}
+
+pub fn run() {
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&["quick"])
+                .build(),
+        )
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _sc, ev| {
+                    if ev.state() == ShortcutState::Pressed {
+                        toggle_quick_entry(app);
+                    }
+                })
+                .build(),
+        )
+        .register_uri_scheme_protocol("artifact", |ctx, req| artifact_protocol(ctx.app_handle(), &req))
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let config_dir = app.path().app_config_dir()?;
+            std::fs::create_dir_all(&config_dir)?;
+            let mcp_path = config_dir.join("claude_desktop_config.json");
+            let _ = mcp::ensure_config(&mcp_path);
+            let db = db::Db::open(&data_dir.join("clauderust.db")).map_err(|e| e.to_string())?;
+            let st = Arc::new(AppState::new(db, data_dir, mcp_path));
+            app.manage(st.clone());
+
+            // Resolve the login-shell PATH, then start MCP servers.
+            {
+                let st = st.clone();
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(shellenv::init).await;
+                    let disabled = st.settings.read().disabled_mcp_servers.clone();
+                    st.mcp.start_all(&disabled).await;
+                    let _ = handle.emit("mcp-changed", ());
+                });
+            }
+
+            if let Err(e) = build_tray(&handle) {
+                log::warn!("tray unavailable: {e}");
+            }
+            let s = st.settings.read().clone();
+            register_shortcut(&handle, &s);
+            if let Some(w) = app.get_webview_window("main") {
+                if (s.zoom - 1.0).abs() > 0.01 {
+                    let _ = w.set_zoom(s.zoom);
+                }
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let keep = window
+                    .app_handle()
+                    .try_state::<Arc<AppState>>()
+                    .map(|s| s.settings.read().keep_in_tray)
+                    .unwrap_or(false);
+                if keep || cfg!(target_os = "macos") {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::bootstrap,
+            commands::save_settings,
+            commands::set_api_key,
+            commands::test_connection,
+            commands::get_models,
+            commands::list_conversations,
+            commands::create_conversation,
+            commands::get_conversation,
+            commands::send_message,
+            commands::regenerate,
+            commands::switch_branch,
+            commands::stop_generation,
+            commands::update_conversation,
+            commands::delete_conversation,
+            commands::message_feedback,
+            commands::export_conversation,
+            commands::search,
+            commands::stage_paths,
+            commands::stage_bytes,
+            commands::stage_text,
+            commands::unstage,
+            commands::pick_files,
+            commands::pick_directory,
+            commands::save_text_file,
+            commands::respond_permission,
+            commands::list_projects,
+            commands::create_project,
+            commands::get_project,
+            commands::update_project,
+            commands::delete_project,
+            commands::add_project_paths,
+            commands::add_project_text,
+            commands::add_project_bytes,
+            commands::remove_project_file,
+            commands::list_artifacts,
+            commands::delete_artifact,
+            commands::serve_artifact,
+            commands::render_markdown,
+            commands::highlight_code,
+            commands::mcp_status,
+            commands::mcp_reload,
+            commands::mcp_save_config,
+            commands::mcp_import_claude_desktop,
+            commands::mcp_list_prompts,
+            commands::mcp_get_prompt,
+            commands::mcp_read_resource,
+            commands::open_external,
+            commands::open_path,
+            commands::reveal_path,
+            commands::copy_text,
+            commands::set_zoom,
+            commands::quick_entry_submit,
+            commands::quick_entry_hide,
+            commands::code_info,
+            commands::usage_stats,
+            commands::reset_onboarding,
+        ]);
+
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building ClaudeRust");
+    app.run(|handle, event| match event {
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main(handle),
+        RunEvent::Exit => {
+            if let Some(st) = handle.try_state::<Arc<AppState>>() {
+                let st = st.inner().clone();
+                tauri::async_runtime::block_on(async move { st.mcp.stop_all().await });
+            }
+        }
+        _ => {}
+    });
+}

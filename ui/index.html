@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClaudeRust</title>
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
+  <script>
+    // Avoid a white flash before settings load.
+    (function () {
+      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
+</head>
+<body>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
