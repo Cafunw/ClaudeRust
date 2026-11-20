@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  ask_claude: "Ask Claude about this change",
+  ask_review: "Review this change",
+  ask_explain: "Explain this change",
+  ask_tests: "Write tests for this change",
+  ask_custom: "Ask something else…",
+  ask_review_p: "Review the uncommitted changes in {file} (see `git diff HEAD -- <file>`): point out bugs, risky edge cases and anything that should be done differently, with line numbers. Don't modify files.",
+  ask_explain_p: "Explain the uncommitted changes in {file} (see `git diff HEAD -- <file>`): what changed, why it might have been done, and how it affects the rest of the code.",
+  ask_tests_p: "Write or update tests that cover the uncommitted changes in {file} (see `git diff HEAD -- <file>`), following the project's existing test conventions, then run them.",
   export_html: "Export as HTML report",
   usage_title: "Usage",
   usage_days: "{n} days",
@@ -349,6 +357,14 @@ const en = {
 };
 
 const tr = {
+  ask_claude: "Bu değişikliği Claude'a sor",
+  ask_review: "Bu değişikliği incele",
+  ask_explain: "Bu değişikliği açıkla",
+  ask_tests: "Bu değişiklik için test yaz",
+  ask_custom: "Başka bir şey sor…",
+  ask_review_p: "{file} dosyasındaki commit edilmemiş değişiklikleri incele (`git diff HEAD -- <dosya>`): hataları, riskli uç durumları ve farklı yapılması gerekenleri satır numaralarıyla belirt. Dosyaları değiştirme.",
+  ask_explain_p: "{file} dosyasındaki commit edilmemiş değişiklikleri açıkla (`git diff HEAD -- <dosya>`): ne değişti, neden yapılmış olabilir ve kodun geri kalanını nasıl etkiliyor.",
+  ask_tests_p: "{file} dosyasındaki commit edilmemiş değişiklikleri kapsayan testleri projenin mevcut test düzenine uygun şekilde yaz ya da güncelle, sonra çalıştır.",
   export_html: "HTML rapor olarak dışa aktar",
   usage_title: "Kullanım",
   usage_days: "{n} gün",

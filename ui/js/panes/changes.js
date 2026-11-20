@@ -3,7 +3,7 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, confirmDialog, debounce } from '../util.js';
+import { h, esc, errorToast, confirmDialog, debounce, showMenu } from '../util.js';
 import { registerPane, refresh, context, updateTabs } from '../workspace.js';
 
 const state = new Map(); // convId -> { data, selected, diff, collapsed }
@@ -91,11 +91,28 @@ function draw(el, ctx) {
       <span class="cst s-${STATUS_LABEL[f.status] || 'M'}">${STATUS_LABEL[f.status] || f.status}</span>
       <span class="cname ellipsis"><b>${esc(name)}</b> <span class="muted">${esc(dir)}</span></span>
       <span class="diff-stat"><span class="a">+${f.added || 0}</span> <span class="d">-${f.removed || 0}</span></span>
+      <button class="icon-btn sm" data-a="ask" title="${t('ask_claude')}">${icon('sparkle', 13)}</button>
       <button class="icon-btn sm" data-a="open" title="${t('open_file')}">${icon('external', 13)}</button>
       <button class="icon-btn sm" data-a="revert" title="${t('revert')}">${icon('retry', 13)}</button>
     </div>`);
     row.onclick = (e) => { if (e.target.closest('button')) return; if (s.selected === f.path) { s.selected = null; s.diff = null; draw(el, ctx); } else loadDiff(el, ctx, f.path); };
     row.querySelector('[data-a=open]').onclick = () => call('open_path', { path: `${d.root}/${f.path}` }).catch(errorToast);
+    row.querySelector('[data-a=ask]').onclick = (ev) => {
+      const mention = /\s/.test(f.path) ? `@"${f.path}"` : `@${f.path}`;
+      const ask = async (prompt) => {
+        const chat = await import('../chat.js');
+        const c = chat.current();
+        if (!c || c.id !== ctx.convId) return;
+        c.composer.setText(prompt);
+        c.composer.send();
+      };
+      showMenu(ev.currentTarget, [
+        { label: t('ask_review'), icon: 'eye', onClick: () => ask(t('ask_review_p', { file: mention })) },
+        { label: t('ask_explain'), icon: 'help', onClick: () => ask(t('ask_explain_p', { file: mention })) },
+        { label: t('ask_tests'), icon: 'check', onClick: () => ask(t('ask_tests_p', { file: mention })) },
+        { label: t('ask_custom'), icon: 'edit', onClick: async () => { const chat = await import('../chat.js'); const c = chat.current(); if (c) { c.composer.setText(`${mention} `); c.composer.focus(); } } },
+      ], { placement: 'bottom-end', width: 260 });
+    };
     row.querySelector('[data-a=revert]').onclick = async () => {
       if (!(await confirmDialog(t('revert_confirm', { file: f.path }), { okLabel: t('revert') }))) return;
       try { await call('change_revert', { conversationId: ctx.convId, paths: [f.path] }); } catch (e) { errorToast(e); }
