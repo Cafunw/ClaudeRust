@@ -73,8 +73,16 @@ fn toggle_quick_entry(app: &AppHandle) {
         .shadow(false)
         .center()
         .focused(true);
+    // Transparent windows can render black without GPU compositing (Remote
+    // Desktop, software rendering): use an opaque window there.
+    let opaque = display::info()["software"].as_bool().unwrap_or(false);
     #[cfg(not(target_os = "macos"))]
-    let builder = builder.transparent(true);
+    let builder = builder.transparent(!opaque);
+    let builder = if opaque {
+        builder.initialization_script("window.__QUICK_OPAQUE__ = true;")
+    } else {
+        builder
+    };
     let built = builder.build();
     match built {
         Ok(w) => {

@@ -2,6 +2,7 @@
 import { call, on } from './api.js';
 import { setLanguage, t } from './i18n.js';
 
+if (window.__QUICK_OPAQUE__) document.body.classList.add('opaque');
 const q = document.getElementById('q');
 const go = document.getElementById('go');
 const mq = window.matchMedia('(prefers-color-scheme: dark)');

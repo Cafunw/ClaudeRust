@@ -669,9 +669,13 @@ fn import_ai_conversation(
     if done.contains(&key) {
         return Ok(false);
     }
-    let msgs = c["chat_messages"].as_array().cloned().unwrap_or_default();
+    let mut msgs = c["chat_messages"].as_array().cloned().unwrap_or_default();
     if msgs.is_empty() {
         return Ok(false);
+    }
+    // Parents must be inserted before their children.
+    if msgs.iter().any(|m| m["parent_message_uuid"].is_string()) {
+        msgs.sort_by_key(|m| ts_ms(&m["created_at"]).unwrap_or(i64::MAX));
     }
     let settings = st.settings.read().clone();
     let model = c["model"]
