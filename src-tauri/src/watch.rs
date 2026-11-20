@@ -181,6 +181,29 @@ impl Watches {
             }
         })
         .map_err(|e| AppError::msg(format!("Can't watch files: {e}")))?;
+        // On Linux a recursive watch costs one inotify watch per folder,
+        // including node_modules/target; watch only the project's own folders.
+        #[cfg(target_os = "linux")]
+        {
+            let mut n = 0;
+            let walker = ignore::WalkBuilder::new(root)
+                .hidden(false)
+                .require_git(false)
+                .filter_entry(|e| !IGNORED.contains(&e.file_name().to_string_lossy().as_ref()))
+                .build();
+            for e in walker.flatten() {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) && watcher.watch(e.path(), RecursiveMode::NonRecursive).is_ok() {
+                    n += 1;
+                    if n >= 4000 {
+                        break;
+                    }
+                }
+            }
+            if n == 0 {
+                return Err(AppError::msg(format!("Can't watch {}", root.display())));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         watcher
             .watch(root, RecursiveMode::Recursive)
             .map_err(|e| AppError::msg(format!("Can't watch {}: {e}", root.display())))?;
@@ -264,21 +287,25 @@ async fn run_check(root: &Path, command: &str, stop: &CancellationToken) -> (Opt
     let pid = child.id();
     let mut so = child.stdout.take();
     let mut se = child.stderr.take();
+    // read everything (so the check never blocks on a full pipe) but keep
+    // at most 400 KB of each stream
+    async fn drain<R: tokio::io::AsyncRead + Unpin>(r: Option<&mut R>, keep: &mut Vec<u8>) {
+        let Some(r) = r else { return };
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            match r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = 400_000usize.saturating_sub(keep.len());
+                    keep.extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+        }
+    }
     let io = async {
         let mut a = Vec::new();
         let mut b = Vec::new();
-        let (_, _) = tokio::join!(
-            async {
-                if let Some(s) = so.as_mut() {
-                    let _ = s.take(400_000).read_to_end(&mut a).await;
-                }
-            },
-            async {
-                if let Some(s) = se.as_mut() {
-                    let _ = s.take(400_000).read_to_end(&mut b).await;
-                }
-            }
-        );
+        tokio::join!(drain(so.as_mut(), &mut a), drain(se.as_mut(), &mut b));
         let st = child.wait().await.ok().and_then(|s| s.code());
         let mut out = String::from_utf8_lossy(&a).to_string();
         let err = String::from_utf8_lossy(&b);
@@ -342,5 +369,9 @@ mod tests {
         assert_eq!(error_lines(&out), vec!["error: broken".to_string()]);
         let (code, _) = run_check(&dir, "true", &stop).await;
         assert_eq!(code, Some(0));
+        // lots of output must not block the check
+        let (code, out) = tokio::time::timeout(Duration::from_secs(20), run_check(&dir, "head -c 3000000 /dev/zero | tr '\\0' x; echo; exit 3", &stop)).await.unwrap();
+        assert_eq!(code, Some(3));
+        assert!(out.len() <= 400_001);
     }
 }

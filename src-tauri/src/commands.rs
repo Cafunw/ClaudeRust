@@ -1449,6 +1449,9 @@ pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id
         return Err(AppError::msg("Wait for the current response to finish before compacting."));
     }
     let conv = st.db.conv_get(&conversation_id)?;
+    if conv.model.starts_with(crate::oai::PREFIX) {
+        return Err(AppError::msg("Compaction uses a Claude model; switch this conversation to a Claude model first."));
+    }
     let leaf = conv.current_leaf.clone().ok_or_else(|| AppError::msg("There is nothing to compact yet."))?;
     let path = st.db.path_to(&leaf)?;
     let before = crate::compact::context_tokens(&path[crate::compact::start_index(&path).unwrap_or(0)..]);

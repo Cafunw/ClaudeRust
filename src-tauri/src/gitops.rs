@@ -188,9 +188,9 @@ fn abs_in(root: &Path, rel: &str) -> AppResult<PathBuf> {
 pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
     if let Some(top) = repo_root(&session.root).await {
         let full = abs_in(&top, path)?;
-        let tracked = git_raw(&top, &["ls-files", "--error-unmatch", "--", path]).await.map(|o| o.status.success()).unwrap_or(false);
+        let tracked = git_raw(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).await.map(|o| o.status.success()).unwrap_or(false);
         if tracked {
-            let d = git(&top, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--", path]).await?;
+            let d = git(&top, &["--literal-pathspecs", "diff", "HEAD", "--no-color", "--no-ext-diff", "--", path]).await?;
             if !d.trim().is_empty() {
                 return Ok(d);
             }
@@ -212,12 +212,12 @@ pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
         let in_head = git_raw(&top, &["cat-file", "-e", &format!("HEAD:{path}")]).await.map(|o| o.status.success()).unwrap_or(false);
         if in_head {
             // restore index and work tree from HEAD
-            let r = git_raw(&top, &["restore", "--source=HEAD", "--staged", "--worktree", "--", path]).await?;
+            let r = git_raw(&top, &["--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--worktree", "--", path]).await?;
             if !r.status.success() {
-                git(&top, &["checkout", "HEAD", "--", path]).await?;
+                git(&top, &["--literal-pathspecs", "checkout", "HEAD", "--", path]).await?;
             }
         } else {
-            let _ = git_raw(&top, &["rm", "--cached", "--quiet", "--force", "--", path]).await;
+            let _ = git_raw(&top, &["--literal-pathspecs", "rm", "--cached", "--quiet", "--force", "--", path]).await;
             if full.is_file() {
                 std::fs::remove_file(&full)?;
             }

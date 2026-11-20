@@ -64,6 +64,32 @@ impl Shadow {
         Ok(())
     }
 
+    /// Whether the folder is reasonable to snapshot: not the home folder or
+    /// a filesystem root, and not huge (files the project's .gitignore and
+    /// our excludes don't skip).
+    pub fn suitable(&self) -> Result<(), String> {
+        let w = &self.work;
+        if w.parent().is_none() || dirs::home_dir().map(|h| std::fs::canonicalize(&h).unwrap_or(h) == *w).unwrap_or(false) {
+            return Err("the folder is the home folder or a drive root".into());
+        }
+        let (mut files, mut bytes) = (0u64, 0u64);
+        let walker = ignore::WalkBuilder::new(w)
+            .hidden(false)
+            .require_git(false)
+            .filter_entry(|e| !matches!(e.file_name().to_string_lossy().as_ref(), ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "venv" | "__pycache__" | ".next" | ".cache"))
+            .build();
+        for e in walker.flatten() {
+            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files += 1;
+                bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+                if files > 40_000 || bytes > 1_500_000_000 {
+                    return Err(format!("the folder is too large to snapshot ({files}+ files, {} MB+)", bytes / 1_048_576));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Record the current state of the files; returns the snapshot id.
     pub fn snapshot(&self, label: &str) -> AppResult<String> {
         self.ensure()?;

@@ -138,7 +138,14 @@ impl Terminals {
 
     pub fn close(&self, id: &str) {
         if let Some(t) = self.map.lock().remove(id) {
-            let _ = t.child.lock().kill();
+            let mut child = t.child.lock();
+            // hang up the whole job (background jobs started in the shell
+            // too), like closing a terminal window
+            #[cfg(unix)]
+            if let Some(pid) = child.process_id() {
+                crate::codetools::signal_process_group(pid, libc::SIGHUP);
+            }
+            let _ = child.kill();
         }
     }
 

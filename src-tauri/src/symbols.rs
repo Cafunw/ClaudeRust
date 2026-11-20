@@ -89,7 +89,15 @@ pub fn scan(path: &str, text: &str) -> Vec<Symbol> {
 }
 
 /// All symbols of a project (cached for 20 s).
+static BUILD: Mutex<()> = parking_lot::const_mutex(());
+
 pub fn index(root: &Path) -> Index {
+    if let Some((t, v)) = CACHE.lock().get(root) {
+        if t.elapsed() < Duration::from_secs(20) {
+            return v.clone();
+        }
+    }
+    let _build = BUILD.lock();
     if let Some((t, v)) = CACHE.lock().get(root) {
         if t.elapsed() < Duration::from_secs(20) {
             return v.clone();

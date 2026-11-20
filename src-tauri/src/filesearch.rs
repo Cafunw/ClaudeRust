@@ -20,7 +20,16 @@ type FileList = std::sync::Arc<Vec<(String, bool)>>;
 static CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, FileList)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Relative paths under `root` (files and directories), .gitignore-aware.
+static SCAN: Mutex<()> = parking_lot::const_mutex(());
+
 pub fn list(root: &Path) -> FileList {
+    if let Some((t, v)) = CACHE.lock().get(root) {
+        if t.elapsed() < CACHE_TTL {
+            return v.clone();
+        }
+    }
+    // one scan at a time; callers waiting on it reuse its result
+    let _scan = SCAN.lock();
     if let Some((t, v)) = CACHE.lock().get(root) {
         if t.elapsed() < CACHE_TTL {
             return v.clone();
@@ -66,8 +75,10 @@ pub fn score(query: &str, path: &str) -> Option<i64> {
         return Some(-(path.len() as i64));
     }
     let q: Vec<char> = query.to_lowercase().chars().collect();
+    // lower-case per character so both vectors have the same length (some
+    // characters, like İ, lower-case to two)
     let p: Vec<char> = path.chars().collect();
-    let pl: Vec<char> = path.to_lowercase().chars().collect();
+    let pl: Vec<char> = p.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
     let base_start = path.rfind('/').map(|i| path[..i + 1].chars().count()).unwrap_or(0);
     let mut score: i64 = 0;
     let mut qi = 0;
@@ -240,6 +251,8 @@ mod tests {
         assert!(a > b, "{a} {b}");
         assert!(score("xyz", "src/main.rs").is_none());
         assert!(score("smr", "src/main.rs").is_some());
+        assert!(score("rs", "src/İzmir.rs").is_some());
+        assert!(score("izm", "src/İzmir.rs").is_some());
         let exact = score("lib.rs", "src/lib.rs").unwrap();
         let other = score("lib.rs", "src/library/stuff.rs").unwrap();
         assert!(exact > other);

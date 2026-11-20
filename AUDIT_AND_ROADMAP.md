@@ -99,3 +99,24 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 - F4 done. Note for later work: the UI is embedded in the binary, so UI changes need a `cargo build` (touch `src-tauri/build.rs`).
 - Phase 2 complete (items 1-9).
 - CI note: since commit 5b72e07 GitHub Actions jobs are not starting ("recent account payments have failed or your spending limit needs to be increased"). This is an account billing setting, not a code failure; all checks pass locally on Linux (cargo test, clippy, node --check). Windows/macOS-only code added tonight was reviewed by hand (no cross C toolchain here for sqlite/ring).
+
+## Review of tonight's code (independent review agent) — all 15 findings fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Auto mode was a block list; `rm -rf "$HOME"`, `cd ~ && rm -rf …`, `bash -c`, `xargs`, `nc`, `node -e`, `git -C . push`, `git checkout .` … were auto-approved | Auto mode is now an allow list (known dev tools + safe sub-commands, path args inside the project, `cd` tracked); everything else asks; 19 bypass commands in a test |
+| 2 | A project's CLAUDE.md could `@import` any file (e.g. `~/.aws/credentials`) into the prompt | Project imports must stay inside that project folder |
+| 3 | Sub-agents skipped hooks | PreToolUse / PostToolUse run for sub-agent tool calls |
+| 4 | Deleting a worktree session discarded uncommitted work | Work is committed to the session branch first (branch kept) |
+| 5 | Apply-to-origin trimmed / re-encoded the patch | Raw patch bytes written unchanged |
+| 6 | Watch mode blocked on > 400 KB output | Output fully drained, only the first 400 KB kept |
+| 7 | Parallel sub-agents shared one working directory | Each sub-agent gets its own session state |
+| 8 | Hook trust ignored the scripts hooks run; `.claude/` edits auto-approved; stdin write could hang | Trust hash covers referenced scripts; `.claude/` and `.git/` edits ask in Auto/accept-edits; stdin fed concurrently |
+| 9 | Checkpoints had no size/time limits | Home/root and huge folders (40k files / 1.5 GB) skipped; 90 s cap per snapshot. Known limit: nested repositories are stored as links, not contents |
+| 10 | Routine runs left a worktree each time | Previous run's worktree removed when it has no changes/commits |
+| 11 | Unbounded scanning (no debounce, parallel rescans, inotify on node_modules) | `@` search debounced; one scan at a time per index; Linux watches only project folders (max 4000) |
+| 12 | `filesearch::score` panicked on characters like İ | Per-character lower-casing; test |
+| 13 | Closing a terminal left background jobs running | SIGHUP to the shell's process group before kill |
+| 14 | Compaction ran for OpenAI-compatible chats | Skipped / refused for those models |
+| 15 | Revert treated paths as git pathspec patterns | `--literal-pathspecs` |
+

@@ -105,7 +105,14 @@ export function attachSuggest(ta, { context, anchor, onPick }) {
     if (picked.type === '@' && picked.item.dir) update();
   }
 
-  ta.addEventListener('input', () => update());
+  // file/symbol search waits for a pause in typing
+  let timer = null;
+  ta.addEventListener('input', () => {
+    clearTimeout(timer);
+    const tok = currentToken();
+    if (tok && tok.type === '@') timer = setTimeout(update, 120);
+    else update();
+  });
   ta.addEventListener('click', () => update());
   ta.addEventListener('blur', () => setTimeout(close, 120));
   ta.addEventListener('keydown', (e) => {

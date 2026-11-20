@@ -724,7 +724,19 @@ async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
     }
     let data = st.data_dir.clone();
     let label = format!("{conv_id} {}", user.id);
-    let r = tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).snapshot(&label)).await;
+    let snap = tokio::task::spawn_blocking(move || {
+        let sh = crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd));
+        sh.suitable().map_err(crate::error::AppError::msg)?;
+        sh.snapshot(&label)
+    });
+    // a slow disk must not hold up the turn for long
+    let r = match tokio::time::timeout(Duration::from_secs(90), snap).await {
+        Ok(r) => r,
+        Err(_) => {
+            log::warn!("checkpoint took too long; continuing without it");
+            return;
+        }
+    };
     match r {
         Ok(Ok(sha)) => {
             let mut meta = user.meta.clone();
@@ -744,7 +756,7 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
         return;
     }
     let Ok(conv) = st.db.conv_get(conv_id) else { return };
-    if conv.options["engine"] == crate::claudecode::ENGINE {
+    if conv.options["engine"] == crate::claudecode::ENGINE || conv.model.starts_with(crate::oai::PREFIX) {
         return;
     }
     let Ok(path) = st.db.path_to(parent) else { return };
