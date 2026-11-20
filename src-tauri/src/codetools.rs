@@ -533,6 +533,23 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, boo
     }
 }
 
+/// SIGKILL the process group led by `pid` (the shell started with
+/// `process_group(0)`), so commands it started die with it. Signals nothing
+/// unless `pid` really leads its own group: never the app's own group.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return };
+    if pid <= 1 {
+        return;
+    }
+    // SAFETY: plain syscalls on a pid we spawned; no memory is shared.
+    unsafe {
+        if libc::getpgid(pid) == pid && libc::getpgid(0) != pid {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, default_timeout: Duration) -> AppResult<ToolOutput> {
     let command = input["command"].as_str().unwrap_or("").to_string();
     if command.trim().is_empty() {
@@ -577,7 +594,7 @@ async fn bash(s: &CodeSession, input: &Value, cancel: &CancellationToken, defaul
     let kill_group = move || {
         #[cfg(unix)]
         if let Some(p) = pid {
-            let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{p}")]).status();
+            kill_process_group(p);
         }
         #[cfg(windows)]
         if let Some(p) = pid {
@@ -1258,6 +1275,31 @@ mod tests {
             let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5)).await;
             assert!(r.is_error); // missing file, but must not panic
         }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_whole_command() {
+        let d = tmp();
+        let s = Arc::new(CodeSession::new(d.clone()));
+        let c = CancellationToken::new();
+        let marker = d.join("pid");
+        let cmd = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
+        let b = execute(s.clone(), "Bash", &json!({"command": cmd, "timeout": 1000}), &c, Duration::from_secs(20)).await;
+        assert!(b.is_error && b.content[0]["text"].as_str().unwrap().contains("timed out"), "{:?}", b.content);
+        let pid: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Running = exists and isn't a zombie waiting to be reaped.
+        let alive = if std::path::Path::new("/proc").is_dir() {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'))
+                .unwrap_or(false)
+        } else {
+            // SAFETY: signal 0 only checks whether the process exists.
+            unsafe { libc::kill(pid, 0) == 0 }
+        };
+        assert!(!alive, "background child survived");
         let _ = std::fs::remove_dir_all(d);
     }
 

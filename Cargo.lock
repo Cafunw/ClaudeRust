@@ -609,6 +609,7 @@ dependencies = [
  "ignore",
  "image",
  "keyring",
+ "libc",
  "log",
  "mime_guess",
  "once_cell",
