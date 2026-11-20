@@ -78,7 +78,7 @@ Architecture rules followed throughout:
 Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 
 - [x] D1. ✅ Tam — Watch mode (`watch.rs`, `notify` crate): file events in the project (build/dependency folders ignored), 900 ms debounce, waits while Claude is mid-turn, no overlapping runs; check command auto-detected (cargo check / tsc / go build+vet / npm scripts / python compileall / make) or user-set; error-line extraction; topbar badge (Watch / Checking… / Check passed / N errors); panel with command, output, Run now, Fix with Claude, auto-fix after Claude's turns (max 2 in a row); resumes after restart; `/watch`. Tests: detection, error lines, ignored paths, real check runs. Verified: a broken file turned the badge red, Fix with Claude sent the errors, fixing the file turned it green.
-- [ ] D2. Commit from the Changes pane with an AI-written commit message (and push).
+- [x] D2. ✅ Tam — Changes pane "Commit" (git sessions, incl. worktree branches): Claude (title model) writes the message from the diff + recent log style (fallback when no API key), editable; optional push (sets upstream when missing). Verified the commit landed with the suggested message.
 - [ ] D3. Desktop notification when a session needs permission while the app is in the background.
 - [ ] D4. Command palette (Ctrl+K) that reaches every command, pane, session and setting.
 - [ ] D5. Project architecture map: module/import graph of the project.

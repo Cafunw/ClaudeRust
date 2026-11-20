@@ -1798,3 +1798,73 @@ pub async fn watch_auto_fix(state: St<'_>, conversation_id: String, on: bool) ->
     engine::update_conv_options(&state, &conversation_id, |o| o["watch_auto_fix"] = json!(on));
     Ok(())
 }
+
+// ------------------------------------------------------------- commit with a suggested message
+
+pub const COMMIT_PROMPT: &str = "Write a git commit message for the diff below. First line: an imperative summary under 72 characters, no trailing period. Then, only if useful, a blank line and a short body (wrapped at 72) explaining what changed and why. Match the style of the recent commits if they follow a convention (e.g. Conventional Commits). Reply with the message only.";
+
+/// Suggest a commit message for the session's uncommitted changes.
+#[tauri::command]
+pub async fn commit_message_suggest(state: St<'_>, conversation_id: String) -> AppResult<String> {
+    let st = state.inner().clone();
+    let cwd = conv_cwd(&st, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
+    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--stat", "--patch"]).await.unwrap_or_default();
+    if diff.trim().is_empty() {
+        return Err(AppError::msg("There are no changes to commit."));
+    }
+    let log = crate::gitops::git(&root, &["log", "--oneline", "-10"]).await.unwrap_or_default();
+    let files = diff.lines().filter(|l| l.starts_with("diff --git")).count();
+    let fallback = format!("Update {files} file{}", if files == 1 { "" } else { "s" });
+    let Ok(client) = st.client() else { return Ok(fallback) };
+    let model_id = st.settings.read().title_model.clone();
+    let model = models::info(&model_id);
+    let mut body = json!({
+        "model": model_id,
+        "max_tokens": 1024,
+        "system": COMMIT_PROMPT,
+        "messages": [{"role": "user", "content": format!("<recent_commits>\n{log}\n</recent_commits>\n\n<diff>\n{}\n</diff>", crate::util::truncate_middle(&diff, 60_000))}],
+    });
+    match model.thinking {
+        models::Thinking::Disableable => body["thinking"] = json!({"type": "disabled"}),
+        models::Thinking::BetweenTools => body["thinking"] = json!({"type": "between_tools"}),
+        _ => {}
+    }
+    let r = tokio::time::timeout(std::time::Duration::from_secs(45), client.create(&body, &[])).await;
+    let text = match r {
+        Ok(Ok(v)) => v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""),
+        _ => String::new(),
+    };
+    let text = text.trim().trim_matches('`').trim().to_string();
+    Ok(if text.is_empty() { fallback } else { text })
+}
+
+/// Commit all changes of the session (and optionally push).
+#[tauri::command]
+pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, message: String, push: bool) -> AppResult<String> {
+    let cwd = conv_cwd(&state, &conversation_id)?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    if message.trim().is_empty() {
+        return Err(AppError::msg("Write a commit message."));
+    }
+    crate::gitops::git(&root, &["add", "-A"]).await?;
+    crate::gitops::git(&root, &["commit", "-q", "-m", message.trim()]).await?;
+    let sha = crate::gitops::git(&root, &["rev-parse", "--short", "HEAD"]).await.unwrap_or_default();
+    let branch = crate::gitops::git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).await.unwrap_or_default();
+    let mut msg = format!("Committed {} on {}.", sha.trim(), branch.trim());
+    if push {
+        let has_upstream = crate::gitops::git_raw(&root, &["rev-parse", "--abbrev-ref", "@{u}"]).await.map(|o| o.status.success()).unwrap_or(false);
+        let r = if has_upstream {
+            crate::gitops::git(&root, &["push"]).await
+        } else {
+            crate::gitops::git(&root, &["push", "-u", "origin", "HEAD"]).await
+        };
+        match r {
+            Ok(_) => msg.push_str(" Pushed."),
+            Err(e) => msg.push_str(&format!(" Push failed: {e}")),
+        }
+    }
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(msg)
+}

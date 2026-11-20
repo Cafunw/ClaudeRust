@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  commit_title: "Commit changes",
+  commit_btn: "Commit",
+  commit_files: "{n} changed file(s) on {branch}",
+  commit_msg_ph: "Commit message",
+  commit_suggesting: "Claude is writing a commit message…",
+  commit_suggested: "Suggested by Claude — edit as you like",
+  commit_push: "Push after committing",
+  commit_do: "Commit",
   watch_title: "Watch mode",
   watch_help: "Runs a check (build, type check, lint or tests) whenever files change, and shows whether it passes. Failing output can go straight to Claude.",
   watch_off: "Watch",
@@ -297,6 +305,14 @@ const en = {
 };
 
 const tr = {
+  commit_title: "Değişiklikleri commit et",
+  commit_btn: "Commit",
+  commit_files: "{branch} dalında {n} değişen dosya",
+  commit_msg_ph: "Commit mesajı",
+  commit_suggesting: "Claude bir commit mesajı yazıyor…",
+  commit_suggested: "Claude'un önerisi — dilediğiniz gibi düzenleyin",
+  commit_push: "Commit'ten sonra push et",
+  commit_do: "Commit et",
   watch_title: "İzleme modu",
   watch_help: "Dosyalar her değiştiğinde bir denetim (derleme, tür denetimi, lint ya da testler) çalıştırır ve geçip geçmediğini gösterir. Hatalı çıktı doğrudan Claude'a gönderilebilir.",
   watch_off: "İzle",

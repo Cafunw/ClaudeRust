@@ -76,7 +76,7 @@ function draw(el, ctx) {
     try { await call('change_revert', { conversationId: ctx.convId, paths: files.map((f) => f.path) }); } catch (e) { errorToast(e); }
     load(el, ctx);
   };
-  for (const fn of headerHooks) fn(head.querySelector('.hooks'), ctx);
+  for (const fn of headerHooks) fn(head.querySelector('.hooks'), ctx, d);
   el.appendChild(head);
   if (d.error) el.appendChild(h(`<div class="pane-empty">${esc(d.error)}</div>`));
   if (!files.length) {

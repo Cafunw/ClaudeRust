@@ -961,3 +961,5 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .input.mono { font-family: var(--font-mono); font-size: 12.5px; }
 .watch-res .wr-head { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 6px; }
 .watch-res .task-out { margin: 0; max-height: 300px; }
+.commit-dlg { display: flex; flex-direction: column; gap: 8px; }
+.commit-dlg textarea { width: 100%; }

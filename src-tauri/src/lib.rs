@@ -330,6 +330,8 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::commit_message_suggest,
+            commands::git_commit,
             commands::watch_start,
             commands::watch_stop,
             commands::watch_status,

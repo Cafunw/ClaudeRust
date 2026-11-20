@@ -19,6 +19,7 @@ import './watch_ui.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';
+import './panes/commit.js';
 import './panes/plan.js';
 import './panes/terminal.js';
 import './panes/tasks.js';
