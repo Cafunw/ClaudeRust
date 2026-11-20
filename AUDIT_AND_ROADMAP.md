@@ -62,7 +62,7 @@ Architecture rules followed throughout:
 
 ## Faz 2 — IMPLEMENT
 
-- [ ] 1. Git worktree isolation per code session (branch `clauderust/<slug>`), cleanup on delete.
+- [x] 1. ✅ Tam — `worktree.rs`: per-session `git worktree add -b clauderust/<id>` under the app data folder (keeps the sub-folder the session started in); setting `code_worktree` = parallel (default: only when another session in the same repo is running) / always / off, plus a per-session chip (auto/on/off) on the Code page. Deleting the session removes the worktree and its branch (kept if it has its own commits). Changes pane gets Commit (on the session branch) and Apply to <base> (`git apply --3way` of committed + uncommitted + new files). Topbar shows the branch. Tests: create/apply/remove, branch kept with commits. Verified end to end in the app.
 - [ ] 2. Checkpoints & rewind (shadow-git snapshots per turn; rewind code + conversation).
 - [ ] 3. Inline review comments in the diff viewer → batched revision prompt.
 - [ ] 4. Plan pane + Tasks pane (background shells, sub-agents, stop buttons).

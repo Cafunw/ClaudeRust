@@ -29,6 +29,7 @@ pub mod state;
 pub mod terminal;
 pub mod util;
 pub mod view;
+pub mod worktree;
 
 use state::AppState;
 use std::sync::Arc;
@@ -321,6 +322,8 @@ pub fn run() {
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
+            commands::worktree_apply,
+            commands::worktree_commit,
             commands::file_search,
             commands::slash_list,
             commands::slash_expand,

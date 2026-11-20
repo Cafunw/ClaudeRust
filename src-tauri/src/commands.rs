@@ -194,6 +194,7 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
     });
     let mut options = if req.options.is_object() { req.options } else { json!({}) };
     options["date"] = json!(engine::today());
+    let mut code_cwd: Option<String> = None;
     if kind == "code" {
         if options["engine"].as_str().map(|e| e.is_empty() || e == "auto").unwrap_or(true) {
             let engine = match s.code_engine.as_str() {
@@ -209,18 +210,46 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
             };
             options["engine"] = json!(engine);
         }
-        let cwd = req.cwd.clone().ok_or_else(|| AppError::msg("Choose a folder for the coding session."))?;
-        let p = std::path::PathBuf::from(&cwd);
+        let mut cwd = req.cwd.clone().ok_or_else(|| AppError::msg("Choose a folder for the coding session."))?;
+        let mut p = std::path::PathBuf::from(&cwd);
         if !p.is_dir() {
             return Err(AppError::msg(format!("Folder not found: {cwd}")));
+        }
+        // Isolated worktree: asked for explicitly, or by the setting
+        // (always / only when another session in the repo is running).
+        let want = match options["worktree"].as_bool() {
+            Some(b) => b,
+            None => match s.code_worktree.as_str() {
+                "always" => crate::worktree::repo_root(&p).is_some(),
+                "parallel" => match crate::worktree::repo_root(&p) {
+                    Some(root) => {
+                        let running: Vec<String> = st.runs.lock().keys().cloned().collect();
+                        running.iter().filter_map(|id| st.db.conv_get(id).ok()).any(|c| {
+                            c.kind == "code" && c.cwd.as_deref().map(|d| std::path::Path::new(d).starts_with(&root)).unwrap_or(false)
+                        })
+                    }
+                    None => false,
+                },
+                _ => false,
+            },
+        };
+        if let Some(m) = options.as_object_mut() {
+            m.remove("worktree");
+        }
+        if want {
+            let (wt_cwd, info) = crate::worktree::create(&p, &st.data_dir, &new_id())?;
+            options["worktree"] = info;
+            cwd = wt_cwd.to_string_lossy().to_string();
+            p = wt_cwd;
         }
         options["env_snapshot"] = json!(crate::codetools::env_snapshot(&p, &model));
         options["memory"] = json!(crate::codetools::load_memory(&p));
         if options["permission_mode"].is_null() {
             options["permission_mode"] = json!(s.code_permission_mode);
         }
+        code_cwd = Some(cwd);
     }
-    st.db.conv_create(&kind, &model, req.project_id.as_deref(), req.cwd.as_deref(), &options)
+    st.db.conv_create(&kind, &model, req.project_id.as_deref(), code_cwd.as_deref().or(req.cwd.as_deref()), &options)
 }
 
 #[tauri::command]
@@ -414,6 +443,7 @@ pub async fn update_conversation(app: AppHandle, state: St<'_>, req: ConvUpdate)
 pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     engine::stop(&st, &id);
+    let worktree = st.db.conv_get(&id).ok().map(|c| c.options["worktree"].clone()).filter(|w| w.is_object());
     st.db.conv_delete(&id)?;
     st.code_sessions.lock().remove(&id);
     st.shells.kill_conversation(&id);
@@ -431,6 +461,15 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
     for k in stale {
         st.pending_perms.lock().remove(&k);
         st.permissions.lock().remove(&k);
+    }
+    if let Some(info) = worktree {
+        // after the shells and terminals using it have stopped
+        tauri::async_runtime::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if let Err(e) = crate::worktree::remove(&info) {
+                log::warn!("removing worktree failed: {e}");
+            }
+        });
     }
     Ok(())
 }
@@ -1100,4 +1139,36 @@ pub async fn slash_list(state: St<'_>, conversation_id: Option<String>, cwd: Opt
 pub async fn slash_expand(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, name: String, args: String) -> AppResult<Option<String>> {
     let root = root_of(&state, conversation_id.as_deref(), cwd);
     Ok(crate::slash::expand(root.as_deref(), &name, &args))
+}
+
+// ------------------------------------------------------------- worktrees
+
+fn worktree_info(st: &AppState, conversation_id: &str) -> AppResult<Value> {
+    let c = st.db.conv_get(conversation_id)?;
+    let w = c.options["worktree"].clone();
+    if !w.is_object() {
+        return Err(AppError::msg("This session doesn't use a separate worktree."));
+    }
+    Ok(w)
+}
+
+#[tauri::command]
+pub async fn worktree_apply(app: AppHandle, state: St<'_>, conversation_id: String) -> AppResult<String> {
+    let w = worktree_info(&state, &conversation_id)?;
+    let r = tokio::task::spawn_blocking(move || crate::worktree::apply_to_origin(&w))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(r)
+}
+
+#[tauri::command]
+pub async fn worktree_commit(app: AppHandle, state: St<'_>, conversation_id: String, message: String) -> AppResult<String> {
+    let w = worktree_info(&state, &conversation_id)?;
+    let msg = if message.trim().is_empty() { "Changes from a ClaudeRust session".to_string() } else { message };
+    let r = tokio::task::spawn_blocking(move || crate::worktree::commit_all(&w, &msg))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(r)
 }

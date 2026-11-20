@@ -97,6 +97,7 @@ function renderTopbar() {
     chip.onclick = () => call('reveal_path', { path: c.cwd }).catch(errorToast);
     cur.topEl.append(chip, h(`<span class="muted">/</span>`));
     if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool" title="${esc(t('engine_cc'))}">${icon('terminal', 12)} Claude Code</span>`));
+    if (c.options && c.options.worktree && c.options.worktree.branch) cur.topEl.append(h(`<span class="active-tool wt" title="${esc(t('worktree_topbar', { path: c.options.worktree.path }))}">${icon('code', 12)} ${esc(c.options.worktree.branch)}</span>`));
   }
   const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });

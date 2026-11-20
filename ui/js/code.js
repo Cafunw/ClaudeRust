@@ -54,7 +54,17 @@ export async function renderCode(view) {
       const d = await call('pick_directory').catch(errorToast);
       if (d) { folder = d; saveLocal({ codeFolder: d }); drawFolder(); composer.focus(); }
     };
-    pick.append(chip, b);
+    // Worktree isolation: auto (setting) → on → off
+    const wtState = () => loadLocal().codeWorktree || 'auto';
+    const wt = h(`<button class="chip wt-chip" title="${esc(t('worktree_help'))}"></button>`);
+    const drawWt = () => {
+      const s = wtState();
+      wt.className = `chip wt-chip ${s}`;
+      wt.innerHTML = `${icon('code', 13)} ${esc(t('worktree_' + s))}`;
+    };
+    wt.onclick = () => { const order = ['auto', 'on', 'off']; saveLocal({ codeWorktree: order[(order.indexOf(wtState()) + 1) % 3] }); drawWt(); };
+    drawWt();
+    pick.append(chip, b, wt);
     for (const f of recentFolders.filter((x) => x !== folder).slice(0, 4)) {
       const r = h(`<button class="chip" title="${esc(f)}">${icon('history', 13)} ${esc(f.split(/[\\/]/).filter(Boolean).pop() || f)}</button>`);
       r.onclick = () => { folder = f; saveLocal({ codeFolder: f }); drawFolder(); };
@@ -95,7 +105,8 @@ export async function renderCode(view) {
     context: () => ({ cwd: folder, engine }),
     onSend: async (text, atts, st) => {
       if (!folder) { toast(t('folder_missing'), 'error'); return false; }
-      return startConversation({ text, atts, st, kind: 'code', cwd: folder, engine });
+      const w = loadLocal().codeWorktree || 'auto';
+      return startConversation({ text, atts, st, kind: 'code', cwd: folder, engine, worktree: w === 'on' ? true : w === 'off' ? false : null });
     },
   });
   drawFolder();

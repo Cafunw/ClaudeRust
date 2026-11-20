@@ -21,9 +21,9 @@ const STARTERS = {
   choice: { en: 'Surprise me with something interesting I probably don’t know.', tr: 'Bana muhtemelen bilmediğim ilginç bir şey anlat.' },
 };
 
-export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null }) {
+export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null }) {
   const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers };
-  if (kind === 'code') { options.permission_mode = st.permission_mode; if (engine) options.engine = engine; }
+  if (kind === 'code') { options.permission_mode = st.permission_mode; if (engine) options.engine = engine; if (worktree !== null) options.worktree = worktree; }
   const r = await call('send_message', {
     req: {
       new_conversation: { kind, model: st.model, project_id: projectId || null, cwd, options },

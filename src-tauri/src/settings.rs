@@ -68,6 +68,8 @@ pub struct Settings {
     pub code_engine: String,
     /// Optional path to the `claude` executable.
     pub claude_code_path: String,
+    /// Git worktrees for code sessions: off | parallel | always
+    pub code_worktree: String,
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
@@ -115,6 +117,7 @@ impl Default for Settings {
             bash_timeout_secs: 120,
             code_engine: "auto".into(),
             claude_code_path: String::new(),
+            code_worktree: "parallel".into(),
             tool_policies: Default::default(),
             disabled_mcp_servers: vec![],
             onboarded: false,

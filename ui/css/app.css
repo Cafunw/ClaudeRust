@@ -832,3 +832,10 @@ tr.dv-hunk td { color: var(--text-2); background: var(--bg-1); padding: 3px 8px;
 table.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 table.kv td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
 table.kv td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+
+.wt-chip.on { color: var(--accent); border-color: var(--accent); }
+.wt-chip.off { opacity: .7; }
+.active-tool.wt { font-family: var(--font-mono); font-size: 11.5px; }
+.pane-head { flex-wrap: wrap; row-gap: 6px; }
+.pane-head .btn, .pane-head .diff-stat, .pane-head .branch { white-space: nowrap; }
+.pane-head .hooks { display: inline-flex; gap: 6px; }
