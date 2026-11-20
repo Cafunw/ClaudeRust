@@ -163,7 +163,10 @@ pub async fn run_task(
     cancel: &CancellationToken,
 ) -> (Vec<Value>, bool) {
     let text = |s: String| vec![json!({"type": "text", "text": s})];
-    let Some(session) = rc.code.clone() else { return (text("Sub-agents are only available in code sessions.".into()), true) };
+    let Some(parent_session) = rc.code.clone() else { return (text("Sub-agents are only available in code sessions.".into()), true) };
+    // own working directory, so parallel agents don't move each other's `cd`
+    let session = Arc::new(parent_session.fork());
+    let hooks = crate::engine::hook_config(st, &session.root);
     let prompt = input["prompt"].as_str().unwrap_or("").trim().to_string();
     if prompt.is_empty() {
         return (text("prompt is required".into()), true);
@@ -269,7 +272,19 @@ pub async fn run_task(
             log.push(tool_line(&name, &tin));
             st.subagents.update(&id, |s| s.log = log.clone());
             progress(app, &log);
-            let allowed = match codetools::check_permission(&mode, &name, &tin, &crate::engine::allowed_rules(&conv), Some(&session)) {
+            let hook_input = json!({"session_id": conv_id, "tool_name": name, "tool_input": tin, "agent": description});
+            let pre = crate::hooks::run(&hooks, "PreToolUse", &name, hook_input.clone(), &session.root).await;
+            let mut perm = codetools::check_permission(&mode, &name, &tin, &crate::engine::allowed_rules(&conv), Some(&session));
+            if let Some(reason) = &pre.block {
+                perm = Perm::Deny(format!("A PreToolUse hook blocked this tool call: {reason}"));
+            } else {
+                match pre.permission.as_deref() {
+                    Some("allow") if perm == Perm::Ask => perm = Perm::Allow,
+                    Some("ask") if perm == Perm::Allow => perm = Perm::Ask,
+                    _ => {}
+                }
+            }
+            let allowed = match perm {
                 Perm::Allow => Ok(()),
                 Perm::Deny(m) => Err(m),
                 Perm::Ask => {
@@ -286,7 +301,16 @@ pub async fn run_task(
                 Err(m) => (text(m), true),
                 Ok(()) => {
                     let o = codetools::execute(session.clone(), &name, &tin, &my_cancel, Duration::from_secs(settings.bash_timeout_secs), None).await;
-                    (o.content, o.is_error)
+                    let mut content = o.content;
+                    if hooks.events.contains_key("PostToolUse") {
+                        let mut post_in = hook_input;
+                        post_in["tool_response"] = json!(crate::render::plain_text(&Value::Array(content.clone())));
+                        let post = crate::hooks::run(&hooks, "PostToolUse", &name, post_in, &session.root).await;
+                        if let Some(reason) = post.block {
+                            content.push(json!({"type": "text", "text": format!("PostToolUse hook feedback: {reason}")}));
+                        }
+                    }
+                    (content, o.is_error)
                 }
             };
             if matches!(name.as_str(), "Write" | "Edit" | "Bash") {

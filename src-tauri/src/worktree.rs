@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> AppResult<String> {
+    git_bytes(dir, args).map(|b| String::from_utf8_lossy(&b).trim().to_string())
+}
+
+/// git's raw stdout (patches must not be trimmed or re-encoded).
+fn git_bytes(dir: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
     let mut c = Command::new("git");
     c.current_dir(dir)
         .args(args)
@@ -28,7 +33,7 @@ fn git(dir: &Path, args: &[&str]) -> AppResult<String> {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(AppError::msg(if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err }));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(out.stdout)
 }
 
 /// Top level of the repository containing `dir`, if any.
@@ -82,6 +87,21 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
         let _ = std::fs::remove_dir_all(path);
         return Ok(None);
     }
+    // Never throw work away: uncommitted changes are committed to the
+    // session's branch first (the branch is then kept).
+    let mut saved = false;
+    if Path::new(path).is_dir() {
+        let dirty = git(Path::new(path), &["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
+        if dirty {
+            let _ = git(Path::new(path), &["add", "-A"]);
+            saved = git(
+                Path::new(path),
+                &["-c", "user.name=ClaudeRust", "-c", "user.email=noreply@clauderust.local", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "--no-verify", "-m", "Uncommitted work from a ClaudeRust session (saved when the session was deleted)"],
+            )
+            .is_ok();
+        }
+    }
     if Path::new(path).exists() {
         if git(root, &["worktree", "remove", "--force", path]).is_err() {
             let _ = std::fs::remove_dir_all(path);
@@ -93,7 +113,11 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
     let base = info["base"].as_str().unwrap_or("HEAD");
     let own = git(root, &["rev-list", "--count", &format!("{base}..{branch}")]).ok().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
     if own > 0 {
-        return Ok(Some(format!("Kept branch {branch}: it has {own} commit(s) of its own.")));
+        return Ok(Some(if saved {
+            format!("Saved the session's uncommitted changes on branch {branch}.")
+        } else {
+            format!("Kept branch {branch}: it has {own} commit(s) of its own.")
+        }));
     }
     let _ = git(root, &["branch", "-D", branch]);
     Ok(None)
@@ -107,17 +131,30 @@ pub fn apply_to_origin(info: &Value) -> AppResult<String> {
     let base = info["base"].as_str().unwrap_or("HEAD");
     // Stage everything (intent-to-add for new files) so one diff covers it.
     git(path, &["add", "-A", "--intent-to-add"])?;
-    let patch = git(path, &["diff", "--binary", base])?;
-    if patch.trim().is_empty() {
+    let patch = git_bytes(path, &["diff", "--binary", base])?;
+    if patch.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok("There are no changes to apply.".into());
     }
     let tmp = std::env::temp_dir().join(format!("clauderust-{}.patch", crate::util::new_id()));
-    std::fs::write(&tmp, format!("{patch}\n"))?;
+    std::fs::write(&tmp, &patch)?;
+    let patch = String::from_utf8_lossy(&patch).to_string();
     let r = git(root, &["apply", "--3way", "--whitespace=nowarn", &tmp.to_string_lossy()]);
     let _ = std::fs::remove_file(&tmp);
     r?;
     let files = patch.lines().filter(|l| l.starts_with("diff --git")).count();
     Ok(format!("Applied changes to {} file(s) in {}.", files, root.display()))
+}
+
+/// Whether a worktree has nothing worth keeping (no changes, no commits).
+pub fn is_disposable(info: &Value) -> bool {
+    let (Some(path), Some(root), Some(branch)) = (info["path"].as_str(), info["repo_root"].as_str(), info["branch"].as_str()) else { return false };
+    if !Path::new(path).is_dir() {
+        return true;
+    }
+    let clean = git(Path::new(path), &["status", "--porcelain"]).map(|s| s.is_empty()).unwrap_or(false);
+    let base = info["base"].as_str().unwrap_or("HEAD");
+    let own = git(Path::new(root), &["rev-list", "--count", &format!("{base}..{branch}")]).ok().and_then(|n| n.parse::<u64>().ok()).unwrap_or(1);
+    clean && own == 0
 }
 
 /// Commit everything in the worktree on its branch.
@@ -168,10 +205,17 @@ mod tests {
         assert!(msg.contains("2 file"), "{msg}");
         assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\ntwo\n");
         assert!(repo.join("new.txt").exists());
-        // uncommitted only: branch is deleted with the worktree
-        assert_eq!(remove(&info).unwrap(), None);
+        // uncommitted work is saved on the branch, which is kept
+        let note = remove(&info).unwrap().unwrap();
+        assert!(note.contains("Saved"), "{note}");
         assert!(!wt.exists());
-        assert!(git(&repo, &["rev-parse", "--verify", info["branch"].as_str().unwrap()]).is_err());
+        let branch = info["branch"].as_str().unwrap();
+        assert!(git(&repo, &["show", &format!("{branch}:new.txt")]).unwrap().contains("new"));
+        // a clean worktree goes away with its branch
+        let (_, info2) = create(&repo, &data, "eeee1111").unwrap();
+        assert!(is_disposable(&info2));
+        assert_eq!(remove(&info2).unwrap(), None);
+        assert!(git(&repo, &["rev-parse", "--verify", info2["branch"].as_str().unwrap()]).is_err());
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);
     }

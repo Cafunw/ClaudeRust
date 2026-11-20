@@ -1650,6 +1650,21 @@ mod preview_tests {
 
 /// Start a routine now: a new code session in its folder with its prompt.
 pub async fn run_routine(app: &AppHandle, st: &Arc<AppState>, r: &crate::routines::Routine) -> AppResult<String> {
+    // the previous run's worktree goes away if nothing came of it
+    if let Some(prev) = r.last_conversation_id.as_deref().and_then(|id| st.db.conv_get(id).ok()) {
+        let w = prev.options["worktree"].clone();
+        if w.is_object() && !st.runs.lock().contains_key(&prev.id) {
+            let disposable = tokio::task::spawn_blocking({
+                let w = w.clone();
+                move || crate::worktree::is_disposable(&w)
+            })
+            .await
+            .unwrap_or(false);
+            if disposable {
+                let _ = tokio::task::spawn_blocking(move || crate::worktree::remove(&w)).await;
+            }
+        }
+    }
     let mut options = json!({"permission_mode": r.permission_mode, "routine_id": r.id, "worktree": r.worktree});
     if !r.engine.is_empty() {
         options["engine"] = json!(r.engine);

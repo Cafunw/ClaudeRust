@@ -32,7 +32,7 @@ pub struct CodeSession {
     pub shells: Option<Arc<crate::shells::Shells>>,
     /// Content of each file before this session first changed it (`None`:
     /// the file didn't exist). The baseline for diffs outside git.
-    pub originals: Mutex<std::collections::HashMap<PathBuf, Option<Vec<u8>>>>,
+    pub originals: Arc<Mutex<std::collections::HashMap<PathBuf, Option<Vec<u8>>>>>,
 }
 
 impl CodeSession {
@@ -43,7 +43,7 @@ impl CodeSession {
             read_files: Mutex::new(HashSet::new()),
             conv_id: String::new(),
             shells: None,
-            originals: Mutex::new(std::collections::HashMap::new()),
+            originals: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -58,6 +58,20 @@ impl CodeSession {
             _ => None,
         };
         m.insert(p.to_path_buf(), content);
+    }
+
+    /// A separate session for a sub-agent: its own working directory and
+    /// read-file set, sharing the folder, background shells and the record
+    /// of original file contents.
+    pub fn fork(&self) -> Self {
+        CodeSession {
+            root: self.root.clone(),
+            cwd: Mutex::new(self.cwd.lock().clone()),
+            read_files: Mutex::new(HashSet::new()),
+            conv_id: self.conv_id.clone(),
+            shells: self.shells.clone(),
+            originals: self.originals.clone(),
+        }
     }
 
     pub fn for_conversation(root: PathBuf, conv_id: &str, shells: Arc<crate::shells::Shells>) -> Self {
