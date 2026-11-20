@@ -101,7 +101,44 @@ pub fn expand(project: Option<&Path>, name: &str, args: &str) -> Option<String> 
     let cmd = list(project).into_iter().find(|c| c.name == name)?;
     let text = std::fs::read_to_string(&cmd.path).ok()?;
     let (_, body) = front_matter(&text);
-    Some(substitute(&body, args))
+    Some(substitute(&body, args).trim_end().to_string())
+}
+
+/// Save a prompt as a custom command (`.claude/commands/<name>.md` in the
+/// project, or `~/.claude/commands/` for every project). `a:b` names go to
+/// sub-folders. Returns the file written.
+pub fn save(project: Option<&Path>, scope: &str, name: &str, description: &str, body: &str, overwrite: bool) -> crate::error::AppResult<PathBuf> {
+    use crate::error::AppError;
+    let name = name.trim().trim_start_matches('/');
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.split(':').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    if !valid {
+        return Err(AppError::msg("Use letters, digits, - and _ for the command name (a:b for a folder)."));
+    }
+    if body.trim().is_empty() {
+        return Err(AppError::msg("The command needs a prompt."));
+    }
+    let base = match scope {
+        "user" => dirs::home_dir().ok_or_else(|| AppError::msg("No home folder."))?.join(".claude").join("commands"),
+        _ => project.ok_or_else(|| AppError::msg("This conversation has no project folder."))?.join(".claude").join("commands"),
+    };
+    let mut path = base;
+    let parts: Vec<&str> = name.split(':').collect();
+    for p in &parts[..parts.len() - 1] {
+        path = path.join(p);
+    }
+    path = path.join(format!("{}.md", parts[parts.len() - 1]));
+    if path.exists() && !overwrite {
+        return Err(AppError::msg(format!("/{name} already exists.")));
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let desc = description.trim().replace('\n', " ");
+    let text = if desc.is_empty() { format!("{}\n", body.trim()) } else { format!("---\ndescription: {desc}\n---\n{}\n", body.trim()) };
+    std::fs::write(&path, text)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -130,6 +167,11 @@ mod tests {
         assert_eq!(l.iter().find(|c| c.name == "test").unwrap().description, "Run the tests and fix failures");
         assert_eq!(expand(Some(&dir), "git:pr", "fix-1").unwrap(), "Open a pull request for fix-1");
         assert!(expand(Some(&dir), "nope", "").is_none());
+        let p = save(Some(&dir), "project", "team:deploy", "Deploy it", "Deploy $ARGUMENTS now", false).unwrap();
+        assert!(p.ends_with(".claude/commands/team/deploy.md"));
+        assert_eq!(expand(Some(&dir), "team:deploy", "staging").unwrap(), "Deploy staging now");
+        assert!(save(Some(&dir), "project", "team:deploy", "", "x", false).is_err());
+        assert!(save(Some(&dir), "project", "bad name", "", "x", false).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -364,6 +364,7 @@ pub fn run() {
             commands::file_search,
             commands::slash_list,
             commands::slash_expand,
+            commands::slash_save,
             commands::changes_list,
             commands::change_diff,
             commands::change_revert,

@@ -1884,3 +1884,13 @@ pub async fn arch_map(state: St<'_>, conversation_id: String) -> AppResult<Value
     v["root"] = json!(root);
     Ok(v)
 }
+
+#[tauri::command]
+pub async fn slash_save(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, scope: String, name: String, description: String, body: String, overwrite: bool) -> AppResult<String> {
+    let root = root_of(&state, conversation_id.as_deref(), cwd);
+    let root = match root {
+        Some(r) => Some(crate::gitops::repo_root(&r).await.unwrap_or(r)),
+        None => None,
+    };
+    crate::slash::save(root.as_deref(), &scope, &name, &description, &body, overwrite).map(|p| p.to_string_lossy().to_string())
+}

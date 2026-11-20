@@ -1,4 +1,5 @@
 // Conversation view: turns, streaming updates, branching, permissions.
+import { openSaveCommand } from './save_command.js';
 import { watchBadge } from './watch_ui.js';
 import { contextMeter, compactDivider } from './context_ui.js';
 import { openRewind } from './rewind.js';
@@ -356,6 +357,11 @@ function renderUserTurn(el, turn) {
     const cb = h(`<button class="icon-btn sm" title="${t('copy')}">${icon('copy', 15)}</button>`);
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
     actions.append(eb, cb);
+    if (cur && cur.conv.kind === 'code') {
+      const sb = h(`<button class="icon-btn sm" title="${t('sc_action')}">${icon('zap', 15)}</button>`);
+      sb.onclick = () => openSaveCommand({ text, conversationId: cur.id, cwd: cur.conv.cwd });
+      actions.append(sb);
+    }
   }
 }
 

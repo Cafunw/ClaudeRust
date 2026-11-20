@@ -1,5 +1,16 @@
 // UI strings: English and Turkish.
 const en = {
+  sc_title: "Save as a command",
+  sc_action: "Save as /command",
+  sc_name: "Command name",
+  sc_desc: "Description (shown in the / menu)",
+  sc_desc_ph: "What the command does",
+  sc_args_help: "Use $ARGUMENTS where the text typed after the command should go, or $1, $2 … for single words.",
+  sc_scope: "Available in",
+  sc_scope_project: "This project (.claude/commands)",
+  sc_scope_user: "All projects (~/.claude/commands)",
+  sc_saved: "Saved /{name} ({path}).",
+  sc_overwrite: "A command with this name exists. Replace it?",
   ws_map: "Map",
   map_filter: "Filter files…",
   map_empty: "No Rust, JavaScript/TypeScript, Python or Go source files found.",
@@ -321,6 +332,17 @@ const en = {
 };
 
 const tr = {
+  sc_title: "Komut olarak kaydet",
+  sc_action: "/komut olarak kaydet",
+  sc_name: "Komut adı",
+  sc_desc: "Açıklama (/ menüsünde görünür)",
+  sc_desc_ph: "Komutun ne yaptığı",
+  sc_args_help: "Komuttan sonra yazılan metnin gideceği yere $ARGUMENTS, tek kelimeler için $1, $2 … yazın.",
+  sc_scope: "Kullanılabileceği yer",
+  sc_scope_project: "Bu proje (.claude/commands)",
+  sc_scope_user: "Tüm projeler (~/.claude/commands)",
+  sc_saved: "/{name} kaydedildi ({path}).",
+  sc_overwrite: "Bu adda bir komut var. Değiştirilsin mi?",
   ws_map: "Harita",
   map_filter: "Dosyaları süz…",
   map_empty: "Rust, JavaScript/TypeScript, Python ya da Go kaynak dosyası bulunamadı.",

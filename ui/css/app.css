@@ -984,3 +984,4 @@ tr.dv-comment td, tr.dv-comment-edit td { padding: 4px 10px 6px 80px; background
 .map-info { padding: 6px 10px; border-top: 1px solid var(--border); min-height: 28px; }
 .map-legend { position: absolute; left: 8px; bottom: 8px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-2); background: var(--bg-0); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); max-width: 90%; }
 .map-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.sc-slash { font-family: var(--font-mono); font-size: 14px; color: var(--text-2); align-self: center; }
