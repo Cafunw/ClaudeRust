@@ -349,6 +349,15 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
             }
         }
     }
+    // @https://… mentions: fetch the page (any conversation using the API
+    // engines; the Claude Code CLI fetches by itself).
+    if conv.options["engine"] != crate::claudecode::ENGINE {
+        for u in crate::filesearch::url_mentions(&req.text) {
+            if let Some(b) = crate::filesearch::fetch_url_block(&u).await {
+                content.push(b);
+            }
+        }
+    }
     // Pick up edits to CLAUDE.md / AGENTS.md since the session started.
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
         if let Some(cwd) = &conv.cwd {

@@ -167,7 +167,7 @@ pub fn mentions(text: &str) -> Vec<String> {
 pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value> {
     let mut blocks = vec![];
     let mut total = 0usize;
-    for m in mentions(text).into_iter().take(10) {
+    for m in mentions(text).into_iter().filter(|m| !m.contains("://")).take(10) {
         // `path#L120` mentions a symbol: include the code around that line
         let (m, line) = match m.rsplit_once("#L") {
             Some((p, n)) if n.parse::<usize>().is_ok() => (p.to_string(), n.parse::<usize>().ok()),
@@ -240,6 +240,42 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
     blocks
 }
 
+/// `@https://…` mentions in a message.
+pub fn url_mentions(text: &str) -> Vec<String> {
+    mentions(text).into_iter().filter(|m| m.starts_with("http://") || m.starts_with("https://")).take(3).collect()
+}
+
+/// Fetch a mentioned web page as text (hidden reminder block).
+pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).user_agent("ClaudeRust").build().ok()?;
+    let body = match client.get(url).send().await {
+        Ok(r) => {
+            let status = r.status();
+            let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            let bytes = r.bytes().await.ok()?;
+            let bytes = &bytes[..bytes.len().min(3_000_000)];
+            let text = if ct.contains("html") || ct.is_empty() {
+                html2text::from_read(bytes, 100).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
+            } else if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") {
+                String::from_utf8_lossy(bytes).to_string()
+            } else {
+                format!("(binary content: {ct}, {} bytes)", bytes.len())
+            };
+            if status.is_success() {
+                crate::util::truncate_middle(text.trim(), 100_000)
+            } else {
+                format!("(the page answered {status})\n{}", crate::util::truncate_middle(text.trim(), 4_000))
+            }
+        }
+        Err(e) => format!("(could not fetch the page: {e})"),
+    };
+    Some(json!({"type": "text", "text": format!("<system-reminder>The user mentioned {url}. Its content:\n{body}</system-reminder>")}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +299,7 @@ mod tests {
         assert_eq!(mentions("look at @src/main.rs and @\"my file.txt\", not a@b.c"), vec!["src/main.rs", "my file.txt"]);
         assert_eq!(mentions("(@a.rs) @b.rs."), vec!["a.rs", "b.rs"]);
         assert!(mentions("email me@x.com").is_empty());
+        assert_eq!(url_mentions("read @https://example.com/a and @src/x.rs"), vec!["https://example.com/a"]);
     }
 
     #[test]
