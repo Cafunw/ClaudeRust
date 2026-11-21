@@ -1574,7 +1574,12 @@ async fn execute_tool(
         match perm {
             Perm::Deny(msg) => return (text_block(msg), true),
             Perm::Ask => {
-                let diff = codetools::preview_diff(Some(session), name, input);
+                // reads the file and diffs it (up to half a second): not on
+                // a runtime worker
+                let diff = {
+                    let (session, name, input) = (session.clone(), name.to_string(), input.clone());
+                    tokio::task::spawn_blocking(move || codetools::preview_diff(Some(&session), &name, &input)).await.ok().flatten()
+                };
                 let reply = ask_permission(
                     app, st, conv_id, id,
                     json!({"kind": "code", "tool": name, "input": input, "diff": diff, "cwd": session.cwd.lock().display().to_string()}),

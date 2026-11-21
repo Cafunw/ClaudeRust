@@ -299,7 +299,11 @@ pub async fn run_task(
                 Perm::Allow => Ok(()),
                 Perm::Deny(m) => Err(m),
                 Perm::Ask => {
-                    let diff = codetools::preview_diff(Some(&session), &name, &tin);
+                    // reads the file and diffs it: not on a runtime worker
+                    let diff = {
+                        let (session, name, tin) = (session.clone(), name.clone(), tin.clone());
+                        tokio::task::spawn_blocking(move || codetools::preview_diff(Some(&session), &name, &tin)).await.ok().flatten()
+                    };
                     let payload = json!({"kind": "code", "tool": name, "input": tin, "diff": diff, "cwd": session.root,
                         "description": format!("Sub-agent \"{description}\""), "tool_use_id": tool_use_id});
                     match ask(app, st, conv_id, payload, &my_cancel).await.map(|r| r.decision) {
