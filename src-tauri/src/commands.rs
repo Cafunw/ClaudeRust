@@ -2025,6 +2025,18 @@ pub async fn git_branches(state: St<'_>, conversation_id: String) -> AppResult<V
     Ok(json!(list))
 }
 
+/// All uncommitted changes as one patch (new files included), for sharing.
+#[tauri::command]
+pub async fn changes_patch(state: St<'_>, conversation_id: String) -> AppResult<String> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
+    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--binary"]).await?;
+    if diff.trim().is_empty() {
+        return Err(AppError::msg("There are no changes."));
+    }
+    Ok(diff)
+}
+
 /// Stash the uncommitted changes (untracked files too), or apply the latest
 /// stash back (`pop`).
 #[tauri::command]

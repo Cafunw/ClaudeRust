@@ -67,17 +67,29 @@ function draw(el, ctx) {
     <div class="grow"></div>
     <span class="hooks"></span>
     <button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button>
-    ${files.length ? `<button class="btn sm ghost" data-a="revert-all">${t('revert_all')}</button>` : ''}
+    ${files.length ? `<button class="icon-btn" data-a="more" title="${esc(t('changes_more'))}">${icon('more', 14)}</button>` : ''}
   </div>`);
   head.querySelector('[data-a=refresh]').onclick = () => load(el, ctx);
   const bb = head.querySelector('.branch-btn');
   if (bb) bb.onclick = (ev) => branchMenu(ev.currentTarget, el, ctx);
-  const ra = head.querySelector('[data-a=revert-all]');
-  if (ra) ra.onclick = async () => {
+  const revertAll = async () => {
     if (!(await confirmDialog(t('revert_all_confirm', { n: files.length }), { okLabel: t('revert_all') }))) return;
     try { await call('change_revert', { conversationId: ctx.convId, paths: files.map((f) => f.path) }); } catch (e) { errorToast(e); }
     load(el, ctx);
   };
+  const more = head.querySelector('[data-a=more]');
+  if (more) more.onclick = (ev) => showMenu(ev.currentTarget, [
+    ...(d.repo ? [
+      { label: t('changes_copy_patch'), icon: 'copy', onClick: async () => {
+        try { const { copyText } = await import('../parts.js'); await copyText(await call('changes_patch', { conversationId: ctx.convId })); toast(t('copied')); } catch (e) { errorToast(e); }
+      } },
+      { label: t('changes_save_patch'), icon: 'download', onClick: async () => {
+        try { await call('save_text_file', { name: `${(d.branch || 'changes').replace(/[\\/:*?"<>|]+/g, '-')}.patch`, content: await call('changes_patch', { conversationId: ctx.convId }) }); } catch (e) { errorToast(e); }
+      } },
+      { sep: true },
+    ] : []),
+    { label: t('revert_all'), icon: 'retry', danger: true, onClick: revertAll },
+  ], { placement: 'bottom-end', width: 260 });
   for (const fn of headerHooks) fn(head.querySelector('.hooks'), ctx, d);
   el.appendChild(head);
   if (d.error) el.appendChild(h(`<div class="pane-empty">${esc(d.error)}</div>`));

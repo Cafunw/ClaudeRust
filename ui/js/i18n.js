@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  changes_more: "More",
+  changes_copy_patch: "Copy all changes as a patch",
+  changes_save_patch: "Save as a .patch file…",
   stash_push: "Stash uncommitted changes",
   stash_pop: "Apply the latest stash",
   stash_count: "{n} saved",
@@ -538,6 +541,9 @@ const en = {
 };
 
 const tr = {
+  changes_more: "Diğer",
+  changes_copy_patch: "Tüm değişiklikleri yama olarak kopyala",
+  changes_save_patch: ".patch dosyası olarak kaydet…",
   stash_push: "Commit edilmemiş değişiklikleri sakla (stash)",
   stash_pop: "Son saklananı geri uygula",
   stash_count: "{n} kayıtlı",

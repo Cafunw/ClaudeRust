@@ -388,6 +388,7 @@ pub fn run() {
             commands::change_revert_hunk,
             commands::git_branches,
             commands::git_switch,
+            commands::changes_patch,
             commands::git_stash,
             commands::git_stash_count,
             commands::project_scripts,
