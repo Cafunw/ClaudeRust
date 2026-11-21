@@ -272,4 +272,7 @@ async function init() {
   void currentLanguage;
 }
 
+// endless CSS animations pause while the window is hidden (see app.css)
+document.addEventListener('visibilitychange', () => document.documentElement.toggleAttribute('data-hidden', document.hidden));
+
 init();
