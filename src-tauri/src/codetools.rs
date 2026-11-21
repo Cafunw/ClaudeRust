@@ -1592,21 +1592,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
+    // (uses /dev/zero)
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_output_is_capped() {
         let d = tmp();
         let s = Arc::new(CodeSession::new(d.clone()));
         let c = CancellationToken::new();
-        #[cfg(unix)]
-        {
-            let b = execute(s.clone(), "Bash", &json!({"command": "cat /dev/zero"}), &c, Duration::from_secs(20), None).await;
-            assert!(b.is_error);
-            assert!(b.content[0]["text"].as_str().unwrap().contains("exceeded"));
-            let r = execute(s.clone(), "Read", &json!({"file_path": "/dev/zero"}), &c, Duration::from_secs(5), None).await;
-            assert!(r.is_error);
-            let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5), None).await;
-            assert!(r.is_error); // missing file, but must not panic
-        }
+        let b = execute(s.clone(), "Bash", &json!({"command": "cat /dev/zero"}), &c, Duration::from_secs(20), None).await;
+        assert!(b.is_error);
+        assert!(b.content[0]["text"].as_str().unwrap().contains("exceeded"));
+        let r = execute(s.clone(), "Read", &json!({"file_path": "/dev/zero"}), &c, Duration::from_secs(5), None).await;
+        assert!(r.is_error);
+        let r = execute(s.clone(), "Read", &json!({"file_path": "x", "offset": 1e30, "limit": 1e30}), &c, Duration::from_secs(5), None).await;
+        assert!(r.is_error); // missing file, but must not panic
         let _ = std::fs::remove_dir_all(d);
     }
 
