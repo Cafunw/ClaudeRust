@@ -659,13 +659,7 @@ pub fn claude_desktop_config_path() -> Option<PathBuf> {
 /// JSON parsers reject, so it is decoded and the mark dropped.
 fn read_config_text(path: &Path) -> std::io::Result<String> {
     let bytes = std::fs::read(path)?;
-    let utf16 = |be: bool| {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| if be { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) })
-            .collect();
-        String::from_utf16(&units).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UTF-16 text"))
-    };
+    let utf16 = |be: bool| crate::util::utf16(&bytes[2..], be).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UTF-16 text"));
     match bytes.as_slice() {
         [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         [0xFF, 0xFE, ..] => utf16(false),
@@ -1400,8 +1394,24 @@ while os.environ.get('MCP_TEST_STUBBORN') == '1':
         m
     }
 
+    /// A Python 3 that really runs, for the fake servers. On Windows
+    /// `python3` can be the Microsoft Store stub: found on PATH, but it only
+    /// prints an install hint.
+    fn python() -> Option<&'static str> {
+        static PY: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+        *PY.get_or_init(|| {
+            let found = ["python3", "python"].into_iter().find(|p| {
+                std::process::Command::new(p).args(["-c", "import sys; sys.exit(sys.version_info < (3,))"]).output().is_ok_and(|o| o.status.success())
+            });
+            if found.is_none() {
+                eprintln!("SKIPPED: the stdio MCP tests need Python 3");
+            }
+            found
+        })
+    }
+
     fn fake(tag: &str, tools: &str) -> Value {
-        json!({"command": "python3", "args": ["-c", FAKE_SERVER, tag, tools]})
+        json!({"command": python().unwrap(), "args": ["-c", FAKE_SERVER, tag, tools]})
     }
 
     #[cfg(unix)]
@@ -1418,10 +1428,8 @@ while os.environ.get('MCP_TEST_STUBBORN') == '1':
     #[tokio::test]
     async fn stdio_roundtrip_with_fake_server() {
         // A tiny MCP server implemented in sh + python-free awk is fiddly; use
-        // a Python one-liner only when python3 exists.
-        if which::which("python3").is_err() {
-            return;
-        }
+        // a Python one-liner only when Python exists.
+        let Some(py) = python() else { return };
         let script = r#"
 import sys, json
 got_roots = False
@@ -1455,7 +1463,7 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)
 "#;
         let dir = temp_dir("test");
-        let m = manager(&dir, json!({"fake": {"command": "python3", "args": ["-c", script]}})).await;
+        let m = manager(&dir, json!({"fake": {"command": py, "args": ["-c", script]}})).await;
         let st = m.statuses().await;
         assert_eq!(st[0].status, "connected", "{:?}", st[0]);
         let tools = m.tools().await;
@@ -1468,7 +1476,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn output_that_isnt_utf8_doesnt_break_the_connection() {
-        if which::which("python3").is_err() {
+        if python().is_none() {
             return;
         }
         let dir = temp_dir("noisy");
@@ -1492,7 +1500,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_server_that_exits_is_marked_failed_and_fails_fast() {
-        if which::which("python3").is_err() {
+        if python().is_none() {
             return;
         }
         let dir = temp_dir("exit");
@@ -1514,9 +1522,7 @@ for line in sys.stdin:
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_closes_stdin_then_kills_the_whole_group() {
-        if which::which("python3").is_err() {
-            return;
-        }
+        let Some(py) = python() else { return };
         let dir = temp_dir("group");
         let pidfile = dir.join("pid");
         let eoffile = dir.join("eof");
@@ -1524,7 +1530,7 @@ for line in sys.stdin:
         // here also ignores the end of its input
         let conf = json!({
             "command": "sh",
-            "args": ["-c", "python3 -c \"$0\" w echo; exit 0", FAKE_SERVER],
+            "args": ["-c", format!("{py} -c \"$0\" w echo; exit 0"), FAKE_SERVER],
             "env": {"MCP_TEST_PIDFILE": pidfile, "MCP_TEST_EOFFILE": eoffile, "MCP_TEST_STUBBORN": "1"},
         });
         let m = manager(&dir, json!({"w": conf})).await;
@@ -1557,7 +1563,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_stopped_call_is_cancelled_and_forgotten() {
-        if which::which("python3").is_err() {
+        if python().is_none() {
             return;
         }
         let dir = temp_dir("cancel");
@@ -1576,7 +1582,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn clashing_names_route_to_the_right_tool() {
-        if which::which("python3").is_err() {
+        if python().is_none() {
             return;
         }
         let dir = temp_dir("names");

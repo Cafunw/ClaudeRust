@@ -219,13 +219,17 @@ export function modal({ title, body, footer, wide = false, onClose, cls = '' }) 
     for (const b of footer) f.appendChild(b);
   }
   scrim.appendChild(m);
+  const opener = document.activeElement;
   document.body.appendChild(scrim);
   const close = () => {
     scrim.remove();
     document.removeEventListener('keydown', key, true);
+    if (opener && opener.isConnected) opener.focus({ preventScroll: true });
     onClose && onClose();
   };
-  const key = (e) => { if (e.key === 'Escape' && !$('.popover')) { e.preventDefault(); e.stopPropagation(); close(); } };
+  // every open dialog listens here, the bottom one first: Esc closes only the top one
+  const isTop = () => Array.from(document.querySelectorAll('.modal-scrim')).pop() === scrim;
+  const key = (e) => { if (e.key === 'Escape' && !$('.popover') && isTop()) { e.preventDefault(); e.stopPropagation(); close(); } };
   document.addEventListener('keydown', key, true);
   scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) close(); });
   m.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));

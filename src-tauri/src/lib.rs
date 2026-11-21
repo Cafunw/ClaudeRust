@@ -1,6 +1,7 @@
 //! ClaudeRust — a lightweight Claude desktop client written in Rust.
 
 pub mod anthropic;
+pub mod applog;
 pub mod archmap;
 pub mod artifacts;
 pub mod claudecode;
@@ -266,6 +267,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir()?;
+            applog::init(&data_dir.join("logs"));
             std::fs::create_dir_all(&data_dir)?;
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;

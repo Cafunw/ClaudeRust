@@ -8,7 +8,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "lint": "eslint ui/js"
+    "lint": "eslint ui/js",
+    "test:ui": "node --test ui/test/*.test.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.6",

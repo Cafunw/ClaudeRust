@@ -298,13 +298,27 @@ fn changes_from_originals(root: &Path, originals: &std::collections::HashMap<Pat
     Ok(json!({"repo": false, "root": root, "branch": null, "files": list}))
 }
 
+/// `rel`, a relative path as `changes` lists it, under `root`: never an
+/// absolute path, a `..`, or a path that leaves `root` through a link.
 fn abs_in(root: &Path, rel: &str) -> AppResult<PathBuf> {
-    let p = Path::new(rel);
-    let full = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
-    if full.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    use std::path::Component;
+    let full = root.join(rel);
+    let canonical = crate::codetools::canonical_or_self;
+    let plain = Path::new(rel).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !plain || !canonical(&full).starts_with(canonical(root)) {
         return Err(AppError::msg("Invalid path."));
     }
     Ok(full)
+}
+
+/// A file of a session outside git: under its folder, or one elsewhere that
+/// the agent changed (`changes` lists those by their full path).
+fn recorded_or_in(session: &CodeSession, path: &str) -> AppResult<PathBuf> {
+    let p = Path::new(path);
+    if p.is_absolute() && session.originals.lock().contains_key(p) {
+        return Ok(p.to_path_buf());
+    }
+    abs_in(&session.root, path)
 }
 
 /// Unified diff of one file against the baseline.
@@ -327,7 +341,7 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
         })
         .await;
     }
-    let full = abs_in(&session.root, path)?;
+    let full = recorded_or_in(session, path)?;
     let orig = session.originals.lock().get(&full).cloned();
     let old = match orig {
         Some(Original::Content(b)) => String::from_utf8_lossy(&b).to_string(),
@@ -534,7 +548,7 @@ pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
         session.originals.lock().remove(&full);
         return Ok(());
     }
-    let full = abs_in(&session.root, path)?;
+    let full = recorded_or_in(session, path)?;
     let orig = session.originals.lock().get(&full).cloned();
     match orig {
         Some(Original::Content(bytes)) => crate::util::write_atomic(&full, &bytes)?,
@@ -830,6 +844,52 @@ mod tests {
         revert_file(&s, "new.txt").await.unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old\n");
         assert!(!dir.join("new.txt").exists());
+        // a file elsewhere that the agent changed is listed, and reverted, by
+        // its full path; one it didn't change is never touched
+        let out = std::env::temp_dir().join(format!("cr-norepo-out-{}.txt", crate::util::new_id()));
+        std::fs::write(&out, "before\n").unwrap();
+        s.remember_original(&out);
+        std::fs::write(&out, "after\n").unwrap();
+        revert_file(&s, &out.to_string_lossy()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "before\n");
+        assert!(revert_file(&s, &out.to_string_lossy()).await.is_err());
+        assert!(out.exists());
+        let _ = std::fs::remove_file(out);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn revert_never_deletes_outside_the_repository() {
+        if which::which("git").is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cr-escape-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.email", "t@example.com"], vec!["config", "user.name", "t"]] {
+            git(&dir, &args).await.unwrap();
+        }
+        let out = std::env::temp_dir().join(format!("cr-escape-out-{}.txt", crate::util::new_id()));
+        std::fs::write(&out, "keep\n").unwrap();
+        let s = CodeSession::new(dir.clone());
+        let abs = out.to_string_lossy().to_string();
+        for p in [abs.as_str(), "/etc/hosts", "../x", "a/../../x"] {
+            assert!(revert_file(&s, p).await.is_err(), "{p}");
+            assert!(file_diff(&s, p).await.is_err(), "{p}");
+        }
+        #[cfg(windows)]
+        for p in ["C:\\x", "C:/Windows/win.ini", "C:x", "\\x", "\\\\server\\share\\x"] {
+            assert!(abs_in(&dir, p).is_err(), "{p}");
+        }
+        // nor through a link to a folder outside
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(out.parent().unwrap(), dir.join("up")).unwrap();
+            let p = format!("up/{}", out.file_name().unwrap().to_string_lossy());
+            assert!(revert_file(&s, &p).await.is_err());
+        }
+        assert!(out.exists());
+        assert!(abs_in(&dir, "src/new.rs").is_ok());
+        let _ = std::fs::remove_file(out);
         let _ = std::fs::remove_dir_all(dir);
     }
 

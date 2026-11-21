@@ -60,8 +60,12 @@ export function newProjectDialog() {
 }
 
 export async function renderProject(view, id) {
+  // a newer navigation (or leaving the page) supersedes this render
+  const route = store.route;
+  const stale = () => store.route !== route || route.name !== 'project';
   let data;
-  try { data = await call('get_project', { id }); } catch (e) { errorToast(e); emit('navigate', { name: 'projects' }); return; }
+  try { data = await call('get_project', { id }); } catch (e) { if (!stale()) { errorToast(e); emit('navigate', { name: 'projects' }); } return; }
+  if (stale()) return;
   const p = data.project;
   view.innerHTML = `<div class="page"><div class="page-inner" style="max-width:1120px">
     <button class="crumb" data-act="back" style="margin-bottom:10px">${icon('arrowLeft', 15)} ${t('projects')}</button>

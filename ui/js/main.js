@@ -97,7 +97,7 @@ async function navigate({ name, params = {} }) {
     }
   } catch (e) {
     errorToast(e);
-    if (name !== 'new') navigate({ name: 'new' });
+    if (name !== 'new' && token === navToken) navigate({ name: 'new' });
   }
 }
 
@@ -153,10 +153,19 @@ function startOnboarding() {
   });
 }
 
+/** A field that takes typed text: its Esc and its right-click menu are its own. */
+const isTextField = (el) => !!el && (el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'checkbox'));
+
 function bindShortcuts() {
+  // WebView2's own page menu (Back, Refresh, Save as, Print): text fields and selected text keep theirs (copy, paste)
+  document.addEventListener('contextmenu', (e) => {
+    if (!isTextField(e.target) && window.getSelection().isCollapsed) e.preventDefault();
+  });
   window.addEventListener('keydown', (e) => {
     const mod = isMac ? e.metaKey : e.ctrlKey;
     const k = e.key.toLowerCase();
+    // WebView2's browser keys: a reload loses queued messages and the open terminals, print prints the app
+    if (e.key === 'F5' || (mod && (k === 'r' || k === 'p'))) e.preventDefault();
     // in Code mode the same keys start a new session
     if (keymap.matches(e, 'new_chat')) { e.preventDefault(); navigate({ name: store.appMode === 'code' ? 'code' : 'new' }); }
     else if (keymap.matches(e, 'palette')) { e.preventDefault(); openSearch(); }
@@ -165,7 +174,10 @@ function bindShortcuts() {
     else if (mod && (k === '=' || k === '+')) { e.preventDefault(); setZoom((store.settings.zoom || 1) + 0.1); }
     else if (mod && k === '-') { e.preventDefault(); setZoom((store.settings.zoom || 1) - 0.1); }
     else if (mod && k === '0') { e.preventDefault(); setZoom(1); }
-    else if (e.key === 'Escape' && !document.querySelector('.modal-scrim, .popover')) {
+    // Esc already taken (the composer's own stop, the quote bar, a pane's field) or typed into a field
+    // or a side panel leaves the turn alone
+    else if (e.key === 'Escape' && !e.defaultPrevented && !isTextField(e.target) && (e.target === document.body || e.target.closest('#view'))
+      && !document.querySelector('.modal-scrim, .popover')) {
       const c = chat.current();
       // the composer's own stop: queued messages come back instead of being sent
       if (c && c.running && !c.composer.waiting()) { e.preventDefault(); chat.stopTurn(c.id); }

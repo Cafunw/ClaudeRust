@@ -839,7 +839,7 @@ impl TurnPrefix {
     pub fn fits(&self, prefix: &[Message], ctx: &RenderCtx) -> bool {
         self.lent.is_none()
             && self.math == ctx.math
-            && ctx.streaming_msg.map_or(true, |s| !prefix.iter().any(|m| m.id == s))
+            && ctx.streaming_msg.is_none_or(|s| !prefix.iter().any(|m| m.id == s))
             && self.unanswered.iter().all(|(id, status)| *status == pending_tool_status(id, ctx, false))
     }
 

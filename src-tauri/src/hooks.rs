@@ -131,8 +131,13 @@ fn hash_hooks(root: &Path, found: &HashMap<String, Vec<Hook>>) -> Option<(String
 /// The hooks that apply in `cwd`. `trusted` maps project roots to the
 /// trusted configuration hash.
 pub fn load(cwd: &Path, trusted: &HashMap<String, String>) -> Config {
+    load_in(dirs::home_dir().as_deref(), cwd, trusted)
+}
+
+/// `load` with the user's home folder given (tests use their own).
+fn load_in(home: Option<&Path>, cwd: &Path, trusted: &HashMap<String, String>) -> Config {
     let mut cfg = Config::default();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         if let Some(v) = read_settings(&home.join(".claude").join("settings.json"), &mut cfg.problems) {
             parse(&v, &mut cfg.events);
         }
@@ -347,14 +352,14 @@ mod tests {
         cfg2 = cfg2.replace("\"matcher\":\"Bash\"", "\"matcher\":\"Bash|Read\"");
         std::fs::write(dir.join(".claude/settings.json"), &cfg2).unwrap();
         // untrusted: nothing runs
-        let cfg = load(&dir, &HashMap::new());
+        let cfg = load_in(None, &dir, &HashMap::new());
         let (root, hash, cmds) = cfg.untrusted.clone().unwrap();
         assert_eq!(cmds.len(), 1);
         assert!(run(&cfg, "PreToolUse", "Bash", json!({"tool_input": {"command": "rm -rf x"}}), &dir).await.block.is_none());
         // trusted
         let mut trusted = HashMap::new();
         trusted.insert(root.to_string_lossy().to_string(), hash);
-        let cfg = load(&dir, &trusted);
+        let cfg = load_in(None, &dir, &trusted);
         assert!(cfg.untrusted.is_none());
         let o = run(&cfg, "PreToolUse", "Bash", json!({"tool_input": {"command": "rm -rf x"}}), &dir).await;
         assert_eq!(o.block.as_deref(), Some("dangerous"));
@@ -375,12 +380,17 @@ mod tests {
         assert_eq!(cmds, vec!["Stop []: echo done".to_string()]);
         let mut trusted = HashMap::new();
         trusted.insert(dir.to_string_lossy().to_string(), hash);
-        let cfg = load(&dir, &trusted);
-        assert_eq!(cfg.events["Stop"][0].command, "echo done");
+        // the user's own hooks come first
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"command":"echo user"}]}]}}"#).unwrap();
+        let cfg = load_in(Some(&home), &dir, &trusted);
+        let stop: Vec<&str> = cfg.events["Stop"].iter().map(|h| h.command.as_str()).collect();
+        assert_eq!(stop, ["echo user", "echo done"]);
         assert!(cfg.problems.iter().all(|p| !p.contains(&*dir.to_string_lossy())), "{:?}", cfg.problems);
         // a broken file isn't silently skipped
         std::fs::write(dir.join(".claude/settings.local.json"), "{\"hooks\": {").unwrap();
-        let cfg = load(&dir, &trusted);
+        let cfg = load_in(None, &dir, &trusted);
         let local = dir.join(".claude").join("settings.local.json").display().to_string();
         assert!(cfg.problems.iter().any(|p| p.contains(&local) && p.contains("isn't valid JSON")), "{:?}", cfg.problems);
         let _ = std::fs::remove_dir_all(dir);

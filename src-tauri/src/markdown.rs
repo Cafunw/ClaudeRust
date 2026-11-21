@@ -468,10 +468,10 @@ mod tests {
         // its partial versions stay out of the highlight cache
         let code = format!("let x = {};\n", crate::util::new_id().len());
         let h = render(&format!("Hi\n\n```rust\n{code}let y"), O);
-        assert!(h.contains("hl-"), "{h}");
+        assert!(h.contains("<span class=\""), "{h}");
         assert!(!highlight::is_cached(&format!("{code}let y"), "rust"));
         let h2 = render(&format!("Hi\n\n```rust\n{code}let y = 2;\n```\n"), O);
-        assert!(h2.contains("hl-") && highlight::is_cached(&format!("{code}let y = 2;\n"), "rust"));
+        assert!(h2.contains("<span class=\"") && highlight::is_cached(&format!("{code}let y = 2;\n"), "rust"));
     }
 
     #[test]

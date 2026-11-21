@@ -215,7 +215,7 @@ async function drawFile(el, ctx) {
   const n = f.shown || 0;
   let gutter = '';
   for (let i = 1; i <= n; i++) gutter += `<span>${i}</span>\n`;
-  const body = h(`<div class="fv-body"><pre class="fv-gutter" title="${esc(t('files_line_tip'))}">${gutter}</pre><pre class="fv-code"><code>${f.html}</code></pre></div>`);
+  const body = h(`<div class="fv-body"><pre class="fv-gutter" title="${esc(t('files_line_tip'))}">${gutter}</pre><pre class="fv-code"><code class="hl-code">${f.html}</code></pre></div>`);
   body.querySelector('.fv-gutter').onclick = (e) => {
     const sp = e.target.closest('span');
     if (sp) mention(f.path, Number(sp.textContent));

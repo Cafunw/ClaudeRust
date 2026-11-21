@@ -1253,7 +1253,9 @@ async fn run_once(
                         // Auto mode: approve safe requests without asking.
                         let mode_now = st.db.conv_get(conv_id).ok().and_then(|c| c.options["permission_mode"].as_str().map(String::from)).unwrap_or_default();
                         if mode_now == "auto" && tool != "ExitPlanMode" {
-                            let sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                            let mut sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                            // the CLI's Bash is bash on Windows too, where `\` escapes (`.\./x` is `../x`)
+                            sess.powershell = false;
                             if crate::codetools::check_permission("auto", &tool, &input, &[], Some(&sess)) == crate::codetools::Perm::Allow {
                                 write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
                                     "response": {"behavior": "allow", "updatedInput": input, "toolUseID": tool_use_id}}})).await;
@@ -1460,6 +1462,12 @@ fn settle_rows(
 ) -> AppResult<bool> {
     ts.streaming = None;
     let Some(i) = ts.rows.iter().rposition(|r| r.role == "assistant") else { return Ok(false) };
+    // the turn's earlier answers are complete too: with no stop_reason, the next start would take them for cut off
+    for row in ts.rows[..i].iter_mut().filter(|r| r.role == "assistant" && r.meta["stop_reason"].is_null()) {
+        let ends_in_tool = row.content.as_array().and_then(|a| a.last()).is_some_and(|b| b["type"] == "tool_use");
+        row.meta["stop_reason"] = json!(if ends_in_tool { "tool_use" } else { "end_turn" });
+        st.db.msg_update(&row.id, &row.content, &row.meta)?;
+    }
     let row = &mut ts.rows[i];
     if let Some(r) = result {
         if !r["usage"].is_null() {
@@ -1599,6 +1607,31 @@ mod tests {
         assert!(is_resume_lost("Error: No conversation found with session ID: abc"));
         assert!(is_resume_lost("No message found with message.uuid of: x"));
         assert!(!is_resume_lost("rate limited"));
+    }
+
+    #[test]
+    fn a_settled_turn_leaves_no_answer_looking_cut_off() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-settle-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let conv = st.db.conv_create("code", "m", None, None, &json!({})).unwrap();
+        let row = |role: &str, content: Value, meta: Value| Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: role.into(), content, meta, created_at: 1 };
+        let rows = vec![
+            row("assistant", json!([{"type": "text", "text": "Reading"}, {"type": "tool_use", "id": "t", "name": "Read", "input": {}}]), json!({"engine": ENGINE})),
+            row("user", json!([{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]), json!({"tool_results": true})),
+            row("assistant", json!([{"type": "thinking", "thinking": "hm"}]), json!({"engine": ENGINE})),
+            row("assistant", json!([]), json!({"stop_reason": "max_tokens"})),
+            row("assistant", json!([{"type": "text", "text": "Done"}]), json!({"engine": ENGINE})),
+        ];
+        for r in &rows {
+            st.db.msg_insert(r).unwrap();
+        }
+        let mut ts = TurnState { rows, current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
+        assert!(settle_rows(&st, &conv.id, &mut ts, &None, None, false, None, None).unwrap());
+        let reasons: Vec<Value> = ts.rows.iter().map(|r| st.db.msg_get(&r.id).unwrap().meta["stop_reason"].clone()).collect();
+        assert_eq!(reasons, vec![json!("tool_use"), Value::Null, json!("end_turn"), json!("max_tokens"), json!("end_turn")]);
+        assert_eq!(st.db.mark_interrupted().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

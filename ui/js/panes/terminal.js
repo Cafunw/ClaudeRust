@@ -38,7 +38,10 @@ function themeColors() {
 async function start(s, ctx) {
   const { cols, rows } = s.term;
   try {
-    const r = await call('term_open', { conversationId: ctx.convId, cwd: ctx.cwd, cols, rows });
+    // a reload of the window loses this view, not the shell: take the conversation's running one back
+    const [live] = await call('term_list', { conversationId: ctx.convId });
+    if (live) call('term_resize', { id: live.id, cols, rows }).catch(() => {});
+    const r = live || await call('term_open', { conversationId: ctx.convId, cwd: ctx.cwd, cols, rows });
     s.ptyId = r.id;
     s.exited = false;
     byPty.set(r.id, s);

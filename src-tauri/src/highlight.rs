@@ -1,11 +1,16 @@
-//! Syntax highlighting with syntect (pure-Rust regex engine), emitting CSS
-//! classes so light/dark themes are pure CSS.
+//! Syntax highlighting with syntect (pure-Rust regex engine). The HTML is
+//! flat: each run of code that looks the same gets one span, whose short
+//! class names its style in the light and in the dark theme, so the themes
+//! are pure CSS.
 
+use std::fmt::Write;
+use std::ops::Range;
 use std::sync::LazyLock;
 use parking_lot::Mutex;
-use syntect::html::{css_for_theme_with_class_style, line_tokens_to_classed_spans, ClassStyle};
-use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::highlighting::{Color, FontStyle, StyleModifier, Theme};
+use syntect::parsing::{BasicScopeStackOp, ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
+use two_face::theme::EmbeddedThemeName;
 
 use crate::util::{escape_html, ByteCache};
 
@@ -15,8 +20,162 @@ static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_new
 static CACHE: LazyLock<Mutex<ByteCache>> = LazyLock::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
 const CACHE_BYTES: usize = 24 * 1024 * 1024;
 const CACHE_ENTRY_BYTES: usize = 1024 * 1024;
-const STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "hl-" };
 const MAX_HIGHLIGHT_BYTES: usize = 300_000;
+
+/// Light, then dark.
+static PALETTES: LazyLock<[Palette; 2]> = LazyLock::new(|| {
+    let set = two_face::theme::extra();
+    [EmbeddedThemeName::OneHalfLight, EmbeddedThemeName::OneHalfDark].map(|n| Palette::new(set.get(n)))
+});
+const THEME_SCOPES: [&str; 2] = [":root[data-theme=\"light\"]", ":root[data-theme=\"dark\"]"];
+
+/// How a run of code looks in one theme.
+type Look = (Color, FontStyle);
+
+/// A theme rule, applied the way the browser applied it to the nested
+/// scope spans (a class per atom) this module emitted before, so that code
+/// looks the same: a part of the selector matches a scope that has all of
+/// its atoms, anywhere. (The theme's own prefix matching would give JS
+/// constants or CSS values, for example, other colours.)
+struct Rule {
+    /// the atoms of each part of the selector, outermost first
+    parts: Vec<Vec<u16>>,
+    /// `mask` of the last part's atoms: a quick test that rules most out
+    last: u64,
+    style: StyleModifier,
+}
+
+fn mask(atoms: impl Iterator<Item = u16>) -> u64 {
+    atoms.fold(0, |m, a| m | 1 << (a % 64))
+}
+
+fn atoms(s: Scope) -> impl Iterator<Item = u16> {
+    (0..s.len() as usize).map(move |i| s.atom_at(i))
+}
+
+impl Rule {
+    /// Whether the rule applies to the innermost scope of `stack`, whose
+    /// atoms' `mask` is `top_mask`.
+    fn matches(&self, stack: &[Scope], top_mask: u64) -> bool {
+        let has = |s: Scope, part: &[u16]| part.iter().all(|&a| atoms(s).any(|b| b == a));
+        let (Some((last, outer)), Some((&top, mut above))) = (self.parts.split_last(), stack.split_last()) else {
+            return false;
+        };
+        self.last & !top_mask == 0
+            && has(top, last)
+            && outer.iter().rev().all(|part| match above.iter().rposition(|&s| has(s, part)) {
+                Some(i) => {
+                    above = &above[..i];
+                    true
+                }
+                None => false,
+            })
+    }
+}
+
+/// A theme: its rules, most specific first, and every look they can give a
+/// run of code (each colour with each font style) in a fixed order: slot 0
+/// is plain text.
+struct Palette {
+    rules: Vec<Rule>,
+    looks: Vec<Look>,
+}
+
+impl Palette {
+    fn new(theme: &Theme) -> Palette {
+        let mut colors = vec![theme.settings.foreground.unwrap_or(Color::BLACK)];
+        let mut fonts = vec![FontStyle::empty()];
+        let mut rules = vec![];
+        for (order, item) in theme.scopes.iter().enumerate() {
+            if let Some(c) = item.style.foreground.filter(|c| !colors.contains(c)) {
+                colors.push(c);
+            }
+            // font styles add up, down the scopes
+            for f in fonts.clone() {
+                let f = f | item.style.font_style.unwrap_or(FontStyle::empty());
+                if !fonts.contains(&f) {
+                    fonts.push(f);
+                }
+            }
+            for sel in &item.scope.selectors {
+                let parts: Vec<Vec<u16>> = sel.extract_scopes().into_iter().map(|s| atoms(s).collect()).collect();
+                let last = mask(parts.last().into_iter().flatten().copied());
+                rules.push((parts.iter().map(Vec::len).sum::<usize>(), order, Rule { parts, last, style: item.style }));
+            }
+        }
+        // as in CSS: the most specific rule first, then the last one
+        rules.sort_by_key(|&(specificity, order, _)| std::cmp::Reverse((specificity, order)));
+        Palette {
+            rules: rules.into_iter().map(|(.., r)| r).collect(),
+            looks: colors.iter().flat_map(|&c| fonts.iter().map(move |&f| (c, f))).collect(),
+        }
+    }
+
+    /// The look of the innermost scope of `stack`, given its parent's: the
+    /// colour of the best rule that has one, else the parent's, and the font
+    /// styles of all its rules added to the parent's.
+    fn look(&self, stack: &[Scope], parent: Look) -> Look {
+        let (mut color, mut font) = (None, parent.1);
+        let top_mask = mask(stack.last().into_iter().flat_map(|&s| atoms(s)));
+        for rule in self.rules.iter().filter(|r| r.matches(stack, top_mask)) {
+            color = color.or(rule.style.foreground);
+            font |= rule.style.font_style.unwrap_or(FontStyle::empty());
+        }
+        (color.unwrap_or(parent.0), font)
+    }
+
+    fn slot(&self, look: Look) -> usize {
+        self.looks.iter().position(|&x| x == look).unwrap_or(0)
+    }
+}
+
+/// The class of a run of code: its light and its dark palette slot as two
+/// capital letters (the app's own classes are lower case).
+fn push_class(out: &mut String, (light, dark): (usize, usize)) {
+    out.push(char::from(b'A' + light as u8));
+    out.push(char::from(b'A' + dark as u8));
+}
+
+/// One line of code as flat spans, one per run of text that looks the same
+/// in both themes. `scopes`, and `looks` (each scope's in both themes), go
+/// on to the next line. `None`: the scope changes don't fit the stack.
+fn line_html(line: &str, ops: &[(usize, ScopeStackOp)], scopes: &mut ScopeStack, looks: &mut Vec<[Look; 2]>) -> Option<String> {
+    let plain = PALETTES.each_ref().map(|p| p.looks[0]);
+    let mut tokens: Vec<((usize, usize), Range<usize>)> = vec![];
+    let mut pos = 0;
+    for (end, op) in ops.iter().map(|(i, op)| (*i, op)).chain([(line.len(), &ScopeStackOp::Noop)]) {
+        if end > pos {
+            let [l, d] = looks.last().copied().unwrap_or(plain);
+            tokens.push(((PALETTES[0].slot(l), PALETTES[1].slot(d)), pos..end));
+            pos = end;
+        }
+        scopes
+            .apply_with_hook(op, |basic, stack| match basic {
+                BasicScopeStackOp::Push(_) => {
+                    let parent = looks.last().copied().unwrap_or(plain);
+                    looks.push([0, 1].map(|t| PALETTES[t].look(stack, parent[t])));
+                }
+                BasicScopeStackOp::Pop => {
+                    looks.pop();
+                }
+            })
+            .ok()?;
+    }
+    let mut out = String::with_capacity(line.len() + tokens.len() * 8);
+    for run in tokens.chunk_by(|a, b| a.0 == b.0) {
+        let text = escape_html(&line[run[0].1.start..run[run.len() - 1].1.end]);
+        if run[0].0 == (0, 0) {
+            out.push_str(&text);
+            continue;
+        }
+        out.push_str("<span class=\"");
+        push_class(&mut out, run[0].0);
+        out.push_str("\">");
+        out.push_str(&text);
+        out.push_str("</span>");
+    }
+    Some(out)
+}
 
 fn alias(lang: &str) -> &str {
     match lang {
@@ -69,16 +228,17 @@ fn cache_key(code: &str, lang: &str) -> u64 {
 
 /// How far highlighting a code block got: the parser state after its
 /// complete lines, so that once the block has grown only the new lines
-/// are parsed. The HTML is the same as from `ClassedHTMLGenerator` (this is
-/// what it does, line by line), but a block streaming in used to be parsed
-/// from its start on every update (tens of ms for a long one).
+/// are parsed. The HTML is made line by line, so it is the same as from
+/// the start, but a block streaming in used to be parsed from its start on
+/// every update (tens of ms for a long one).
 struct Progress {
     lang: String,
     /// the code parsed so far: whole lines
     code: String,
     parse: ParseState,
+    /// the scopes open at the end of `code`, and their looks
     scopes: ScopeStack,
-    open_spans: isize,
+    looks: Vec<[Look; 2]>,
     html: String,
 }
 
@@ -96,7 +256,7 @@ impl Progress {
             code: String::new(),
             parse: ParseState::new(syntax),
             scopes: ScopeStack::new(),
-            open_spans: 0,
+            looks: vec![],
             html: String::new(),
         }
     }
@@ -132,29 +292,18 @@ impl Progress {
                 break;
             }
             let ops = self.parse.parse_line(line, &SYNTAXES).ok()?;
-            let (h, delta) = line_tokens_to_classed_spans(line, &ops, STYLE, &mut self.scopes).ok()?;
-            self.open_spans += delta;
-            self.html.push_str(&h);
+            self.html.push_str(&line_html(line, &ops, &mut self.scopes, &mut self.looks)?);
             self.code.push_str(line);
         }
         Some(tail)
     }
 
     /// The HTML of the parsed lines, then `tail` (parsed on a copy of the
-    /// state: it will be parsed again once its line is complete), with the
-    /// spans still open closed.
+    /// state: it will be parsed again once its line is complete).
     fn html_with(&self, mut html: String, tail: Option<&str>) -> Option<String> {
-        let mut open = self.open_spans;
         if let Some(line) = tail {
-            let mut parse = self.parse.clone();
-            let mut scopes = self.scopes.clone();
-            let ops = parse.parse_line(line, &SYNTAXES).ok()?;
-            let (h, delta) = line_tokens_to_classed_spans(line, &ops, STYLE, &mut scopes).ok()?;
-            open += delta;
-            html.push_str(&h);
-        }
-        for _ in 0..open {
-            html.push_str("</span>");
+            let ops = self.parse.clone().parse_line(line, &SYNTAXES).ok()?;
+            html.push_str(&line_html(line, &ops, &mut self.scopes.clone(), &mut self.looks.clone())?);
         }
         Some(html)
     }
@@ -211,20 +360,14 @@ pub fn highlight_growing(code: &str, lang: &str) -> String {
 /// no cache), the reference `highlight` and `highlight_growing` must match.
 #[cfg(test)]
 pub(crate) fn from_scratch(code: &str, lang: &str) -> String {
-    use syntect::html::ClassedHTMLGenerator;
     if code.len() > MAX_HIGHLIGHT_BYTES {
         return escape_html(code);
     }
     let Some(syntax) = find_syntax(lang) else {
         return escape_html(code);
     };
-    let mut gen = ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAXES, STYLE);
-    for line in LinesWithEndings::from(code) {
-        if gen.parse_html_for_line_which_includes_newline(line).is_err() {
-            return escape_html(code);
-        }
-    }
-    gen.finalize()
+    let mut p = Progress::new(syntax, lang);
+    p.advance(code).and_then(|tail| p.html_with(p.html.clone(), tail)).unwrap_or_else(|| escape_html(code))
 }
 
 /// Tests: whether `code` is in the cache.
@@ -233,57 +376,33 @@ pub(crate) fn is_cached(code: &str, lang: &str) -> bool {
     CACHE.lock().get(cache_key(code, lang)).is_some()
 }
 
-/// CSS for the highlight classes, scoped to light and dark themes.
+/// CSS for the highlight classes, scoped to light and dark themes. (The
+/// themes' backgrounds are left out: code blocks use our own surfaces.)
 pub fn theme_css() -> String {
-    let themes = two_face::theme::extra();
-    let light = themes.get(two_face::theme::EmbeddedThemeName::OneHalfLight);
-    let dark = themes.get(two_face::theme::EmbeddedThemeName::OneHalfDark);
     let mut out = String::new();
-    if let Ok(css) = css_for_theme_with_class_style(light, STYLE) {
-        out.push_str(&scope_css(&css, ":root[data-theme=\"light\"]"));
-    }
-    if let Ok(css) = css_for_theme_with_class_style(dark, STYLE) {
-        out.push_str(&scope_css(&css, ":root[data-theme=\"dark\"]"));
+    for (t, (scope, palette)) in THEME_SCOPES.iter().zip(PALETTES.iter()).enumerate() {
+        let _ = writeln!(out, "{scope} .hl-code {{ {}}}", declarations(palette.looks[0]));
+        for (slot, &look) in palette.looks.iter().enumerate().skip(1) {
+            // every class with this slot in this theme, whatever its slot in the other
+            let selectors: Vec<String> = (0..PALETTES[1 - t].looks.len())
+                .map(|other| {
+                    let mut s = format!("{scope} .");
+                    push_class(&mut s, if t == 0 { (slot, other) } else { (other, slot) });
+                    s
+                })
+                .collect();
+            let _ = writeln!(out, "{} {{ {}}}", selectors.join(", "), declarations(look));
+        }
     }
     out
 }
 
-fn scope_css(css: &str, scope: &str) -> String {
-    let mut out = String::new();
-    // strip comments
-    let mut clean = String::new();
-    let mut rest = css;
-    while let Some(i) = rest.find("/*") {
-        clean.push_str(&rest[..i]);
-        match rest[i..].find("*/") {
-            Some(j) => rest = &rest[i + j + 2..],
-            None => {
-                rest = "";
-                break;
-            }
+fn declarations((c, font): Look) -> String {
+    let mut out = format!("color: #{:02x}{:02x}{:02x}; ", c.r, c.g, c.b);
+    for (flag, css) in [(FontStyle::BOLD, "font-weight: bold; "), (FontStyle::ITALIC, "font-style: italic; "), (FontStyle::UNDERLINE, "text-decoration: underline; ")] {
+        if font.contains(flag) {
+            out.push_str(css);
         }
-    }
-    clean.push_str(rest);
-    for rule in clean.split('}') {
-        let Some((sel, body)) = rule.split_once('{') else { continue };
-        let sel = sel.trim();
-        if sel.is_empty() {
-            continue;
-        }
-        // Drop the theme's background so code blocks use our own surface colours.
-        let body: String = body
-            .split(';')
-            .filter(|d| !d.trim_start().starts_with("background-color"))
-            .collect::<Vec<_>>()
-            .join(";");
-        let scoped: Vec<String> = sel
-            .split(',')
-            .map(|s| format!("{scope} {}", s.trim()))
-            .collect();
-        out.push_str(&scoped.join(", "));
-        out.push_str(" {");
-        out.push_str(&body);
-        out.push_str("}\n");
     }
     out
 }
@@ -299,31 +418,146 @@ pub fn language_label(lang: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // constructs whose state carries over lines: block comments, multi line
+    // strings, template literals, heredocs, nested tags; and scopes the
+    // light and the dark theme style differently (quoted keys, headings)
+    const SAMPLES: [(&str, &str); 9] = [
+        ("rust", "/* a\n * comment */\nfn main() {\n    let s = \"multi\nline\";\n    let r = r#\"raw\n\"#;\n}\n"),
+        ("ts", "const t = `tpl ${a +\n b} end`;\n/** doc\n */\nexport class A<T> { x: T }\r\nlet y = 1;\n"),
+        ("python", "def f():\n    \"\"\"doc\n    string\"\"\"\n    return {'a': [1,\n 2]}\n"),
+        ("bash", "cat <<EOF\nhello $USER\nEOF\nfor i in 1 2; do echo \"$i\"; done\n"),
+        ("html", "<div class=\"a\">\n<script>\nlet x = 1 < 2;\n</script>\n<style>\na { color: red }\n</style></div>\n"),
+        ("json", "{\n  \"a\": [1, 2,\n  3],\n  \"b\": \"x\"\n}\n"),
+        ("plaintext", "not <highlighted>\n"),
+        ("yaml", "key: 'value'\nlist:\n  - \"a\" # note\n"),
+        ("markdown", "# Title\n\n**bold** and `code` & <tags>\n"),
+    ];
+
+    /// The characters of highlighted HTML, each with the class of its span
+    /// ("" outside one). Panics unless the spans are flat, closed, and
+    /// adjacent spans on a line have different classes.
+    fn classed_chars(html: &str) -> Vec<(char, &str)> {
+        let mut out = vec![];
+        let (mut class, mut closed) = ("", "");
+        let mut rest = html;
+        while let Some(c) = rest.chars().next() {
+            if let Some(r) = rest.strip_prefix("<span class=\"") {
+                assert!(class.is_empty(), "nested span in {html}");
+                let (c, r) = r.split_once("\">").unwrap();
+                assert_ne!(c, closed, "the same class twice in a row in {html}");
+                (class, rest) = (c, r);
+            } else if let Some(r) = rest.strip_prefix("</span>") {
+                assert!(!class.is_empty(), "{html}");
+                let line_end = out.last().is_some_and(|&(c, _)| c == '\n');
+                (closed, class, rest) = (if line_end { "" } else { class }, "", r);
+            } else if c == '&' {
+                let (entity, r) = rest.split_once(';').unwrap();
+                let c = match entity {
+                    "&amp" => '&',
+                    "&lt" => '<',
+                    "&gt" => '>',
+                    "&quot" => '"',
+                    "&#39" => '\'',
+                    _ => panic!("{entity} in {html}"),
+                };
+                out.push((c, class));
+                (closed, rest) = ("", r);
+            } else {
+                assert!(c != '<' && c != '>', "{html}");
+                out.push((c, class));
+                (closed, rest) = ("", &rest[c.len_utf8()..]);
+            }
+        }
+        assert!(class.is_empty(), "a span left open in {html}");
+        out
+    }
+
     #[test]
     fn highlights_rust_and_ts() {
         let h = highlight("fn main() { let x = 1; }\n", "rust");
-        assert!(h.contains("hl-"), "{h}");
+        assert!(h.contains("<span class=\""), "{h}");
         let h = highlight("const x: number = 1;\n", "ts");
-        assert!(h.contains("hl-"), "{h}");
+        assert!(h.contains("<span class=\""), "{h}");
         let plain = highlight("<b>", "text");
         assert_eq!(plain, "&lt;b&gt;");
         assert!(theme_css().contains(":root[data-theme=\"dark\"]"));
     }
 
+    /// Flat spans with a two-letter class each, adjacent runs that look the
+    /// same merged; a token's newline stays in its span.
+    #[test]
+    fn output_shape() {
+        assert_eq!(
+            highlight("fn main() {\n    // hi\n    let s = \"a<b\";\n}\n", "rust"),
+            "<span class=\"CC\">fn</span> <span class=\"EE\">main</span>() {\n    <span class=\"BB\">// hi\n</span>    \
+             <span class=\"CC\">let</span> s <span class=\"CC\">=</span> <span class=\"GG\">&quot;a&lt;b&quot;</span>;\n}\n"
+        );
+        // a key is a string in the light theme, a keyword in the dark one
+        assert_eq!(highlight("{\"a\": 1}\n", "json"), "{<span class=\"GC\">&quot;a&quot;</span>: <span class=\"FF\">1</span>}\n");
+        // as the nested spans' CSS showed them: `constant` anywhere in a
+        // scope (variable.other.constant, support.constant.color), and a
+        // rule for some JS scopes inside others (the parameter)
+        assert_eq!(
+            highlight("const JOIN_MS = 10;\nfunction f(conv) {}\n", "js"),
+            "<span class=\"CC\">const</span> <span class=\"FF\">JOIN_MS</span> <span class=\"CC\">=</span> <span class=\"FF\">10</span>;\n\
+             <span class=\"CC\">function</span> <span class=\"EE\">f</span>(<span class=\"DD\">conv</span>) {}\n"
+        );
+        assert!(highlight("a { color: red; }\n", "css").contains("color: <span class=\"FF\">red</span>;"));
+        let [l, d] = &*PALETTES;
+        assert!(l.looks.len() <= 26 && d.looks.len() <= 26, "a slot is one letter");
+    }
+
+    /// Stripped of its tags, the HTML is the code; each character's class
+    /// gives the look of its whole scope stack in each theme (worked out
+    /// anew at each character), and the theme CSS has a rule for it.
+    #[test]
+    fn spans_keep_the_text_and_the_looks() {
+        let css = theme_css();
+        let looks_of = |stack: &ScopeStack| {
+            let s = stack.as_slice();
+            PALETTES.each_ref().map(|p| (1..=s.len()).fold(p.looks[0], |parent, n| p.look(&s[..n], parent)))
+        };
+        for (lang, code) in SAMPLES.into_iter().chain([("rust", include_str!("markdown.rs"))]) {
+            let html = highlight(code, lang);
+            let chars = classed_chars(&html);
+            assert_eq!(chars.iter().map(|(c, _)| c).collect::<String>(), code, "{lang}");
+            let Some(syntax) = find_syntax(lang) else { continue };
+            let (mut parse, mut stack, mut i) = (ParseState::new(syntax), ScopeStack::new(), 0);
+            let mut looks = looks_of(&stack);
+            for line in LinesWithEndings::from(code) {
+                let ops = parse.parse_line(line, &SYNTAXES).unwrap();
+                let mut ops = ops.iter().peekable();
+                for (at, _) in line.char_indices() {
+                    let mut changed = false;
+                    while let Some((_, op)) = ops.next_if(|(p, _)| *p <= at) {
+                        stack.apply(op).unwrap();
+                        changed = true;
+                    }
+                    if changed {
+                        looks = looks_of(&stack);
+                    }
+                    let class = chars[i].1;
+                    for (t, p) in PALETTES.iter().enumerate() {
+                        let slot = class.as_bytes().get(t).map_or(0, |b| usize::from(b - b'A'));
+                        assert_eq!(slot, p.slot(looks[t]), "{lang}, theme {t}, character {i}");
+                        if slot > 0 {
+                            assert!(css.contains(&format!("{} .{class}", THEME_SCOPES[t])), "{class}");
+                        }
+                    }
+                    i += 1;
+                }
+                for (_, op) in ops {
+                    stack.apply(op).unwrap();
+                }
+                looks = looks_of(&stack);
+            }
+        }
+    }
+
     #[test]
     fn growing_blocks_highlight_as_from_scratch() {
-        // constructs whose state carries over lines: block comments, multi
-        // line strings, template literals, heredocs, nested tags
-        let samples = [
-            ("rust", "/* a\n * comment */\nfn main() {\n    let s = \"multi\nline\";\n    let r = r#\"raw\n\"#;\n}\n"),
-            ("ts", "const t = `tpl ${a +\n b} end`;\n/** doc\n */\nexport class A<T> { x: T }\r\nlet y = 1;\n"),
-            ("python", "def f():\n    \"\"\"doc\n    string\"\"\"\n    return {'a': [1,\n 2]}\n"),
-            ("bash", "cat <<EOF\nhello $USER\nEOF\nfor i in 1 2; do echo \"$i\"; done\n"),
-            ("html", "<div class=\"a\">\n<script>\nlet x = 1 < 2;\n</script>\n<style>\na { color: red }\n</style></div>\n"),
-            ("json", "{\n  \"a\": [1, 2,\n  3],\n  \"b\": \"x\"\n}\n"),
-            ("plaintext", "not <highlighted>\n"),
-        ];
-        for (lang, code) in samples {
+        for (lang, code) in SAMPLES {
             for step in [1, 3, 7, 40] {
                 let mut end = 0;
                 while end < code.len() {
@@ -342,7 +576,7 @@ mod tests {
         }
         // two blocks growing at once (two replies streaming), and one that
         // was edited rather than extended
-        let (a, b) = (samples[0].1, samples[2].1);
+        let (a, b) = (SAMPLES[0].1, SAMPLES[2].1);
         for end in 1..a.len().min(b.len()) {
             if a.is_char_boundary(end) && b.is_char_boundary(end) {
                 assert_eq!(highlight_growing(&a[..end], "rust"), from_scratch(&a[..end], "rust"));
@@ -351,6 +585,40 @@ mod tests {
         }
         let edited = "fn main() {\n    let changed = 1;\n";
         assert_eq!(highlight_growing(edited, "rust"), from_scratch(edited, "rust"));
+    }
+
+    /// HTML size and time of highlighting real files of this repo:
+    /// `cargo test --release -p clauderust --lib bench_highlight -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_highlight() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        for (file, lang) in [("src-tauri/src/engine.rs", "rust"), ("ui/js/chat.js", "js"), ("ui/css/app.css", "css"), ("dev/mock_api.py", "python")] {
+            let code = std::fs::read_to_string(format!("{root}/{file}")).unwrap();
+            let html = from_scratch(&code, lang);
+            let n = 3;
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(from_scratch(&code, lang));
+            }
+            let total = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            let syntax = find_syntax(lang).unwrap();
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                let mut parse = ParseState::new(syntax);
+                for line in LinesWithEndings::from(&code) {
+                    std::hint::black_box(parse.parse_line(line, &SYNTAXES).unwrap());
+                }
+            }
+            let parse = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            eprintln!(
+                "{file}: {} KB -> {} KB of HTML ({:.1}x, {} spans), {total:.1} ms ({parse:.1} ms of it parsing)",
+                code.len() / 1024,
+                html.len() / 1024,
+                html.len() as f64 / code.len() as f64,
+                html.matches("<span").count(),
+            );
+        }
     }
 }
 

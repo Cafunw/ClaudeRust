@@ -78,5 +78,5 @@ document.addEventListener('mouseup', (e) => {
   }, 10);
 });
 document.addEventListener('mousedown', (e) => { if (bar && !bar.contains(e.target)) hide(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && bar) { e.preventDefault(); hide(); } });
 document.addEventListener('scroll', hide, true);

@@ -1251,9 +1251,9 @@ export function setLanguage(pref) {
 export function currentLanguage() { return lang; }
 
 export function t(key, vars) {
-  let s = (dicts[lang] && dicts[lang][key]) || en[key] || key;
-  if (vars) for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, v);
-  return s;
+  const s = (dicts[lang] && dicts[lang][key]) || en[key] || key;
+  // one pass: every occurrence, and a value is never read as a pattern ($&) or filled in itself
+  return vars ? s.replace(/\{(\w+)\}/g, (m, k) => (Object.hasOwn(vars, k) ? String(vars[k]) : m)) : s;
 }
 
 export const LANGUAGES = [

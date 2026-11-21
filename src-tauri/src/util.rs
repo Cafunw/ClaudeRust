@@ -243,10 +243,10 @@ pub enum TextEncoding {
 /// Decode UTF-16 code units (`be`: big-endian); `None` for an odd length or
 /// unpaired surrogates.
 pub fn utf16(bytes: &[u8], be: bool) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    let units = bytes.chunks_exact(2).map(|c| if be { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) });
+    let units = bytes.as_chunks::<2>().0.iter().map(|&c| if be { u16::from_be_bytes(c) } else { u16::from_le_bytes(c) });
     char::decode_utf16(units).collect::<Result<String, _>>().ok()
 }
 

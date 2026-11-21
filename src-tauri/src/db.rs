@@ -15,6 +15,9 @@ pub type RecentChat = (String, String, i64, String, String);
 /// (created_at, conversation id, title, kind, conversation model, message meta)
 pub type UsageRow = (i64, String, String, String, String, String);
 
+/// (text, created_at, conversation title) of a message the user typed
+pub type Prompt = (String, i64, String);
+
 pub struct Db {
     conn: Mutex<Connection>,
     /// A second connection to the same file for the long read-only scans
@@ -34,6 +37,10 @@ pub struct Db {
     /// noted here, which is removed by its rowid instead. Kept in step with
     /// every removal from the index.
     indexed: Mutex<std::collections::HashMap<String, Option<(String, i64)>>>,
+    /// Ctrl+R's typed prompts (see prompt_history) and the count of rows
+    /// `conn` had written when they were read: each keystroke filters them
+    /// again, and only a write since (all go through `conn`) reads them anew.
+    history: Mutex<Option<(u64, std::sync::Arc<Vec<Prompt>>)>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -179,6 +186,19 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_conv ON artifacts(conversation_id);
 "#;
 
+/// Schema changes made after SCHEMA (version 1, never edited) in release
+/// order: entry `i` takes a database from version `i + 1` to `i + 2`. A
+/// shipped entry is never edited either; a change is a new entry.
+const MIGRATIONS: &[&str] = &[
+    // 2: the rows mark_interrupted (at every start) and Ctrl+R's history look
+    // for, each in an index of its own instead of a read of every message
+    // (the CASEs keep a malformed meta from failing every write)
+    "CREATE INDEX idx_messages_unfinished ON messages(id) WHERE role = 'assistant' AND CASE WHEN json_valid(meta)
+       THEN json_extract(meta, '$.stop_reason') IS NULL AND json_extract(meta, '$.error') IS NULL AND json_extract(meta, '$.stopped') IS NULL ELSE 0 END;
+     CREATE INDEX idx_messages_typed ON messages(created_at) WHERE role = 'user' AND CASE WHEN json_valid(meta) AND json_type(meta) = 'object'
+       THEN json_extract(meta, '$.tool_results') IS NULL AND json_extract(meta, '$.hook_feedback') IS NULL ELSE 1 END;",
+];
+
 fn conv_from_row(r: &Row) -> rusqlite::Result<Conversation> {
     let options: String = r.get("options")?;
     Ok(Conversation {
@@ -271,6 +291,30 @@ fn fts_query(q: &str) -> String {
         .join(" ")
 }
 
+/// Bring the schema up to date in one transaction. A database with no
+/// version (new, or made before versioning) has SCHEMA, version 1; one
+/// from a newer version is refused (its schema may not be readable here).
+fn migrate(conn: &mut Connection) -> AppResult<()> {
+    let latest = MIGRATIONS.len() as i64 + 1;
+    let version = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?.max(1);
+    if version > latest {
+        return Err(AppError::msg(format!(
+            "It was written by a newer version of ClaudeRust (database version {version}, this version reads up to {latest}). Updating ClaudeRust opens it again."
+        )));
+    }
+    if version == latest {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA)?;
+    for m in &MIGRATIONS[version as usize - 1..] {
+        tx.execute_batch(m)?;
+    }
+    tx.pragma_update(None, "user_version", latest)?;
+    tx.commit()?;
+    Ok(())
+}
+
 impl Db {
     pub fn open(path: &Path) -> AppResult<Db> {
         let conn = Connection::open(path)?;
@@ -291,11 +335,11 @@ impl Db {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> AppResult<Db> {
+    fn init(mut conn: Connection) -> AppResult<Db> {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
         )?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&mut conn)?;
         let fts = conn
             .execute_batch(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, conversation_id UNINDEXED, message_id UNINDEXED);",
@@ -306,6 +350,7 @@ impl Db {
             reader: None,
             fts,
             indexed: Mutex::new(std::collections::HashMap::new()),
+            history: Mutex::new(None),
         })
     }
 
@@ -483,7 +528,31 @@ impl Db {
     /// Messages the user typed, newest first, without repeats: `(text,
     /// created_at, conversation title)`, filtered by `query` (case-insensitive,
     /// all words must appear).
-    pub fn prompt_history(&self, query: &str, limit: usize) -> AppResult<Vec<(String, i64, String)>> {
+    pub fn prompt_history(&self, query: &str, limit: usize) -> AppResult<Vec<Prompt>> {
+        let written = self.conn.lock().total_changes();
+        let cached = self.history.lock().as_ref().filter(|(at, _)| *at == written).map(|(_, all)| all.clone());
+        let all = match cached {
+            Some(all) => all,
+            None => {
+                let all = std::sync::Arc::new(self.typed_prompts()?);
+                *self.history.lock() = Some((written, all.clone()));
+                all
+            }
+        };
+        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+        Ok(all
+            .iter()
+            .filter(|(text, _, _)| {
+                let lower = text.to_lowercase();
+                words.iter().all(|w| lower.contains(w.as_str()))
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    /// Every distinct prompt of the newest 5000 the user typed, newest first.
+    fn typed_prompts(&self) -> AppResult<Vec<Prompt>> {
         let c = self.read_conn();
         // only the text blocks leave SQLite (attachments can be megabytes of base64)
         let mut st = c.prepare(
@@ -495,14 +564,12 @@ impl Db {
                           WHERE CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.type') = 'text' ELSE 0 END)
                     ELSE json_array(json_extract(m.content, '$')) END,
                     m.created_at, c.title
-             FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'user'
-               AND CASE WHEN json_valid(m.meta) AND json_type(m.meta) = 'object'
-                   THEN json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL ELSE 1 END
+             FROM messages m INDEXED BY idx_messages_typed JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.role = 'user' AND CASE WHEN json_valid(m.meta) AND json_type(m.meta) = 'object'
+               THEN json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL ELSE 1 END
              ORDER BY m.created_at DESC LIMIT 5000",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
-        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for (texts, at, title) in rows.flatten() {
@@ -513,13 +580,8 @@ impl Db {
                 .find(|t| !t.starts_with("<system-reminder") && !t.starts_with("<earlier_conversation") && !t.starts_with("This session is being continued"))
                 .map(str::to_string);
             let Some(text) = typed.map(|t| t.trim().to_string()).filter(|t| t.len() >= 3) else { continue };
-            let lower = text.to_lowercase();
-            if !words.iter().all(|w| lower.contains(w.as_str())) || !seen.insert(lower) {
-                continue;
-            }
-            out.push((text, at, title));
-            if out.len() >= limit {
-                break;
+            if seen.insert(text.to_lowercase()) {
+                out.push((text, at, title));
             }
         }
         Ok(out)
@@ -714,12 +776,11 @@ impl Db {
     /// Mark assistant messages left unfinished by a previous crash/quit as stopped.
     pub fn mark_interrupted(&self) -> AppResult<usize> {
         let c = self.conn.lock();
+        // the WHERE is the index's own, so it reads only those rows (and fails if they drift apart)
         Ok(c.execute(
-            "UPDATE messages SET meta = json_set(meta, '$.stopped', json('true'))
-             WHERE role = 'assistant'
-               AND json_extract(meta, '$.stop_reason') IS NULL
-               AND json_extract(meta, '$.error') IS NULL
-               AND json_extract(meta, '$.stopped') IS NULL",
+            "UPDATE messages INDEXED BY idx_messages_unfinished SET meta = json_set(meta, '$.stopped', json('true'))
+             WHERE role = 'assistant' AND CASE WHEN json_valid(meta)
+               THEN json_extract(meta, '$.stop_reason') IS NULL AND json_extract(meta, '$.error') IS NULL AND json_extract(meta, '$.stopped') IS NULL ELSE 0 END",
             [],
         )?)
     }
@@ -1083,6 +1144,17 @@ mod tests {
         let hits: Vec<String> = db.prompt_history("TESTS fix", 10).unwrap().into_iter().map(|r| r.0).collect();
         assert_eq!(hits, vec!["run the tests and fix failures"]);
         assert_eq!(db.prompt_history("", 1).unwrap().len(), 1);
+        // keystrokes filter what the first call read, until something is written
+        let read = || db.history.lock().as_ref().unwrap().1.clone();
+        let before = read();
+        db.prompt_history("log", 10).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before, &read()));
+        db.msg_insert(&mk("7", json!([{"type":"text","text":"a new log question"}]), json!({}), 7)).unwrap();
+        let hits = db.prompt_history("log", 10).unwrap();
+        assert_eq!(hits[0].0, "a new log question");
+        assert!(!std::sync::Arc::ptr_eq(&before, &read()));
+        db.conv_set_title(&conv.id, "renamed").unwrap();
+        assert_eq!(db.prompt_history("log", 10).unwrap()[0].2, "renamed");
     }
 
     #[test]
@@ -1180,6 +1252,51 @@ mod tests {
         assert_eq!(fts_rows(&db, "x1"), vec!["late"]);
         assert_eq!(fts_rows(&db, "m1"), vec!["epsilon"]);
         drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_older_database_is_migrated_and_a_newer_one_refused() {
+        let dir = std::env::temp_dir().join(format!("cr-mig-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let latest = MIGRATIONS.len() as i64 + 1;
+        let version = |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap();
+        let has_index = |c: &Connection, name: &str| c.query_row("SELECT count(*) FROM sqlite_master WHERE name=?1", [name], |r| r.get::<_, i64>(0)).unwrap() == 1;
+        // as the versions before schema versioning left it: version 0, one unfinished answer
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute("INSERT INTO conversations(id,model,created_at,updated_at) VALUES('c','m',1,1)", []).unwrap();
+            c.execute("INSERT INTO messages(id,conversation_id,role,content,meta,created_at) VALUES('a','c','assistant','[]','{}',1)", []).unwrap();
+            // a migration that fails changes nothing: what it did before is rolled back too
+            c.execute_batch("CREATE INDEX idx_messages_typed ON messages(role)").unwrap();
+        }
+        assert!(Db::open(&path).is_err());
+        {
+            let c = Connection::open(&path).unwrap();
+            assert_eq!(version(&c), 0);
+            assert!(!has_index(&c, "idx_messages_unfinished"));
+            c.execute_batch("DROP INDEX idx_messages_typed").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        {
+            let c = db.conn.lock();
+            assert_eq!(version(&c), latest);
+            assert!(has_index(&c, "idx_messages_unfinished") && has_index(&c, "idx_messages_typed"));
+        }
+        assert_eq!(db.conv_get("c").unwrap().model, "m");
+        assert_eq!(db.mark_interrupted().unwrap(), 1, "the new index finds the old row");
+        assert_eq!(db.msg_get("a").unwrap().meta["stopped"], true);
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(version(&db.conn.lock()), latest, "an up-to-date database opens as it is");
+        // written by a newer version: refused, untouched (lib.rs then offers a new database)
+        db.conn.lock().pragma_update(None, "user_version", latest + 1).unwrap();
+        drop(db);
+        let e = Db::open(&path).err().unwrap().to_string();
+        assert!(e.contains("newer version") && e.contains(&format!("version {}", latest + 1)), "{e}");
+        assert_eq!(version(&Connection::open(&path).unwrap()), latest + 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1315,6 +1432,50 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         reader.join().unwrap();
         println!("conv_get + msg_update during heavy reads: {:.2?} average, {:.2?} worst", total / n, worst);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What a start costs on a large history (as lib.rs's setup runs it),
+    /// first from a database made before versioning, then once up to date.
+    /// `cargo test --no-default-features --lib bench_startup -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_startup() {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join(format!("cr-startbench-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench.db");
+        {
+            let db = Db::open(&path).unwrap();
+            fill_large(&db, 900, 200);
+            let n: i64 = db.conn.lock().query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+            println!("{n} messages, {:.0} MB", std::fs::metadata(&path).unwrap().len() as f64 / 1e6);
+            // as left by the versions before schema versioning
+            db.conn.lock().execute_batch("DROP INDEX IF EXISTS idx_messages_unfinished; DROP INDEX IF EXISTS idx_messages_typed; PRAGMA user_version = 0;").unwrap();
+        }
+        for run in 0..4 {
+            let t = Instant::now();
+            let db = Db::open(&path).unwrap();
+            let open = t.elapsed();
+            let t = Instant::now();
+            let marked = db.mark_interrupted().unwrap();
+            let mark = t.elapsed();
+            let t = Instant::now();
+            db.delete_unfinished_imports().unwrap();
+            let imports = t.elapsed();
+            println!("start {run}: open {open:.2?}, mark_interrupted {mark:.2?} ({marked} rows), delete_unfinished_imports {imports:.2?}");
+        }
+        // Ctrl+R: the popup opens, then each keystroke searches again
+        let db = Db::open(&path).unwrap();
+        let t = Instant::now();
+        db.prompt_history("", 60).unwrap();
+        let opened = t.elapsed();
+        let t = Instant::now();
+        for q in ["z", "zz", "zzz", "zzz-no-match"] {
+            db.prompt_history(q, 60).unwrap();
+        }
+        println!("prompt_history: popup opens {opened:.2?}, each keystroke after it {:.2?}", t.elapsed() / 4);
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }

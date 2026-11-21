@@ -117,7 +117,9 @@ export async function renderCode(view) {
 
 /** All coding sessions: grouped by folder when there are many, with a filter and live status. */
 export async function renderSessions(view) {
+  const route = store.route;
   const sessions = await call('list_conversations', { kind: 'code' }).catch(() => []);
+  if (store.route !== route || route.name !== 'sessions') return;
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head"><h1>${t('sessions')}</h1><div class="grow"></div>
       <button class="btn" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button>
