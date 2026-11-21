@@ -2,8 +2,33 @@
 members = ["src-tauri"]
 resolver = "2"
 
+# No `panic = "abort"`: a turn runs under catch_unwind (engine::start_reserved)
+# so a panic fails that turn instead of the app, and tokio isolates panicking
+# tasks the same way; both need unwinding.
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Everything else stays small; these run on every streamed reply (the engine
+# re-renders its markdown and code blocks ~20 times a second) and on
+# checkpoint hashing. Measured with LTO against "s" everywhere: markdown with
+# code blocks -16%, re-highlighting a growing code block -21%, SHA-256 2.3x
+# faster. (SQLite at 3 added 845 kB for 3-11%, so it stays "s".)
+[profile.release.package.syntect]
+opt-level = 3
+[profile.release.package.fancy-regex]
+opt-level = 3
+[profile.release.package.regex-automata]
+opt-level = 3
+[profile.release.package.regex-syntax]
+opt-level = 3
+[profile.release.package.aho-corasick]
+opt-level = 3
+[profile.release.package.memchr]
+opt-level = 3
+[profile.release.package.pulldown-cmark]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3

@@ -120,7 +120,8 @@ impl Encoder {
             base: base_seq,
             same: kept,
         })
-        .unwrap_or_default();
+        // can't fail (string keys only); "null" keeps the event's script valid
+        .unwrap_or_else(|_| "null".into());
 
         if !streaming || !turn.is_object() {
             self.convs.remove(conv_id);
