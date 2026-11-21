@@ -1,5 +1,9 @@
 // UI strings: English and Turkish.
 const en = {
+  turn_files: "Edited {n} files",
+  turn_files_one: "Edited 1 file",
+  turn_files_review: "Review changes",
+  turn_files_new: "new",
   cmd_todos: "List TODO / FIXME comments in the project",
   todos_title: "TODO and FIXME comments",
   todos_all: "All",
@@ -474,6 +478,10 @@ const en = {
 };
 
 const tr = {
+  turn_files: "{n} dosya düzenlendi",
+  turn_files_one: "1 dosya düzenlendi",
+  turn_files_review: "Değişiklikleri incele",
+  turn_files_new: "yeni",
   cmd_todos: "Projedeki TODO / FIXME yorumlarını listele",
   todos_title: "TODO ve FIXME yorumları",
   todos_all: "Tümü",

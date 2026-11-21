@@ -460,6 +460,49 @@ function editLastUserMessage() {
   }
 }
 
+const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const lineCount = (s) => (s ? String(s).replace(/\n$/, '').split('\n').length : 0);
+
+/** Files a turn wrote or edited, with rough +/- line counts from the tool inputs. */
+export function editedFiles(parts, cwd) {
+  const files = new Map();
+  for (const p of parts || []) {
+    if (p.kind !== 'tool' || !EDIT_TOOLS.has(p.name) || p.status === 'error' || p.status === 'cancelled' || p.status === 'denied') continue;
+    if (p.result && p.result.is_error) continue;
+    const inp = p.input || {};
+    const abs = inp.file_path || inp.notebook_path;
+    if (!abs) continue;
+    let rel = String(abs);
+    if (cwd && rel.startsWith(cwd.replace(/\/$/, '') + '/')) rel = rel.slice(cwd.replace(/\/$/, '').length + 1);
+    const f = files.get(rel) || { path: rel, added: 0, removed: 0, created: false };
+    if (/File created successfully/.test((p.result && p.result.text) || '')) f.created = true;
+    if (p.name === 'Write') f.added += lineCount(inp.content);
+    else if (p.name === 'Edit') { f.added += lineCount(inp.new_string); f.removed += lineCount(inp.old_string); }
+    else if (p.name === 'MultiEdit') for (const e of inp.edits || []) { f.added += lineCount(e.new_string); f.removed += lineCount(e.old_string); }
+    files.set(rel, f);
+  }
+  return [...files.values()];
+}
+
+/** "Edited N files" summary under a finished code-session turn. */
+function renderTurnFiles(el, turn, streaming) {
+  let box = el.querySelector('.turn-files');
+  const files = !streaming && cur && cur.conv.kind === 'code' ? editedFiles(turn.parts, cur.conv.cwd) : [];
+  const sig = JSON.stringify(files);
+  if (box && box.__sig === sig) return;
+  if (!files.length) { if (box) box.remove(); return; }
+  if (!box) { box = h('<div class="turn-files"></div>'); el.querySelector('.assistant-body').appendChild(box); }
+  box.__sig = sig;
+  const add = files.reduce((a, f) => a + f.added, 0);
+  const del = files.reduce((a, f) => a + f.removed, 0);
+  box.innerHTML = `<div class="tf-head">${icon('edit', 13)}<span>${esc(files.length === 1 ? t('turn_files_one') : t('turn_files', { n: files.length }))}</span><span class="diff-stat"><span class="a">+${add}</span> <span class="d">-${del}</span></span><span class="grow"></span><button class="btn sm ghost" data-a="review">${esc(t('turn_files_review'))}</button></div>
+    <div class="tf-list">${files.map((f) => `<button class="tf-file" data-path="${esc(f.path)}" title="${esc(f.path)}"><span class="ellipsis">${esc(f.path)}</span>${f.created ? `<span class="tf-new">${esc(t('turn_files_new'))}</span>` : ''}<span class="diff-stat"><span class="a">+${f.added}</span> <span class="d">-${f.removed}</span></span></button>`).join('')}</div>`;
+  box.querySelector('[data-a=review]').onclick = async () => { const ws = await import('./workspace.js'); ws.show('changes'); };
+  box.querySelectorAll('.tf-file').forEach((b) => {
+    b.onclick = async () => { const files = await import('./panes/files.js'); files.showFile(b.dataset.path); };
+  });
+}
+
 function renderAssistantTurn(el, turn) {
   if (!el.querySelector('.assistant-body')) {
     el.innerHTML = `<div class="assistant-body"><div class="parts"></div><div class="streaming-indicator hidden">${spark(18, 'spark-anim')}</div></div><div class="turn-actions"></div>`;
@@ -480,6 +523,7 @@ function renderAssistantTurn(el, turn) {
   });
   const streaming = !!turn.streaming;
   el.querySelector('.streaming-indicator').classList.toggle('hidden', !streaming);
+  renderTurnFiles(el, turn, streaming);
   const actions = el.querySelector('.turn-actions');
   if (streaming) { actions.innerHTML = ''; actions.__sig = ''; return; }
   const sig = JSON.stringify([turn.siblings, turn.meta && turn.meta.feedback, turn.parts.length]);
