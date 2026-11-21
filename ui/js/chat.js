@@ -129,6 +129,9 @@ function renderTopbar() {
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
   cur.topEl.append(tb, h('<div class="spacer"></div>'));
   if (c.kind === 'code') cur.topEl.append(watchBadge(c));
+  const outline = h(`<button class="icon-btn" title="${esc(t('outline_title'))}">${icon('list', 17)}</button>`);
+  outline.onclick = () => showOutline(outline);
+  cur.topEl.append(outline);
   cur.topEl.append(contextMeter(cur.id, () => { cur.composer.setText('/cost'); cur.composer.send(); }));
   const usage = h(`<button class="icon-btn" title="${t('usage')}">${icon('info', 17)}</button>`);
   usage.onclick = () => showUsage(usage);
@@ -352,6 +355,48 @@ function branchNav(turn) {
   }));
   return nav;
 }
+
+// ---- outline: jump between your messages
+
+/** The user-message elements currently shown, in order. */
+function userTurnEls() {
+  return cur ? [...cur.colEl.querySelectorAll('.turn.user')].filter((e) => e.querySelector('.user-text')) : [];
+}
+
+function jumpTo(el) {
+  el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1200);
+}
+
+function showOutline(anchor) {
+  const els = userTurnEls();
+  if (!els.length) { toast(t('outline_empty')); return; }
+  showMenu(anchor, [
+    { header: t('outline_title') },
+    ...els.map((e, i) => {
+      const text = e.querySelector('.user-text').textContent.trim().replace(/\s+/g, ' ');
+      return { label: text.length > 90 ? `${text.slice(0, 90)}…` : text, right: String(i + 1), onClick: () => jumpTo(e) };
+    }),
+  ], { placement: 'bottom-end', width: 380 });
+}
+
+// Alt+↑ / Alt+↓: previous / next of your messages
+window.addEventListener('keydown', (e) => {
+  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !cur) return;
+  if (e.target && e.target.closest && e.target.closest('textarea, input, .xterm')) return;
+  const els = userTurnEls();
+  if (!els.length) return;
+  e.preventDefault();
+  // positions relative to the top of the scroll area; the message a jump
+  // landed on sits at ~0, so it's neither "above" nor "below"
+  const top = cur.scrollEl.getBoundingClientRect().top;
+  const pos = els.map((x) => x.getBoundingClientRect().top - top);
+  const target = e.key === 'ArrowUp'
+    ? [...els].reverse().find((x, i) => pos[els.length - 1 - i] < -10)
+    : els.find((x, i) => pos[i] > 10);
+  if (target) jumpTo(target);
+});
 
 function renderUserTurn(el, turn) {
   const text = (turn.parts.find((p) => p.kind === 'user_text') || {}).text || '';

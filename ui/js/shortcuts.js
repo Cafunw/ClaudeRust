@@ -66,6 +66,7 @@ export function openShortcuts() {
     [t('sc_quick'), isMac ? '⌥Space' : 'Ctrl+Alt+Space'],
     [t('sc_find'), keymap.shown('find')],
     [t('sc_history'), keymap.shown('history')],
+    [t('sc_outline'), isMac ? '⌥↑ / ⌥↓' : 'Alt+↑ / Alt+↓'],
     [t('sc_sheet'), keymap.shown('shortcuts')],
   ].filter(([, k]) => k);
   modal({

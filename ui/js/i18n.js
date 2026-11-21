@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  outline_title: "Your messages in this conversation",
+  outline_empty: "No messages yet.",
+  sc_outline: "Previous / next of your messages",
   folder_editor: "Open folder in editor",
   folder_terminal: "Open a terminal here",
   fv_sessions: "Conversations that edited this file",
@@ -531,6 +534,9 @@ const en = {
 };
 
 const tr = {
+  outline_title: "Bu sohbetteki mesajlarınız",
+  outline_empty: "Henüz mesaj yok.",
+  sc_outline: "Önceki / sonraki mesajınız",
   folder_editor: "Klasörü düzenleyicide aç",
   folder_terminal: "Burada bir terminal aç",
   fv_sessions: "Bu dosyayı düzenleyen sohbetler",
