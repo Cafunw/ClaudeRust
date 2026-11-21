@@ -183,24 +183,8 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
         };
         let Ok(meta) = std::fs::metadata(&p) else { continue };
         if meta.is_dir() {
-            let mut names: Vec<String> = std::fs::read_dir(&p)
-                .map(|rd| {
-                    rd.flatten()
-                        .map(|e| {
-                            let n = e.file_name().to_string_lossy().to_string();
-                            if e.path().is_dir() {
-                                format!("{n}/")
-                            } else {
-                                n
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            names.sort();
-            names.truncate(200);
             blocks.push(json!({"type": "text", "text": format!(
-                "<system-reminder>The user mentioned the directory {}. Its entries:\n{}</system-reminder>", p.display(), names.join("\n"))}));
+                "<system-reminder>The user mentioned the directory {}. Its layout (.gitignore respected):\n{}</system-reminder>", p.display(), dir_tree(&p, 3, 300))}));
             continue;
         }
         if meta.len() > 256 * 1024 || total > 600 * 1024 {
@@ -274,6 +258,48 @@ pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
         Err(e) => format!("(could not fetch the page: {e})"),
     };
     Some(json!({"type": "text", "text": format!("<system-reminder>The user mentioned {url}. Its content:\n{body}</system-reminder>")}))
+}
+
+/// An indented listing of `dir` (`depth` levels, at most `max` entries),
+/// .gitignore-aware, folders first.
+pub fn dir_tree(dir: &Path, depth: usize, max: usize) -> String {
+    let walker = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(depth))
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .sort_by_file_path(|a, b| {
+            // folders first, then by name
+            let ad = a.is_dir();
+            let bd = b.is_dir();
+            bd.cmp(&ad).then_with(|| a.file_name().cmp(&b.file_name()))
+        })
+        .filter_entry(|e| {
+            let n = e.file_name().to_string_lossy();
+            !(n == ".git" || n == "node_modules" || n == "target" || n == ".DS_Store")
+        })
+        .build();
+    let mut out = String::new();
+    let mut n = 0;
+    for e in walker.flatten() {
+        if e.depth() == 0 {
+            continue;
+        }
+        if n >= max {
+            out.push_str("…\n");
+            break;
+        }
+        let name = e.file_name().to_string_lossy();
+        let slash = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) { "/" } else { "" };
+        out.push_str(&format!("{}{name}{slash}\n", "  ".repeat(e.depth() - 1)));
+        n += 1;
+    }
+    if out.is_empty() {
+        out.push_str("(empty)\n");
+    }
+    out
 }
 
 // ------------------------------------------------------------ file browser
@@ -371,6 +397,23 @@ fn merge(mut a: Value, b: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_trees() {
+        let d = std::env::temp_dir().join(format!("cr-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src/deep/deeper/deepest")).unwrap();
+        std::fs::create_dir_all(d.join("node_modules/x")).unwrap();
+        std::fs::create_dir_all(d.join("build")).unwrap();
+        std::fs::write(d.join(".gitignore"), "build/\n").unwrap();
+        std::fs::write(d.join("README.md"), "").unwrap();
+        std::fs::write(d.join("src/main.rs"), "").unwrap();
+        std::fs::write(d.join("src/deep/deeper/deepest/x.rs"), "").unwrap();
+        let t = dir_tree(&d, 3, 100);
+        assert_eq!(t, "src/\n  deep/\n    deeper/\n  main.rs\n.gitignore\nREADME.md\n", "{t}");
+        assert!(dir_tree(&d, 3, 2).ends_with("…\n"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn browse_and_view() {
