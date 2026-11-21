@@ -894,6 +894,11 @@ impl McpManager {
                 Duration::from_secs(600),
             )
             .await?;
+        // images are decoded, and a large one scaled down and encoded again
+        // (a screenshot tool's): off the async runtime
+        if r["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "image")) {
+            return tokio::task::spawn_blocking(move || convert_result(&r)).await.map_err(|e| AppError::msg(e.to_string()));
+        }
         Ok(convert_result(&r))
     }
 
@@ -1331,7 +1336,8 @@ mod tests {
     /// A small MCP server. argv: tag, comma-separated tool names. Tools:
     /// `slow` never answers, `cancelled` lists the ids of cancelled requests,
     /// `noisy` logs bytes that aren't UTF-8 (and more than a pipe holds),
-    /// `exit` exits without answering; any other tool answers "tag:name:text".
+    /// `exit` exits without answering, `image` answers a 1x1 PNG and a text;
+    /// any other tool answers "tag:name:text".
     /// Env: MCP_TEST_PIDFILE (write its pid), MCP_TEST_EOFFILE (written on
     /// stdin EOF), MCP_TEST_STUBBORN=1 (keep running after stdin EOF).
     const FAKE_SERVER: &str = r#"
@@ -1360,6 +1366,9 @@ for raw in sys.stdin.buffer:
         if name == 'slow': continue
         if name == 'exit': sys.exit(0)
         if name == 'cancelled': r = text(json.dumps(cancelled))
+        elif name == 'image':
+            png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+            r = {'content': [{'type': 'image', 'mimeType': 'image/png', 'data': png}, {'type': 'text', 'text': 'shot'}]}
         elif name == 'noisy':
             err.write(b'C:\\Users\\\xdeule\\AppData\n'); err.flush()
             out.write(b'loading \xde\n'); out.flush()
@@ -1462,8 +1471,12 @@ for line in sys.stdin:
             return;
         }
         let dir = temp_dir("noisy");
-        let m = manager(&dir, json!({"x": fake("x", "noisy,echo")})).await;
+        let m = manager(&dir, json!({"x": fake("x", "noisy,echo,image")})).await;
         assert_eq!(m.statuses().await[0].status, "connected");
+        // an answer with an image (converted on the blocking pool)
+        let (b, err) = m.call("x__image", &json!({})).await.unwrap();
+        assert!(!err);
+        assert_eq!((b[0]["type"].as_str(), b[0]["source"]["media_type"].as_str(), b[1]["text"].as_str()), (Some("image"), Some("image/png"), Some("shot")), "{b:?}");
         // stderr must keep draining (300 KB fill any pipe), stdout keep reading
         let (b, _) = tokio::time::timeout(Duration::from_secs(20), m.call("x__noisy", &json!({}))).await.expect("server blocked").unwrap();
         assert_eq!(b[0]["text"], "done");

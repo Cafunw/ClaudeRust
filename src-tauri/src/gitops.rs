@@ -234,26 +234,42 @@ pub async fn changes(session: &CodeSession) -> AppResult<Value> {
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let branch = git(&top, &["rev-parse", "--abbrev-ref", "HEAD"]).await.unwrap_or_default().trim().to_string();
-        let list: Vec<Value> = files
-            .iter()
-            .map(|c| {
-                let (a, d) = match stats.get(&c.path) {
-                    Some(s) => *s,
-                    None if c.status == '?' => (read_text(&top.join(&c.path)).map(|t| count_lines(&t)).unwrap_or(0), 0),
-                    None => (0, 0),
-                };
-                json!({"path": c.path, "status": c.status.to_string(), "orig_path": c.orig_path, "added": a, "removed": d})
-            })
-            .collect();
+        // new files are read to count their lines: off the async runtime
+        // (this runs on every `files-changed`, and a project can have many)
+        let (top, list) = blocking(move || {
+            let list: Vec<Value> = files
+                .iter()
+                .map(|c| {
+                    let (a, d) = match stats.get(&c.path) {
+                        Some(s) => *s,
+                        None if c.status == '?' => (read_text(&top.join(&c.path)).map(|t| count_lines(&t)).unwrap_or(0), 0),
+                        None => (0, 0),
+                    };
+                    json!({"path": c.path, "status": c.status.to_string(), "orig_path": c.orig_path, "added": a, "removed": d})
+                })
+                .collect();
+            (top, list)
+        })
+        .await?;
         return Ok(json!({"repo": true, "root": top, "branch": branch, "files": list}));
     }
-    // Not a repository: what the built-in agent changed.
+    // Not a repository: what the built-in agent changed (each file read and
+    // diffed against its original, on the blocking pool).
     let originals = session.originals.lock().clone();
+    blocking(move || changes_from_originals(&root, &originals)).await?
+}
+
+/// Run `f` on the blocking pool (file reads and diffs of a whole project).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> AppResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))
+}
+
+fn changes_from_originals(root: &Path, originals: &std::collections::HashMap<PathBuf, Original>) -> AppResult<Value> {
     let mut list = vec![];
     let mut paths: Vec<&PathBuf> = originals.keys().collect();
     paths.sort();
     for p in paths {
-        let rel = p.strip_prefix(&root).map(|r| r.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
+        let rel = p.strip_prefix(root).map(|r| r.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
         let orig = match &originals[p] {
             Original::Unknown => {
                 // changed, presumably; its earlier content wasn't kept
@@ -302,8 +318,13 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
                 return Ok(d);
             }
         }
-        let new = read_text(&full).unwrap_or_else(|| if full.exists() { "(binary file)\n".into() } else { String::new() });
-        return Ok(unified(path, "", &new));
+        // a file of up to 8 MB, read and diffed on the blocking pool
+        let path = path.to_string();
+        return blocking(move || {
+            let new = read_text(&full).unwrap_or_else(|| if full.exists() { "(binary file)\n".into() } else { String::new() });
+            unified(&path, "", &new)
+        })
+        .await;
     }
     let full = abs_in(&session.root, path)?;
     let orig = session.originals.lock().get(&full).cloned();
@@ -312,8 +333,12 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
         Some(Original::Unknown) => return Err(AppError::msg(UNKNOWN_ORIGINAL)),
         Some(Original::Missing) | None => String::new(),
     };
-    let new = read_text(&full).unwrap_or_default();
-    Ok(unified(path, &old, &new))
+    let path = path.to_string();
+    blocking(move || {
+        let new = read_text(&full).unwrap_or_default();
+        unified(&path, &old, &new)
+    })
+    .await
 }
 
 /// The patch for hunk `index` of a unified diff (the file header plus that

@@ -19,6 +19,22 @@ use tauri_plugin_dialog::DialogExt;
 
 type St<'a> = State<'a, Arc<AppState>>;
 
+/// Run `f` on the blocking pool. The async runtime has one worker thread
+/// per core and every command, stream and event shares them: work that
+/// takes long on the CPU or the disk (decoding an image, a full scan of the
+/// database) would hold one of them up meanwhile.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + 'static) -> AppResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))?
+}
+
+/// `blocking` for async work that is mostly CPU between its awaits
+/// (rendering a whole conversation): the future runs to completion on a
+/// thread of the blocking pool, its awaits still served by the runtime.
+async fn off_runtime<T: Send + 'static>(fut: impl std::future::Future<Output = AppResult<T>> + Send + 'static) -> AppResult<T> {
+    let rt = tokio::runtime::Handle::current();
+    blocking(move || rt.block_on(fut)).await
+}
+
 fn settings_json(st: &AppState) -> Value {
     let s = st.settings.read().clone();
     let key = st.api_key.read().clone();
@@ -237,7 +253,12 @@ pub async fn get_models(state: St<'_>, refresh: bool) -> AppResult<Value> {
 #[tauri::command]
 pub async fn list_conversations(state: St<'_>, kind: Option<String>, project_id: Option<String>) -> AppResult<Value> {
     let st = state.inner().clone();
-    let list = st.db.conv_list(kind.as_deref(), project_id.as_deref())?;
+    // the sidebar, after every change: a full scan of the conversations
+    let list = blocking({
+        let st = st.clone();
+        move || st.db.conv_list(kind.as_deref(), project_id.as_deref())
+    })
+    .await?;
     let running: Vec<String> = st.runs.lock().keys().cloned().collect();
     let out: Vec<Value> = list
         .into_iter()
@@ -357,7 +378,8 @@ pub async fn create_conversation(state: St<'_>, req: NewConversation) -> AppResu
 #[tauri::command]
 pub async fn get_conversation(state: St<'_>, id: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    view::conversation_view(&st, &id).await
+    // rendering a long conversation (Markdown, highlighting) can take seconds
+    off_runtime(async move { view::conversation_view(&st, &id).await }).await
 }
 
 #[derive(Deserialize)]
@@ -484,7 +506,9 @@ async fn send_into(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conver
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE && req.text.contains('@') {
         if let Some(cwd) = &conv.cwd {
             let session = st.code_session(&conv.id, cwd);
-            content.extend(crate::filesearch::expand(&req.text, &session));
+            // mentioned files (up to 256 KB each) and folder listings are read
+            let text = req.text.clone();
+            content.extend(blocking(move || Ok(crate::filesearch::expand(&text, &session))).await?);
         }
     }
     let plan = conv.kind == "code"
@@ -572,7 +596,7 @@ pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: S
     let leaf = view::latest_leaf(&nodes, &message_id);
     st.db.conv_set_leaf(&conversation_id, Some(&leaf))?;
     drop(slot);
-    view::conversation_view(&st, &conversation_id).await
+    off_runtime(async move { view::conversation_view(&st, &conversation_id).await }).await
 }
 
 #[tauri::command]
@@ -699,7 +723,12 @@ pub async fn message_feedback(state: St<'_>, message_id: String, value: Option<S
 #[tauri::command]
 pub async fn export_conversation(state: St<'_>, id: String, format: String) -> AppResult<String> {
     let st = state.inner().clone();
-    let conv = st.db.conv_get(&id)?;
+    // a long conversation is seconds of Markdown rendering
+    off_runtime(async move { export_conversation_inner(&st, &id, &format).await }).await
+}
+
+async fn export_conversation_inner(st: &AppState, id: &str, format: &str) -> AppResult<String> {
+    let conv = st.db.conv_get(id)?;
     let path = match &conv.current_leaf {
         Some(l) => st.db.path_to(l)?,
         None => vec![],
@@ -708,7 +737,7 @@ pub async fn export_conversation(state: St<'_>, id: String, format: String) -> A
         return Ok(serde_json::to_string_pretty(&json!({"conversation": conv, "messages": path}))?);
     }
     if format == "html" {
-        return Ok(export_html(&st, &conv, &path).await);
+        return Ok(export_html(st, &conv, &path).await);
     }
     let mut md = format!("# {}\n\n", if conv.title.is_empty() { "Conversation" } else { &conv.title });
     for m in &path {
@@ -729,41 +758,58 @@ pub async fn export_conversation(state: St<'_>, id: String, format: String) -> A
 #[tauri::command]
 pub async fn search(state: St<'_>, query: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    Ok(serde_json::to_value(st.db.search(&query, 40)?)?)
+    // as you type; title and full-text matches over the whole history
+    let hits = blocking(move || st.db.search(&query, 40)).await?;
+    Ok(serde_json::to_value(hits)?)
 }
 
 // -------------------------------------------------------------- attachments
 
+// Making an attachment reads the file and decodes, scales down and
+// re-encodes images, unzips Word documents, digests large logs: the
+// commands below do it on the blocking pool.
+
 #[tauri::command]
 pub async fn stage_paths(state: St<'_>, paths: Vec<String>) -> AppResult<Value> {
     let st = state.inner().clone();
-    let mut out = vec![];
-    let mut errors = vec![];
-    for p in paths {
-        match attachments::from_path(std::path::Path::new(&p)) {
-            Ok(a) => {
-                out.push(serde_json::to_value(&a)?);
-                st.staged.lock().insert(a.id.clone(), a);
+    blocking(move || {
+        let mut out = vec![];
+        let mut errors = vec![];
+        for p in paths {
+            match attachments::from_path(std::path::Path::new(&p)) {
+                Ok(a) => {
+                    out.push(serde_json::to_value(&a)?);
+                    st.staged.lock().insert(a.id.clone(), a);
+                }
+                Err(e) => errors.push(e.to_string()),
             }
-            Err(e) => errors.push(e.to_string()),
         }
-    }
-    Ok(json!({"attachments": out, "errors": errors}))
+        Ok(json!({"attachments": out, "errors": errors}))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn stage_bytes(state: St<'_>, name: String, data: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let a = attachments::from_base64(&name, &data)?;
-    let v = serde_json::to_value(&a)?;
-    st.staged.lock().insert(a.id.clone(), a);
-    Ok(v)
+    blocking(move || {
+        let a = attachments::from_base64(&name, &data)?;
+        let v = serde_json::to_value(&a)?;
+        st.staged.lock().insert(a.id.clone(), a);
+        Ok(v)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn stage_text(state: St<'_>, name: String, text: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let a = attachments::from_bytes(&name, text.as_bytes())?;
+    blocking(move || stage_from_bytes(&st, &name, text.as_bytes())).await
+}
+
+/// Stage an attachment made from `bytes` and describe it.
+fn stage_from_bytes(st: &AppState, name: &str, bytes: &[u8]) -> AppResult<Value> {
+    let a = attachments::from_bytes(name, bytes)?;
     let v = serde_json::to_value(&a)?;
     st.staged.lock().insert(a.id.clone(), a);
     Ok(v)
@@ -806,7 +852,8 @@ pub async fn save_text_file(app: AppHandle, name: String, content: String) -> Ap
     });
     match rx.await.unwrap_or(None) {
         Some(p) => {
-            std::fs::write(p, content)?;
+            // an export can be megabytes
+            tokio::fs::write(p, content).await?;
             Ok(true)
         }
         None => Ok(false),
@@ -833,7 +880,8 @@ pub async fn respond_permission(state: St<'_>, request_id: String, decision: Str
 pub async fn list_projects(state: St<'_>) -> AppResult<Value> {
     let st = state.inner().clone();
     let projects = st.db.project_list()?;
-    let convs = st.db.conv_list(Some("chat"), None)?;
+    // every chat (and its options) is read: a full scan of the table
+    let convs = blocking(move || st.db.conv_list(Some("chat"), None)).await?;
     let out: Vec<Value> = projects
         .into_iter()
         .map(|p| {
@@ -860,7 +908,8 @@ pub async fn create_project(state: St<'_>, name: String, description: String) ->
 pub async fn get_project(state: St<'_>, id: String) -> AppResult<Value> {
     let st = state.inner().clone();
     let p = st.db.project_get(&id)?;
-    let files = st.db.project_files(&id)?;
+    // with their contents: base64 PDFs and images can be many megabytes
+    let files = blocking(move || st.db.project_files(&id)).await?;
     let total_chars: usize = files.iter().filter(|f| f.kind == "text").map(|f| f.data.len()).sum();
     Ok(json!({"project": p, "files": files, "knowledge_chars": total_chars}))
 }
@@ -910,30 +959,40 @@ fn add_file_to_project(st: &AppState, project_id: &str, a: attachments::Attachme
 #[tauri::command]
 pub async fn add_project_paths(state: St<'_>, project_id: String, paths: Vec<String>) -> AppResult<Value> {
     let st = state.inner().clone();
-    let mut added = vec![];
-    let mut errors = vec![];
-    for p in paths {
-        match attachments::from_path(std::path::Path::new(&p)).and_then(|a| add_file_to_project(&st, &project_id, a)) {
-            Ok(v) => added.push(v),
-            Err(e) => errors.push(e.to_string()),
+    // files read and turned into attachments (see `stage_paths`)
+    blocking(move || {
+        let mut added = vec![];
+        let mut errors = vec![];
+        for p in paths {
+            match attachments::from_path(std::path::Path::new(&p)).and_then(|a| add_file_to_project(&st, &project_id, a)) {
+                Ok(v) => added.push(v),
+                Err(e) => errors.push(e.to_string()),
+            }
         }
-    }
-    Ok(json!({"added": added, "errors": errors}))
+        Ok(json!({"added": added, "errors": errors}))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn add_project_text(state: St<'_>, project_id: String, name: String, text: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let mut a = attachments::from_bytes(&name, text.as_bytes())?;
-    a.kind = "text".into();
-    add_file_to_project(&st, &project_id, a)
+    blocking(move || {
+        let mut a = attachments::from_bytes(&name, text.as_bytes())?;
+        a.kind = "text".into();
+        add_file_to_project(&st, &project_id, a)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn add_project_bytes(state: St<'_>, project_id: String, name: String, data: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let a = attachments::from_base64(&name, &data)?;
-    add_file_to_project(&st, &project_id, a)
+    blocking(move || {
+        let a = attachments::from_base64(&name, &data)?;
+        add_file_to_project(&st, &project_id, a)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -946,7 +1005,8 @@ pub async fn remove_project_file(state: St<'_>, id: String) -> AppResult<()> {
 #[tauri::command]
 pub async fn list_artifacts(state: St<'_>) -> AppResult<Value> {
     let st = state.inner().clone();
-    let rows = st.db.artifact_list(500)?;
+    // the latest version of every artifact, with its content
+    let rows = blocking(move || st.db.artifact_list(500)).await?;
     let out: Vec<Value> = rows
         .into_iter()
         .map(|a| {
@@ -1053,10 +1113,7 @@ pub async fn mcp_list_prompts(state: St<'_>) -> AppResult<Value> {
 pub async fn mcp_get_prompt(state: St<'_>, server: String, name: String, args: Value) -> AppResult<Value> {
     let st = state.inner().clone();
     let text = st.mcp.get_prompt(&server, &name, &args).await?;
-    let a = attachments::from_bytes(&format!("{name}.txt"), text.as_bytes())?;
-    let v = serde_json::to_value(&a)?;
-    st.staged.lock().insert(a.id.clone(), a);
-    Ok(v)
+    blocking(move || stage_from_bytes(&st, &format!("{name}.txt"), text.as_bytes())).await
 }
 
 #[tauri::command]
@@ -1064,10 +1121,8 @@ pub async fn mcp_read_resource(state: St<'_>, server: String, uri: String) -> Ap
     let st = state.inner().clone();
     let (uri, text) = st.mcp.read_resource(&server, &uri).await?;
     let name = uri.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("resource").to_string();
-    let a = attachments::from_bytes(&format!("{name}.txt"), text.as_bytes())?;
-    let v = serde_json::to_value(&a)?;
-    st.staged.lock().insert(a.id.clone(), a);
-    Ok(v)
+    // a large resource is digested like a large file
+    blocking(move || stage_from_bytes(&st, &format!("{name}.txt"), text.as_bytes())).await
 }
 
 // ------------------------------------------------------------- Claude Code
@@ -1102,15 +1157,21 @@ pub async fn pick_extension(app: AppHandle) -> AppResult<Option<String>> {
 
 #[tauri::command]
 pub async fn extension_inspect(path: String) -> AppResult<Value> {
-    crate::extensions::inspect(std::path::Path::new(&path))
+    // reads the manifest out of the zip
+    blocking(move || crate::extensions::inspect(std::path::Path::new(&path))).await
 }
 
 #[tauri::command]
 pub async fn extension_install(app: AppHandle, state: St<'_>, path: String, values: Value) -> AppResult<Value> {
     let st = state.inner().clone();
     let dir = st.data_dir.join("extensions");
-    std::fs::create_dir_all(&dir)?;
-    let name = crate::extensions::install(std::path::Path::new(&path), &dir, &st.mcp.config_path, &values)?;
+    let config = st.mcp.config_path.clone();
+    // unpacking can be thousands of files (a bundled node_modules)
+    let name = blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        crate::extensions::install(std::path::Path::new(&path), &dir, &config, &values)
+    })
+    .await?;
     let mut status = mcp_reload(app, state).await?;
     status["installed"] = json!(name);
     Ok(status)
@@ -1192,7 +1253,12 @@ pub async fn code_info(state: St<'_>, conversation_id: String) -> AppResult<Valu
 #[tauri::command]
 pub async fn usage_stats(state: St<'_>, conversation_id: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let conv = st.db.conv_get(&conversation_id)?;
+    // after every answer, for each meter: the whole branch is read and parsed
+    blocking(move || usage_stats_of(&st, &conversation_id)).await
+}
+
+fn usage_stats_of(st: &AppState, conversation_id: &str) -> AppResult<Value> {
+    let conv = st.db.conv_get(conversation_id)?;
     let path = match &conv.current_leaf {
         Some(l) => st.db.path_to(l)?,
         None => vec![],
@@ -1240,6 +1306,120 @@ mod tests {
         assert_eq!(b.project_id, Some(None));
         let c: ConvUpdate = serde_json::from_value(json!({"id": "x", "project_id": "p"})).unwrap();
         assert_eq!(c.project_id, Some(Some("p".to_string())));
+    }
+
+    /// What `blocking` and `off_runtime` are for: on a runtime with a single
+    /// thread, other tasks (here a ticker) keep running while they work.
+    #[test]
+    fn heavy_work_leaves_the_runtime_free() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let t2 = ticks.clone();
+            let ticker = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    t2.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // the same work done in place holds the runtime: nothing else runs
+            let before = ticks.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(ticks.load(Ordering::SeqCst), before);
+            let before = ticks.load(Ordering::SeqCst);
+            let r = blocking(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(7)
+            })
+            .await;
+            assert_eq!(r.unwrap(), 7);
+            assert!(ticks.load(Ordering::SeqCst) - before >= 3, "the ticker ran meanwhile");
+            // async work, its awaits served by the runtime
+            let before = ticks.load(Ordering::SeqCst);
+            let r = off_runtime(async {
+                std::thread::sleep(Duration::from_millis(100));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                std::thread::sleep(Duration::from_millis(100));
+                Ok("done")
+            })
+            .await;
+            assert_eq!(r.unwrap(), "done");
+            assert!(ticks.load(Ordering::SeqCst) - before >= 3, "the ticker ran meanwhile");
+            // an error comes back as it was
+            let e = blocking::<()>(|| Err(AppError::msg("no such file"))).await.unwrap_err();
+            assert_eq!(e.to_string(), "no such file");
+            ticker.abort();
+        });
+    }
+
+    #[tokio::test]
+    async fn a_conversation_rendered_off_the_runtime_is_the_same() {
+        let st = test_state();
+        let id = long_session(&st, 12);
+        let here = view::conversation_view(&st, &id).await.unwrap();
+        let (st2, id2) = (st.clone(), id.clone());
+        let off = off_runtime(async move { view::conversation_view(&st2, &id2).await }).await.unwrap();
+        assert_eq!(here, off);
+        assert_eq!(off["turns"].as_array().unwrap().len(), 2, "{off}");
+        let e = off_runtime(async move { view::conversation_view(&st, "nope").await }).await.unwrap_err();
+        assert_eq!(e.to_string(), "Conversation not found");
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let dir = std::env::temp_dir().join(format!("cr-cmd-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")))
+    }
+
+    /// A code session of `n` messages: answers in Markdown with a code
+    /// block, tool calls and their results.
+    fn long_session(st: &AppState, n: usize) -> String {
+        let conv = st.db.conv_create("code", "claude-opus-5-5", None, Some("/p"), &json!({})).unwrap();
+        let code: String = (0..40).map(|i| format!("    let value_{i} = compute(&input[{i}..], {i}).map(|x| x * 2).unwrap_or_default();\n")).collect();
+        let mut parent: Option<String> = None;
+        for j in 0..n {
+            let (role, content, meta) = if j % 2 == 0 {
+                if j == 0 {
+                    ("user", json!([{"type": "text", "text": "Refactor the parser"}]), json!({}))
+                } else {
+                    ("user", json!([{"type": "tool_result", "tool_use_id": format!("t{}", j - 1), "content": "ok\n".repeat(200)}]), json!({"tool_results": true}))
+                }
+            } else {
+                let text = format!("Step {j}: here is the **change** and why it works.\n\n```rust\nfn step_{j}(input: &[u8]) {{\n{code}}}\n```\n\n- first point\n- second point with `code`\n");
+                (
+                    "assistant",
+                    json!([{"type": "text", "text": text}, {"type": "tool_use", "id": format!("t{j}"), "name": "Edit", "input": {"file_path": "/p/src/lib.rs", "old_string": "a", "new_string": "b"}}]),
+                    json!({"model": "claude-opus-5-5", "stop_reason": "tool_use", "usage": {"input_tokens": 10, "output_tokens": 10}}),
+                )
+            };
+            let m = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: parent.clone(), role: role.into(), content, meta, created_at: j as i64 };
+            st.db.msg_insert(&m).unwrap();
+            parent = Some(m.id);
+        }
+        st.db.conv_set_leaf(&conv.id, parent.as_deref()).unwrap();
+        conv.id
+    }
+
+    /// `cargo test --release -p clauderust --lib bench_conversation_view -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn bench_conversation_view() {
+        let st = test_state();
+        let id = long_session(&st, 300);
+        let t = std::time::Instant::now();
+        view::conversation_view(&st, &id).await.unwrap();
+        println!("conversation_view, 300 messages, first: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        view::conversation_view(&st, &id).await.unwrap();
+        println!("conversation_view, 300 messages, again: {:?}", t.elapsed());
+        let conv = st.db.conv_get(&id).unwrap();
+        let path = st.db.path_to(conv.current_leaf.as_deref().unwrap()).unwrap();
+        let t = std::time::Instant::now();
+        export_html(&st, &conv, &path).await;
+        println!("export_html, 300 messages: {:?}", t.elapsed());
     }
 }
 
@@ -1662,14 +1842,19 @@ pub fn plan_state_of(path: &[crate::db::Message]) -> Value {
 
 #[tauri::command]
 pub async fn plan_state(state: St<'_>, conversation_id: String) -> AppResult<Value> {
-    let conv = state.db.conv_get(&conversation_id)?;
-    let path = match &conv.current_leaf {
-        Some(leaf) => state.db.path_to(leaf)?,
-        None => vec![],
-    };
-    let mut v = plan_state_of(&path);
-    v["mode"] = conv.options["permission_mode"].clone();
-    Ok(v)
+    let st = state.inner().clone();
+    // the whole branch, read and parsed
+    blocking(move || {
+        let conv = st.db.conv_get(&conversation_id)?;
+        let path = match &conv.current_leaf {
+            Some(leaf) => st.db.path_to(leaf)?,
+            None => vec![],
+        };
+        let mut v = plan_state_of(&path);
+        v["mode"] = conv.options["permission_mode"].clone();
+        Ok(v)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -1882,15 +2067,22 @@ pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult
         add(&format!("MCP: {}", v["name"].as_str().unwrap_or("?")), if status == "connected" { "ok" } else if matches!(status, "connecting" | "starting" | "disabled") { "warn" } else { "error" },
             format!("{status}{}", v["error"].as_str().map(|e| format!(" — {e}")).unwrap_or_default()));
     }
-    let mut budget = 20_000;
-    let cp = dir_size(&st.data_dir.join("checkpoints"), &mut budget);
+    // a walk of up to 20 000 entries
+    let checkpoints = st.data_dir.join("checkpoints");
+    let cp = blocking(move || Ok(dir_size(&checkpoints, &mut 20_000))).await?;
     add("Checkpoints", "ok", format!("{} · {:.1} MB", if settings.code_checkpoints { "on" } else { "off" }, cp as f64 / 1_048_576.0));
     if let Some(id) = conversation_id {
         if let Ok(conv) = st.db.conv_get(&id) {
             if let Some(cwd) = conv.cwd.clone() {
                 let p = std::path::PathBuf::from(&cwd);
                 add("Project folder", if p.is_dir() { "ok" } else { "error" }, cwd.clone());
-                add("Git repository", "ok", crate::worktree::repo_root(&p).map(|r| r.display().to_string()).unwrap_or_else(|| "no (changes are tracked from the agent's edits)".into()));
+                // runs git and waits for it
+                let repo = blocking({
+                    let p = p.clone();
+                    move || Ok(crate::worktree::repo_root(&p))
+                })
+                .await?;
+                add("Git repository", "ok", repo.map(|r| r.display().to_string()).unwrap_or_else(|| "no (changes are tracked from the agent's edits)".into()));
                 let mem: Vec<String> = crate::memory::files(&p).into_iter().filter(|f| f["exists"] == true).map(|f| f["path"].as_str().unwrap_or("").to_string()).collect();
                 add("Memory files", "ok", if mem.is_empty() { "none".into() } else { mem.join(", ") });
                 let hooks = engine::hook_config(&st, &p);
@@ -2092,7 +2284,12 @@ pub async fn watch_start(app: AppHandle, state: St<'_>, conversation_id: String,
             let _ = send_message_inner(&app2, st2, req).await;
         });
     });
-    let v = st.watches.start(&app, &conversation_id, &cwd, command, busy, on_result)?;
+    // on Linux every folder of the project is walked to be watched
+    let v = blocking({
+        let (st, app, conv) = (st.clone(), app.clone(), conversation_id.clone());
+        move || st.watches.start(&app, &conv, &cwd, command, busy, on_result)
+    })
+    .await?;
     if auto_fix == Some(true) {
         st.watches.set_auto_fix(&conversation_id, true);
     }
@@ -2263,7 +2460,9 @@ pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Va
     // an error is reported (the commit dialog then asks before committing)
     // rather than passing as "no secrets"
     let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff"]).await?;
-    Ok(serde_json::to_value(crate::secrets::scan_diff(&diff))?)
+    // a few dozen patterns over every added line of a possibly large diff
+    let found = blocking(move || Ok(crate::secrets::scan_diff(&diff))).await?;
+    Ok(serde_json::to_value(found)?)
 }
 
 /// Commit all changes of the session (and optionally push).
@@ -2466,10 +2665,16 @@ pub fn usage_cost(model: &str, u: &Value) -> f64 {
 /// Tokens and cost across all conversations of the last `days` days.
 #[tauri::command]
 pub async fn usage_overview(state: St<'_>, days: Option<u32>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    // every answer of the period is read and its usage parsed
+    blocking(move || usage_overview_of(&st, days)).await
+}
+
+fn usage_overview_of(st: &AppState, days: Option<u32>) -> AppResult<Value> {
     use chrono::TimeZone;
     let days = days.unwrap_or(30).clamp(1, 365) as i64;
     let since = now_ms() - days * 86_400_000;
-    let rows = state.db.assistant_usage_since(since)?;
+    let rows = st.db.assistant_usage_since(since)?;
     let mut by_day: std::collections::BTreeMap<String, (u64, u64, f64)> = std::collections::BTreeMap::new();
     let mut by_model: std::collections::HashMap<String, (u64, u64, f64, u64)> = std::collections::HashMap::new();
     let mut by_conv: std::collections::HashMap<String, (String, String, f64)> = std::collections::HashMap::new();
@@ -2763,7 +2968,12 @@ pub async fn git_revert(app: AppHandle, state: St<'_>, conversation_id: String, 
 #[tauri::command]
 pub async fn context_breakdown(state: St<'_>, conversation_id: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let conv = st.db.conv_get(&conversation_id)?;
+    // every block of the branch is serialized to estimate its size
+    off_runtime(async move { context_breakdown_of(&st, &conversation_id).await }).await
+}
+
+async fn context_breakdown_of(st: &AppState, conversation_id: &str) -> AppResult<Value> {
+    let conv = st.db.conv_get(conversation_id)?;
     let settings = st.settings.read().clone();
     let path = match &conv.current_leaf {
         Some(l) => st.db.path_to(l)?,
@@ -2774,7 +2984,7 @@ pub async fn context_breakdown(state: St<'_>, conversation_id: String) -> AppRes
     if conv.model.starts_with(crate::oai::PREFIX) || conv.options["engine"] == crate::claudecode::ENGINE {
         // not built by us; only the totals are known
     } else {
-        let rc = engine::build_request_context(&st, &conv, &settings).await?;
+        let rc = engine::build_request_context(st, &conv, &settings).await?;
         let memory = conv.options["memory"].as_str().unwrap_or("");
         let sys_total = est(&rc.system);
         let mem = est(memory).min(sys_total);
@@ -2886,8 +3096,16 @@ mod editor_tests {
 #[tauri::command]
 pub async fn fork_conversation(app: AppHandle, state: St<'_>, conversation_id: String, message_id: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let conv = st.db.conv_get(&conversation_id)?;
-    let path = st.db.path_to(&message_id)?;
+    // every message of the branch is copied and indexed for search
+    let fork = blocking(move || fork_into_new(&st, &conversation_id, &message_id)).await?;
+    engine::emit_conv_updated(&app, &fork);
+    Ok(json!({"conversation_id": fork}))
+}
+
+/// The copy for `fork_conversation`; returns the new conversation's id.
+fn fork_into_new(st: &AppState, conversation_id: &str, message_id: &str) -> AppResult<String> {
+    let conv = st.db.conv_get(conversation_id)?;
+    let path = st.db.path_to(message_id)?;
     if path.is_empty() || path.last().map(|m| m.conversation_id != conversation_id).unwrap_or(true) {
         return Err(AppError::msg("Message not found in this conversation."));
     }
@@ -2913,6 +3131,5 @@ pub async fn fork_conversation(app: AppHandle, state: St<'_>, conversation_id: S
         let _ = st.db.fts_index(&new.id, &id, &render::plain_text(&content));
     }
     st.db.conv_set_title(&new.id, &title)?;
-    engine::emit_conv_updated(&app, &new.id);
-    Ok(json!({"conversation_id": new.id}))
+    Ok(new.id)
 }

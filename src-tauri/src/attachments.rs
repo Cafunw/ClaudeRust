@@ -361,6 +361,30 @@ mod tests {
         assert!(a.preview.is_some());
     }
 
+    /// How long making an attachment takes (what `stage_bytes` and
+    /// `stage_paths` held a runtime worker for):
+    /// `cargo test --release -p clauderust --lib bench_attachments -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_attachments() {
+        // a 12-megapixel photo-like picture (noise compresses poorly)
+        let mut seed = 1u32;
+        let img = image::RgbImage::from_fn(4000, 3000, |x, y| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, (seed >> 24) as u8])
+        });
+        let mut jpg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut jpg, image::ImageFormat::Jpeg).unwrap();
+        let jpg = jpg.into_inner();
+        let t = std::time::Instant::now();
+        let a = from_bytes("photo.jpg", &jpg).unwrap();
+        println!("12 MP JPEG ({:.1} MB): {:?}, {} bytes of base64", jpg.len() as f64 / 1e6, t.elapsed(), a.data.len());
+        let log: String = (0..200_000).map(|i| format!("2026-11-20 01:00:00 INFO request {i} served in 3 ms\n")).collect();
+        let t = std::time::Instant::now();
+        let a = from_bytes("server.log", log.as_bytes()).unwrap();
+        println!("{:.1} MB log: {:?} (digested: {})", log.len() as f64 / 1e6, t.elapsed(), a.digest.is_some());
+    }
+
     #[test]
     fn utf16_text_files_are_decoded() {
         let text = "name,city\nAyşe,İzmir\n";
