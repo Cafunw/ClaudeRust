@@ -3,6 +3,7 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
+import { onTurn } from '../turnstream.js';
 import { h, esc, debounce } from '../util.js';
 import { registerPane, context, updateTabs, refresh } from '../workspace.js';
 
@@ -59,7 +60,7 @@ registerPane({
   show: (el, ctx) => load(el, ctx),
 });
 
-on('turn', ({ conversation_id, turn }) => {
+onTurn(({ conversation_id, turn }) => {
   const c = context();
   if (!c || c.convId !== conversation_id) return;
   const parts = (turn && turn.parts) || [];

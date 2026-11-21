@@ -1,6 +1,7 @@
 // App bootstrap, routing, global events and shortcuts.
 import { t, setLanguage, currentLanguage } from './i18n.js';
 import { call, on as onBackend, isMac } from './api.js';
+import { onTurn } from './turnstream.js';
 import { store, on, emit, loadLocal, saveLocal } from './store.js';
 import { $, closeMenu, errorToast, toast } from './util.js';
 import { mountSidebar, refreshSidebarSoon, toggleSidebar } from './sidebar.js';
@@ -177,7 +178,7 @@ async function setZoom(z) {
 }
 
 function bindBackend() {
-  onBackend('turn', (p) => chat.onTurnEvent(p));
+  onTurn((p) => chat.onTurnEvent(p));
   onBackend('generation-state', (p) => { chat.onStateEvent(p); refreshSidebarSoon(); });
   onBackend('conversation-updated', (p) => {
     refreshSidebarSoon();

@@ -465,6 +465,10 @@ export function renderParts(container, parts, ctx) {
     // second): only parts whose data changed are drawn again. A snapshot,
     // not JSON.stringify, for that: a turn's finished tool outputs can be
     // megabytes, compared on every event
+    // an unchanged part of a streamed turn comes as the very same object
+    // (turnstream.js reuses the previous event's): nothing to compare
+    if (el.__part === p) return;
+    el.__part = p;
     const sig = snapshot(p);
     const same = sameSnapshot(el.__sig, sig);
     // keep the newest copy either way, so the old strings can be freed

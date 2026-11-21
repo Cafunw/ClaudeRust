@@ -42,7 +42,8 @@ pub struct ReqCtx {
 // ------------------------------------------------------------------ events
 
 pub fn emit_turn(app: &AppHandle, conv_id: &str, turn: &Value) {
-    let _ = app.emit("turn", json!({"conversation_id": conv_id, "turn": turn}));
+    // keyframes and deltas (see turnstream.rs; ui/js/turnstream.js expands them)
+    crate::turnstream::emit_turn(app, conv_id, turn);
 }
 
 fn emit_state(app: &AppHandle, conv_id: &str, running: bool, error: Option<&AppError>) {
@@ -665,6 +666,7 @@ pub fn start_reserved(app: &AppHandle, mut slot: RunSlot, parent_id: &str) {
             .unwrap_or_else(|_| Err(AppError::msg("Something went wrong while generating this response.")));
         st.runs.lock().remove(&conv_id);
         st.live.lock().remove(&conv_id);
+        crate::turnstream::end(&conv_id);
         st.pending_perms.lock().retain(|_, v| v["conversation_id"] != conv_id.as_str());
         let err = res.as_ref().err().filter(|e| !matches!(e, AppError::Cancelled));
         if let Some(e) = err {

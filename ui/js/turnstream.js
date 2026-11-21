@@ -18,25 +18,30 @@ let listening = false;
 export function expand(p, state = last) {
   if (!p || typeof p !== 'object') return null;
   const conv = p.conversation_id;
-  const turn = p.turn;
+  let turn = p.turn;
   if (p.base != null) {
     const prev = state.get(conv);
     if (!prev || prev.seq !== p.base || !turn || typeof turn !== 'object') return null;
+    // a new object: the event's payload is shared by every listener of
+    // `turn`, so it's left as it came
+    const full = { ...turn };
     for (const k of ELIDED) {
       const items = turn[k];
       const old = prev.turn[k];
       if (!Array.isArray(items)) continue;
+      const out = new Array(items.length);
       for (let i = 0; i < items.length; i++) {
-        if (items[i] === null) {
-          if (!Array.isArray(old) || old[i] === undefined) { state.delete(conv); return null; }
-          items[i] = old[i];
-        }
+        if (items[i] !== null) { out[i] = items[i]; continue; }
+        if (!Array.isArray(old) || old[i] === undefined) { state.delete(conv); return null; }
+        out[i] = old[i];
       }
+      full[k] = out;
     }
     for (const k of p.same || []) {
       if (!(k in prev.turn)) { state.delete(conv); return null; }
-      turn[k] = prev.turn[k];
+      full[k] = prev.turn[k];
     }
+    turn = full;
   }
   if (turn && turn.streaming === true && p.seq != null) state.set(conv, { seq: p.seq, turn });
   else state.delete(conv);
