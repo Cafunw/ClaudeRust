@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  settings_backup_title: "Back up settings",
+  settings_backup_d: "Save your settings (preferences, styles, shortcuts, tool permissions) to a file, or restore them — e.g. on a new computer. API keys and machine-specific paths aren't included.",
+  settings_backup: "Save to file…",
+  settings_restore: "Restore…",
+  settings_restore_confirm: "Replace your current settings with the ones in this file? API keys and local paths stay as they are.",
   hist_commit_one: "1 commit",
   hist_search_ph: "Search commits…",
   hist_mode_message: "Message",
@@ -555,6 +560,11 @@ const en = {
 };
 
 const tr = {
+  settings_backup_title: "Ayarları yedekle",
+  settings_backup_d: "Ayarlarınızı (tercihler, stiller, kısayollar, araç izinleri) bir dosyaya kaydedin ya da geri yükleyin — örneğin yeni bir bilgisayarda. API anahtarları ve bu makineye özgü yollar dahil edilmez.",
+  settings_backup: "Dosyaya kaydet…",
+  settings_restore: "Geri yükle…",
+  settings_restore_confirm: "Mevcut ayarlarınız bu dosyadakilerle değiştirilsin mi? API anahtarları ve yerel yollar olduğu gibi kalır.",
   hist_commit_one: "1 commit",
   hist_search_ph: "Commit'lerde ara…",
   hist_mode_message: "Mesaj",

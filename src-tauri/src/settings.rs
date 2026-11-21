@@ -157,6 +157,10 @@ impl Default for Settings {
 
 const KEY_SETTINGS: &str = "app_settings";
 const KEY_API: &str = "api_key";
+/// Marks a settings backup file.
+const EXPORT_MARKER: &str = "clauderust_settings";
+/// Kept out of backups: secrets, trust decisions, machine-specific paths.
+const NOT_EXPORTED: &[&str] = &["oai_api_key", "trusted_hooks", "claude_code_path", "onboarded"];
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYRING_SERVICE: &str = "dev.clauderust.desktop";
 
@@ -170,6 +174,32 @@ impl Settings {
 
     pub fn save(&self, db: &Db) -> AppResult<()> {
         db.setting_set(KEY_SETTINGS, &serde_json::to_string(self)?)
+    }
+
+    /// The settings for a backup file: everything except secrets, trust
+    /// decisions and paths that only make sense on this machine.
+    pub fn export_json(&self) -> AppResult<Value> {
+        let mut v = serde_json::to_value(self)?;
+        if let Some(o) = v.as_object_mut() {
+            for k in NOT_EXPORTED {
+                o.remove(*k);
+            }
+            o.insert(EXPORT_MARKER.into(), Value::from(1));
+        }
+        Ok(v)
+    }
+
+    /// These settings with a backup file's values applied (only known,
+    /// exportable fields are taken).
+    pub fn imported(&self, backup: &Value) -> AppResult<Settings> {
+        let o = backup.as_object().filter(|o| o.contains_key(EXPORT_MARKER)).ok_or_else(|| crate::error::AppError::msg("That isn't a ClaudeRust settings file."))?;
+        let known = serde_json::to_value(Settings::default())?;
+        let patch: serde_json::Map<String, Value> = o
+            .iter()
+            .filter(|(k, _)| !NOT_EXPORTED.contains(&k.as_str()) && known.get(k.as_str()).is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.patched(&Value::Object(patch))
     }
 
     /// Apply a partial JSON patch coming from the UI.
@@ -261,6 +291,29 @@ pub fn mask_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    #[test]
+    fn backup_and_restore() {
+        let mut s = Settings { oai_api_key: "secret".into(), theme: "dark".into(), claude_code_path: "/opt/claude".into(), ..Default::default() };
+        s.keybindings.insert("find".into(), json!("Mod+Shift+G"));
+        let b = s.export_json().unwrap();
+        assert!(b.get("oai_api_key").is_none() && b.get("claude_code_path").is_none() && b.get("trusted_hooks").is_none());
+        assert_eq!(b["theme"], "dark");
+        let mut here = Settings { oai_api_key: "mine".into(), claude_code_path: "/usr/bin/claude".into(), ..Default::default() };
+        here.theme = "light".into();
+        let r = here.imported(&b).unwrap();
+        assert_eq!(r.theme, "dark");
+        assert_eq!(r.keybindings["find"], "Mod+Shift+G");
+        assert_eq!(r.oai_api_key, "mine", "secrets on this machine are kept");
+        assert_eq!(r.claude_code_path, "/usr/bin/claude");
+        // a backup can't smuggle in excluded or unknown fields
+        let mut evil = b.clone();
+        evil["oai_api_key"] = json!("x");
+        evil["not_a_setting"] = json!(1);
+        assert_eq!(here.imported(&evil).unwrap().oai_api_key, "mine");
+        assert!(here.imported(&json!({"theme": "dark"})).is_err(), "needs the marker");
+    }
+
     #[test]
     fn patch_roundtrip() {
         let s = Settings::default();

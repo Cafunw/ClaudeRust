@@ -392,6 +392,20 @@ const RENDER = {
     const dl = h(`<button class="btn sm">${t('reveal')}</button>`);
     dl.onclick = () => call('open_path', { path: store.dataDir }).catch(errorToast);
     body.appendChild(row(t('data_location'), store.dataDir, dl));
+    const backup = h(`<div class="row-btns"><button class="btn sm" data-a="exp">${esc(t('settings_backup'))}</button><button class="btn sm" data-a="imp">${esc(t('settings_restore'))}</button></div>`);
+    backup.querySelector('[data-a=exp]').onclick = async () => {
+      try { await call('save_text_file', { name: 'clauderust-settings.json', content: await call('settings_export') }); } catch (e) { errorToast(e); }
+    };
+    backup.querySelector('[data-a=imp]').onclick = async () => {
+      try {
+        const paths = await call('pick_files');
+        if (!paths || !paths.length) return;
+        if (!(await confirmDialog(t('settings_restore_confirm'), { okLabel: t('settings_restore') }))) return;
+        await call('settings_import', { path: paths[0] });
+        location.reload();
+      } catch (e) { errorToast(e); }
+    };
+    body.appendChild(row(t('settings_backup_title'), t('settings_backup_d'), backup));
     const ob = h(`<button class="btn sm">${t('reset_onboarding')}</button>`);
     ob.onclick = async () => { await call('reset_onboarding'); location.reload(); };
     body.appendChild(row(t('welcome_title'), '', ob));

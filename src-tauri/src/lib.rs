@@ -401,6 +401,8 @@ pub fn run() {
             commands::pr_suggest,
             commands::pr_create,
             commands::pr_fetch,
+            commands::settings_export,
+            commands::settings_import,
             commands::improve_prompt,
             commands::slash_list,
             commands::slash_expand,

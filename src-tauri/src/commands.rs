@@ -52,6 +52,28 @@ pub fn restart_app(app: AppHandle) {
 
 // ---------------------------------------------------------------- settings
 
+/// Settings as a backup file (no secrets or machine-specific paths).
+#[tauri::command]
+pub async fn settings_export(state: St<'_>) -> AppResult<String> {
+    let v = state.settings.read().export_json()?;
+    Ok(serde_json::to_string_pretty(&v)?)
+}
+
+/// Restore settings from a backup file.
+#[tauri::command]
+pub async fn settings_import(state: St<'_>, path: String) -> AppResult<()> {
+    let st = state.inner().clone();
+    let meta = std::fs::metadata(&path)?;
+    if meta.len() > 2 * 1024 * 1024 {
+        return Err(AppError::msg("That file is too large to be a settings file."));
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|_| AppError::msg("That isn't a ClaudeRust settings file."))?;
+    let new = st.settings.read().imported(&v)?;
+    new.save(&st.db)?;
+    *st.settings.write() = new;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppResult<Value> {
     let st = state.inner().clone();

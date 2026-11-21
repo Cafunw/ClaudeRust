@@ -1180,3 +1180,4 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .hist-search { display: flex; gap: 6px; padding: 6px 10px 8px; border-bottom: 1px solid var(--border); }
 .hist-search .input { flex: 1; min-width: 0; height: 28px; font-size: 12.5px; }
 .hist-search .select { width: auto; height: 28px; font-size: 12px; }
+.row-btns { display: flex; gap: 6px; }
