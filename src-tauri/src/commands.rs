@@ -339,31 +339,52 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
 }
 
 pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq) -> AppResult<Value> {
-    let app = app.clone();
-    let conv = match (&req.conversation_id, req.new_conversation) {
-        (Some(id), _) => st.db.conv_get(id)?,
-        (None, Some(nc)) => {
-            let c = create_conversation_inner(&st, nc)?;
-            engine::emit_conv_updated(&app, &c.id);
-            c
-        }
-        (None, None) => create_conversation_inner(
-            &st,
-            NewConversation {
-                kind: None,
-                model: None,
-                project_id: None,
-                cwd: None,
-                options: json!({}),
-            },
-        )?,
+    let (conv, created) = match (&req.conversation_id, &req.new_conversation) {
+        (Some(id), _) => (st.db.conv_get(id)?, false),
+        (None, Some(nc)) => (
+            create_conversation_inner(&st, NewConversation { kind: nc.kind.clone(), model: nc.model.clone(), project_id: nc.project_id.clone(), cwd: nc.cwd.clone(), options: nc.options.clone() })?,
+            true,
+        ),
+        (None, None) => (create_conversation_inner(&st, NewConversation { kind: None, model: None, project_id: None, cwd: None, options: json!({}) })?, true),
     };
-    if st.runs.lock().contains_key(&conv.id) {
-        return Err(AppError::msg("Claude is still responding. Stop the response or wait for it to finish."));
+    let r = send_into(app, &st, &conv, &req).await;
+    if created {
+        match &r {
+            Ok(_) => engine::emit_conv_updated(app, &conv.id),
+            // a conversation made just for a message that couldn't be sent
+            // (a hook blocked it, an attachment is gone…) isn't kept
+            Err(_) => discard_new_conversation(&st, &conv),
+        }
     }
+    r
+}
+
+/// Remove a conversation that never got a message (and its worktree).
+fn discard_new_conversation(st: &Arc<AppState>, conv: &crate::db::Conversation) {
+    let _ = st.db.conv_delete(&conv.id);
+    st.code_sessions.lock().remove(&conv.id);
+    if conv.options["worktree"].is_object() {
+        let info = conv.options["worktree"].clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = crate::worktree::remove(&info) {
+                log::warn!("removing an unused worktree failed: {e}");
+            }
+        });
+    }
+}
+
+async fn send_into(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> AppResult<Value> {
+    // reserved before anything is awaited: a second send (queued message,
+    // watch auto-fix, a double press) can't slip in between the check and
+    // the start of the turn
+    let slot = engine::RunSlot::reserve(st, &conv.id, "Claude is still responding. Stop the response or wait for it to finish.")?;
+    // attachments are only used up once the message is stored
     let atts: Vec<attachments::Attachment> = {
-        let mut staged = st.staged.lock();
-        req.attachment_ids.iter().filter_map(|id| staged.remove(id)).collect()
+        let staged = st.staged.lock();
+        req.attachment_ids
+            .iter()
+            .map(|id| staged.get(id).cloned().ok_or_else(|| AppError::msg("An attachment is no longer available. Remove it and attach it again.")))
+            .collect::<AppResult<_>>()?
     };
     if req.text.trim().is_empty() && atts.is_empty() {
         return Err(AppError::msg("Message is empty."));
@@ -372,14 +393,12 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     if !req.text.trim().is_empty() {
         content.push(json!({"type": "text", "text": req.text}));
     }
-    // @mentions: include the files' contents (the Claude Code CLI expands
-    // them itself).
     // Hooks (built-in agent): SessionStart on the first message, then
     // UserPromptSubmit, which can add context or block the message.
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
         if let Some(cwd) = &conv.cwd {
             let root = std::path::PathBuf::from(cwd);
-            let hooks = engine::hook_config(&st, &root);
+            let hooks = engine::hook_config(st, &root);
             if let Some((r, hash, cmds)) = &hooks.untrusted {
                 let _ = app.emit("hooks-untrusted", json!({"conversation_id": conv.id, "root": r, "hash": hash, "commands": cmds}));
             }
@@ -402,17 +421,23 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     // engines; the Claude Code CLI fetches by itself).
     if conv.options["engine"] != crate::claudecode::ENGINE {
         for u in crate::filesearch::url_mentions(&req.text) {
+            if slot.cancelled() {
+                return Err(AppError::Cancelled);
+            }
             if let Some(b) = crate::filesearch::fetch_url_block(&u).await {
                 content.push(b);
             }
         }
+    }
+    if slot.cancelled() {
+        return Err(AppError::Cancelled);
     }
     // Pick up edits to CLAUDE.md / AGENTS.md since the session started.
     if conv.kind == "code" && conv.options["engine"] != crate::claudecode::ENGINE {
         if let Some(cwd) = &conv.cwd {
             let mem = crate::memory::load(std::path::Path::new(cwd));
             if conv.options["memory"].as_str() != Some(mem.as_str()) {
-                engine::update_conv_options(&st, &conv.id, |o| o["memory"] = json!(mem));
+                engine::update_conv_options(st, &conv.id, |o| o["memory"] = json!(mem));
             }
         }
     }
@@ -428,6 +453,9 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     if plan {
         content.push(json!({"type": "text", "text": crate::prompts::PLAN_MODE_REMINDER}));
     }
+    // re-read: the conversation may have changed while hooks / fetches ran
+    // (a /compact summary arriving, the leaf moving)
+    let conv = st.db.conv_get(&conv.id)?;
     let parent = if req.edit {
         req.parent_id.clone().filter(|p| !p.is_empty())
     } else {
@@ -439,15 +467,11 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     });
     // A /compact summary made at this point of the conversation applies to
     // the message that follows it.
-    if let Some(pc) = conv.options["pending_compact"].as_object() {
+    let pending = conv.options["pending_compact"].as_object().cloned();
+    if let Some(pc) = &pending {
         if pc.get("upto").and_then(|v| v.as_str()) == parent.as_deref() {
             meta["compact_summary"] = pc.get("summary").cloned().unwrap_or(Value::Null);
         }
-        engine::update_conv_options(&st, &conv.id, |o| {
-            if let Some(m) = o.as_object_mut() {
-                m.remove("pending_compact");
-            }
-        });
     }
     let msg = Message {
         id: new_id(),
@@ -461,16 +485,27 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     st.db.msg_insert(&msg)?;
     st.db.conv_set_leaf(&conv.id, Some(&msg.id))?;
     let _ = st.db.fts_index(&conv.id, &msg.id, &req.text);
-    engine::start(&app, &st, &conv.id, &msg.id)?;
+    if pending.is_some() {
+        engine::update_conv_options(st, &conv.id, |o| {
+            if let Some(m) = o.as_object_mut() {
+                m.remove("pending_compact");
+            }
+        });
+    }
+    {
+        let mut staged = st.staged.lock();
+        for id in &req.attachment_ids {
+            staged.remove(id);
+        }
+    }
+    engine::start_reserved(app, slot, &msg.id);
     Ok(json!({"conversation_id": conv.id, "message_id": msg.id}))
 }
 
 #[tauri::command]
 pub async fn regenerate(app: AppHandle, state: St<'_>, conversation_id: String, user_message_id: String, model: Option<String>) -> AppResult<()> {
     let st = state.inner().clone();
-    if st.runs.lock().contains_key(&conversation_id) {
-        return Err(AppError::msg("Claude is still responding. Stop the response or wait for it to finish."));
-    }
+    let slot = engine::RunSlot::reserve(&st, &conversation_id, "Claude is still responding. Stop the response or wait for it to finish.")?;
     let msg = st.db.msg_get(&user_message_id)?;
     if msg.conversation_id != conversation_id {
         return Err(AppError::msg("Message not found in this conversation."));
@@ -482,21 +517,21 @@ pub async fn regenerate(app: AppHandle, state: St<'_>, conversation_id: String, 
         return Err(AppError::msg("Can only regenerate from a user message."));
     }
     st.db.conv_set_leaf(&conversation_id, Some(&user_message_id))?;
-    engine::start(&app, &st, &conversation_id, &user_message_id)
+    engine::start_reserved(&app, slot, &user_message_id);
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    if st.runs.lock().contains_key(&conversation_id) {
-        return Err(AppError::msg("Wait for the response to finish before switching versions."));
-    }
+    let slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the response to finish before switching versions.")?;
     let nodes = st.db.tree_nodes(&conversation_id)?;
     if !nodes.iter().any(|n| n.id == message_id) {
         return Err(AppError::msg("Message not found in this conversation."));
     }
     let leaf = view::latest_leaf(&nodes, &message_id);
     st.db.conv_set_leaf(&conversation_id, Some(&leaf))?;
+    drop(slot);
     view::conversation_view(&st, &conversation_id).await
 }
 
@@ -1445,9 +1480,9 @@ pub async fn worktree_commit(app: AppHandle, state: St<'_>, conversation_id: Str
 #[tauri::command]
 pub async fn rewind(app: AppHandle, state: St<'_>, conversation_id: String, message_id: String, code: bool, conversation: bool) -> AppResult<Value> {
     let st = state.inner().clone();
-    if st.runs.lock().contains_key(&conversation_id) {
-        return Err(AppError::msg("Stop the current response before rewinding."));
-    }
+    // held for the whole rewind: no turn may start while files and the
+    // conversation are being put back
+    let _slot = engine::RunSlot::reserve(&st, &conversation_id, "Stop the current response before rewinding.")?;
     let conv = st.db.conv_get(&conversation_id)?;
     let msg = st.db.msg_get(&message_id)?;
     if msg.conversation_id != conversation_id || msg.role != "user" {
@@ -1626,9 +1661,9 @@ pub async fn memory_append(state: St<'_>, conversation_id: String, scope: String
 #[tauri::command]
 pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id: String, instructions: Option<String>) -> AppResult<Value> {
     let st = state.inner().clone();
-    if st.runs.lock().contains_key(&conversation_id) {
-        return Err(AppError::msg("Wait for the current response to finish before compacting."));
-    }
+    // held while the summary is written: a message sent meanwhile would be
+    // summarized again and miss this summary
+    let slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the current response to finish before compacting.")?;
     let conv = st.db.conv_get(&conversation_id)?;
     if conv.model.starts_with(crate::oai::PREFIX) {
         return Err(AppError::msg("Compaction uses a Claude model; switch this conversation to a Claude model first."));
@@ -1637,7 +1672,10 @@ pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id
     let path = st.db.path_to(&leaf)?;
     let before = crate::compact::context_tokens(&path[crate::compact::start_index(&path).unwrap_or(0)..]);
     let _ = app.emit("compacting", json!({"conversation_id": conversation_id, "auto": false}));
-    let summary = crate::compact::summarize(&st, &conv.model, &path, instructions.as_deref()).await;
+    let summary = tokio::select! {
+        s = crate::compact::summarize(&st, &conv.model, &path, instructions.as_deref()) => s,
+        _ = slot.cancel.cancelled() => Err(AppError::Cancelled),
+    };
     let summary = match summary {
         Ok(s) => s,
         Err(e) => {

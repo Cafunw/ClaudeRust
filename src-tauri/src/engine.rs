@@ -603,19 +603,59 @@ fn live_content(base: &[Value], acc: &Accumulator) -> (Value, HashSet<String>) {
 
 // ------------------------------------------------------------ the engine
 
-pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str) -> AppResult<()> {
-    let cancel = CancellationToken::new();
-    {
+/// A conversation reserved for one operation (a turn being prepared, a
+/// rewind, a compaction): nothing else can start a turn in it meanwhile.
+/// The reservation ends when this is dropped, unless it was handed to
+/// `start_reserved`. Stop cancels its token like a running turn's.
+pub struct RunSlot {
+    st: Arc<AppState>,
+    conv_id: String,
+    pub cancel: CancellationToken,
+    held: bool,
+}
+
+impl RunSlot {
+    /// Reserve `conv_id`, or fail with `busy` when a turn (or another
+    /// reserved operation) is under way there.
+    pub fn reserve(st: &Arc<AppState>, conv_id: &str, busy: &str) -> AppResult<RunSlot> {
+        let cancel = CancellationToken::new();
         let mut runs = st.runs.lock();
         if runs.contains_key(conv_id) {
-            return Err(AppError::msg("Claude is already responding in this conversation."));
+            return Err(AppError::msg(busy));
         }
         runs.insert(conv_id.to_string(), cancel.clone());
+        Ok(RunSlot { st: st.clone(), conv_id: conv_id.to_string(), cancel, held: true })
     }
-    emit_state(app, conv_id, true, None);
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        if self.held {
+            self.st.runs.lock().remove(&self.conv_id);
+        }
+    }
+}
+
+pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str) -> AppResult<()> {
+    let slot = RunSlot::reserve(st, conv_id, "Claude is already responding in this conversation.")?;
+    start_reserved(app, slot, parent_id);
+    Ok(())
+}
+
+/// Start the turn for a conversation reserved with `RunSlot::reserve`.
+pub fn start_reserved(app: &AppHandle, mut slot: RunSlot, parent_id: &str) {
+    // the running turn owns the reservation from here (its task removes it)
+    slot.held = false;
+    let st = slot.st.clone();
+    let conv_id = slot.conv_id.clone();
+    let cancel = slot.cancel.clone();
+    drop(slot);
+    emit_state(app, &conv_id, true, None);
     let app = app.clone();
-    let st = st.clone();
-    let conv_id = conv_id.to_string();
     let parent_id = parent_id.to_string();
     tauri::async_runtime::spawn(async move {
         use futures_util::FutureExt;
@@ -640,7 +680,6 @@ pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str
             }
         }
     });
-    Ok(())
 }
 
 /// Desktop notification when a session needs the user (a permission
@@ -1693,6 +1732,26 @@ async fn title_via_api(st: &AppState, user_text: &str, assistant_text: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(crate) fn test_state() -> Arc<AppState> {
+        let dir = std::env::temp_dir().join(format!("cr-state-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")))
+    }
+
+    #[test]
+    fn a_reserved_conversation_refuses_another_turn_until_released() {
+        let st = test_state();
+        let a = RunSlot::reserve(&st, "c", "busy").unwrap();
+        // what a second send / regenerate / rewind / compact would hit
+        assert_eq!(RunSlot::reserve(&st, "c", "busy").err().map(|e| e.to_string()), Some("busy".into()));
+        assert!(RunSlot::reserve(&st, "other", "busy").is_ok(), "other conversations aren't affected");
+        // Stop reaches a reserved conversation like a running one
+        stop(&st, "c");
+        assert!(a.cancelled());
+        drop(a);
+        assert!(RunSlot::reserve(&st, "c", "busy").is_ok(), "released on drop (any early return)");
+    }
 
     fn rc(fp: &str) -> ReqCtx {
         ReqCtx {
