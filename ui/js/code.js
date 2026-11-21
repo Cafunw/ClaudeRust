@@ -115,17 +115,38 @@ export async function renderCode(view) {
   $('.composer-slot', view).appendChild(composer.el);
 
   const list = $('.sessions', view);
-  if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
   const statusOf = (id) => ([...store.permissions.values()].some((p) => p.conversation_id === id) ? 'waiting' : store.running.has(id) ? 'running' : '');
-  for (const s of sessions) {
-    const status = statusOf(s.id);
-    const row = h(`<button class="list-item" data-id="${esc(s.id)}">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${esc(s.cwd || '')} · ${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
-    row.addEventListener('click', (e) => {
-      if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderCode(view), onDelete: () => renderCode(view) }); return; }
-      emit('navigate', { name: 'chat', params: { id: s.id } });
-    });
-    list.appendChild(row);
-  }
+  if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
+  // with many sessions: a filter, and sessions grouped by folder
+  const filter = h(`<div class="search-box sess-filter ${sessions.length > 6 ? '' : 'hidden'}">${icon('search', 15)}<input class="input" placeholder="${esc(t('sess_filter'))}"></div>`);
+  list.before(filter);
+  const drawSessions = (q) => {
+    list.innerHTML = '';
+    const ql = (q || '').trim().toLowerCase();
+    const shown = sessions.filter((s) => !ql || `${s.title || ''} ${s.cwd || ''}`.toLowerCase().includes(ql));
+    if (sessions.length && !shown.length) { list.innerHTML = `<div class="muted small" style="padding:10px 2px">${esc(t('no_results'))}</div>`; return; }
+    const groups = new Map();
+    for (const s of shown) {
+      const k = s.cwd || '';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(s);
+    }
+    const grouped = groups.size > 1 && shown.length > 6;
+    for (const [dir, items] of groups) {
+      if (grouped) list.appendChild(h(`<div class="sess-group" title="${esc(dir)}">${icon('folder', 13)} ${esc(dir.split(/[\\/]/).filter(Boolean).pop() || dir || '—')} <span class="muted">${items.length}</span></div>`));
+      for (const s of items) {
+        const status = statusOf(s.id);
+        const row = h(`<button class="list-item" data-id="${esc(s.id)}">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${grouped ? '' : `${esc(s.cwd || '')} · `}${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderCode(view), onDelete: () => renderCode(view) }); return; }
+          emit('navigate', { name: 'chat', params: { id: s.id } });
+        });
+        list.appendChild(row);
+      }
+    }
+  };
+  if (sessions.length) drawSessions('');
+  filter.querySelector('input').addEventListener('input', (e) => drawSessions(e.target.value));
   // keep the status chips current while this page is shown
   const refreshStatus = () => {
     if (!list.isConnected) return;
