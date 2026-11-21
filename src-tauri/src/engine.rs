@@ -795,6 +795,18 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
     }
 }
 
+/// The fallback model for an overloaded `conv.model` and the request rebuilt
+/// for it (its own thinking / effort / tool settings).
+async fn overload_switch(st: &AppState, conv: &Conversation, settings: &Settings, path: &[Message]) -> Option<(String, Value, Vec<String>)> {
+    let fb = crate::models::overload_fallback(&conv.model, &settings.overload_fallback)?;
+    let mut c2 = conv.clone();
+    c2.model = fb.clone();
+    let rc2 = build_request_context(st, &c2, settings).await.ok()?;
+    log::warn!("{} is overloaded; retrying with {fb}", conv.model);
+    let (body, betas) = base_body(&rc2, settings, &c2, build_messages(path, &rc2));
+    Some((fb, body, betas))
+}
+
 /// The API said the model is overloaded (after the client's own retries).
 fn is_overloaded(e: &AppError) -> bool {
     e.status() == 529 || e.kind() == "overloaded_error"
@@ -942,12 +954,25 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
                 Err(e) => {
                     // Overloaded before anything was produced: try another model.
                     if content.is_empty() && is_overloaded(&e) && am.meta["overload_fallback"].is_null() {
-                        if let Some(fb) = crate::models::overload_fallback(&conv.model, &settings.overload_fallback) {
-                            let mut c2 = conv.clone();
-                            c2.model = fb.clone();
-                            if let Ok(rc2) = build_request_context(st, &c2, &settings).await {
-                                log::warn!("{} is overloaded; retrying with {fb}", conv.model);
-                                let (b2, bt2) = base_body(&rc2, &settings, &c2, build_messages(&path, &rc2));
+                        if let Some((fb, b2, bt2)) = overload_switch(st, &conv, &settings, &path).await {
+                            body = b2;
+                            betas = bt2;
+                            am.meta["overload_fallback"] = json!({"from": conv.model, "to": fb});
+                            am.meta["model"] = json!(fb);
+                            turn_model = Some(fb);
+                            continue;
+                        }
+                    }
+                    error = Some(e);
+                    break;
+                }
+                Ok(out) => {
+                    let acc = out.acc;
+                    // the same when the overload arrives as an error event in
+                    // the stream, before any content
+                    if let Some(e) = &out.error {
+                        if content.is_empty() && acc.content().is_empty() && is_overloaded(e) && am.meta["overload_fallback"].is_null() {
+                            if let Some((fb, b2, bt2)) = overload_switch(st, &conv, &settings, &path).await {
                                 body = b2;
                                 betas = bt2;
                                 am.meta["overload_fallback"] = json!({"from": conv.model, "to": fb});
@@ -957,11 +982,6 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
                             }
                         }
                     }
-                    error = Some(e);
-                    break;
-                }
-                Ok(out) => {
-                    let acc = out.acc;
                     content.extend(acc.content());
                     if let Some(m) = acc.model() {
                         model_used = Some(m);

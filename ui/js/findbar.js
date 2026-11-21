@@ -34,21 +34,27 @@ function search(q) {
   });
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
+  // match on the original text (case-insensitively), so offsets stay right
+  // even where lower-casing changes a string's length (e.g. "İ")
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
   for (const node of nodes) {
-    let text = node.nodeValue;
+    if (hits.length >= 2000) break;
+    const text = node.nodeValue;
     const frag = document.createDocumentFragment();
-    let i;
-    while ((i = text.toLowerCase().indexOf(ql)) >= 0) {
-      if (i > 0) frag.appendChild(document.createTextNode(text.slice(0, i)));
-      const m = document.createElement('mark');
-      m.className = 'find-hit';
-      m.textContent = text.slice(i, i + q.length);
-      frag.appendChild(m);
-      hits.push(m);
-      text = text.slice(i + q.length);
-      if (hits.length > 2000) break;
+    let last = 0;
+    for (const m of text.matchAll(re)) {
+      if (!m[0]) continue;
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const mk = document.createElement('mark');
+      mk.className = 'find-hit';
+      mk.textContent = m[0];
+      frag.appendChild(mk);
+      hits.push(mk);
+      last = m.index + m[0].length;
+      if (hits.length >= 2000) break;
     }
-    if (text) frag.appendChild(document.createTextNode(text));
+    if (last === 0) continue;
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
     node.parentNode.replaceChild(frag, node);
   }
   idx = hits.length ? 0 : -1;

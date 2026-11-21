@@ -80,13 +80,16 @@ async function sendToChat(s, fix) {
   const c = chat.current();
   if (!c || !c.composer) return;
   const ask = fix ? t('term_fix_prompt') : '';
+  // keep what's already typed in the box, then add ours
+  const join = (...parts) => parts.filter((p) => p && p.trim()).join('\n\n');
+  const draft = c.composer.getText();
   try {
     if (text.length > INLINE_MAX) {
       c.composer.addStaged(await call('stage_text', { name: 'Terminal output.txt', text }));
-      if (ask) c.composer.setText(ask);
+      if (ask) c.composer.setText(join(draft, ask));
     } else {
       const block = `${sel && sel.trim() ? t('term_selection_intro') : t('term_output_intro')}\n\`\`\`\n${text}\n\`\`\`\n`;
-      c.composer.setText(ask ? `${ask}\n\n${block}` : block);
+      c.composer.setText(join(draft, ask, block));
     }
     if (fix) c.composer.send();
     else c.composer.focus();

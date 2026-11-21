@@ -2485,7 +2485,9 @@ pub async fn fork_conversation(app: AppHandle, state: St<'_>, conversation_id: S
         .map(str::to_string)
         .or(conv.cwd.clone());
     let new = st.db.conv_create(&conv.kind, &conv.model, conv.project_id.as_deref(), cwd.as_deref(), &options)?;
-    for (id, content) in st.db.copy_path(&path, &new.id)? {
+    // the CLI finds its sessions by folder: resume only in the same one
+    let same_folder = cwd == conv.cwd;
+    for (id, content) in st.db.copy_path(&path, &new.id, same_folder)? {
         let _ = st.db.fts_index(&new.id, &id, &render::plain_text(&content));
     }
     st.db.conv_set_title(&new.id, &title)?;

@@ -282,15 +282,36 @@ pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
 /// directories first, then files, each by name (case-insensitive).
 pub fn children(root: &Path, dir: &str) -> Vec<(String, bool)> {
     let dir = dir.trim_matches('/');
-    let all = list(root);
-    let mut out: Vec<(String, bool)> = all
-        .iter()
-        .filter(|(p, _)| match p.rsplit_once('/') {
-            Some((parent, _)) => parent == dir,
-            None => dir.is_empty(),
+    // one level at a time (the cached full list stops at MAX_FILES, so a big
+    // folder early in the walk would hide later ones); never outside `root`
+    if Path::new(dir).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return vec![];
+    }
+    let base = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+    let walker = ignore::WalkBuilder::new(&base)
+        .max_depth(Some(1))
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .filter_entry(|e| {
+            let n = e.file_name().to_string_lossy();
+            !(n == ".git" || n == "node_modules" || n == "target" || n == ".DS_Store")
         })
-        .cloned()
-        .collect();
+        .build();
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for e in walker.flatten() {
+        if e.depth() == 0 {
+            continue;
+        }
+        let Ok(rel) = e.path().strip_prefix(root) else { continue };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        out.push((rel, e.file_type().map(|t| t.is_dir()).unwrap_or(false)));
+        if out.len() >= MAX_FILES {
+            break;
+        }
+    }
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
     out
 }
@@ -366,6 +387,10 @@ mod tests {
         assert_eq!(names(""), vec!["Docs/", "src/", "A.md", "b.txt", "blob.bin"]);
         assert_eq!(names("src"), vec!["src/inner/", "src/main.rs"]);
         assert_eq!(names("src/inner/"), vec!["src/inner/a.rs"]);
+        assert!(names("../").is_empty());
+        assert!(names("/etc").is_empty());
+        std::fs::write(d.join(".gitignore"), "src/inner/\n").unwrap();
+        assert_eq!(names("src"), vec!["src/main.rs"], "parent .gitignore applies");
 
         let v = view_file(&d, "src/main.rs").unwrap();
         assert_eq!(v["lines"], 3);

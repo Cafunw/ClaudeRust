@@ -372,7 +372,9 @@ async fn run_once(
         args.push("--max-budget-usd".into());
         args.push(budget.to_string());
     }
-    let mut with_history = false;
+    // earlier messages but no CLI session to resume (a fork into another
+    // folder, or a conversation begun with the built-in engine): replay them
+    let mut with_history = prev.is_none() && path.len() > 1;
     if let Some(p) = prev {
         if let Some(sid) = p.meta["cc_session"].as_str() {
             if fresh || !transcript_exists(sid) {

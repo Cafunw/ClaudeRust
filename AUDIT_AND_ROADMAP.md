@@ -136,3 +136,17 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 | 14 | Compaction ran for OpenAI-compatible chats | Skipped / refused for those models |
 | 15 | Revert treated paths as git pathspec patterns | `--literal-pathspecs` |
 
+
+## Second review (D19–D25, independent review agent) — 9 findings, all fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Overload fallback only ran for HTTP 529; an `overloaded_error` event inside a 200 stream failed the turn | Same switch (shared `overload_switch`) when the stream's error is an overload and nothing was produced; verified with a mock that sends the error in the stream |
+| 2 | Digest skipped picks inside the 40-line "Beginning", so an early error's long stack trace was cut | Picks start after the beginning section instead of being dropped; trace length cap 40 → 150 lines; test with a 60-frame startup trace |
+| 3 | Digest size estimated in bytes ≤ 400 but lines are cut at 400 characters (CJK overshoot ×3); a single 2 MB line gave a 400-character digest | Cost = bytes as shown; lines over 4 KB are cut into 1 KB pieces before classifying (noted in the header); tests for CJK and a 2 MB one-line file |
+| 4 | Terminal "Add output" / "Fix" replaced the text being typed | Draft kept, output appended |
+| 5 | Files tree came from the capped full list (60k), so later folders could vanish in big repos | One level per call (`max_depth(1)`, same ignore rules, parent `.gitignore` honoured); non-normal path components refused; test |
+| 6 | Forking a Claude Code session that ran in a worktree kept CLI session links the CLI can't find from the original folder | Links dropped when the fork's folder differs; the CLI engine replays earlier messages whenever there's no session to resume |
+| 7 | Line mentions of paths with spaces lost the line (`@"a b.rs"#L12`) | Written as `@"a b.rs#L12"` |
+| 8 | Files filter could show results of an older query | Sequence number; stale replies ignored |
+| 9 | Find highlighted the wrong span when lower-casing changes length; hit cap checked only per node | Case-insensitive Unicode regex on the original text; cap checked across nodes |

@@ -157,6 +157,30 @@ fn push_capped(out: &mut String, s: &str, cap: usize) -> bool {
     true
 }
 
+/// Lines of `text`, with very long ones (minified code, progress bars
+/// redrawn with `\r`) cut into pieces so each can be classified and shown.
+/// Returns whether anything was cut.
+fn pieces(text: &str) -> (Vec<&str>, bool) {
+    const LONG: usize = 4000;
+    const PIECE: usize = 1000;
+    let mut out = Vec::new();
+    let mut split = false;
+    for l in text.lines() {
+        if l.len() <= LONG {
+            out.push(l);
+            continue;
+        }
+        split = true;
+        let mut rest = l;
+        while !rest.is_empty() {
+            let cut = head(rest, PIECE).len().max(rest.chars().next().map(char::len_utf8).unwrap_or(1));
+            out.push(&rest[..cut]);
+            rest = &rest[cut..];
+        }
+    }
+    (out, split)
+}
+
 pub struct Digest {
     pub text: String,
     pub lines: usize,
@@ -167,7 +191,7 @@ pub struct Digest {
 /// Build the digest. `path`, when known, is mentioned so an agent can read
 /// other parts of the file itself.
 pub fn digest(name: &str, text: &str, path: Option<&std::path::Path>) -> Digest {
-    let lines: Vec<&str> = text.lines().collect();
+    let (lines, split) = pieces(text);
     let n = lines.len();
     let mut groups: HashMap<String, Group> = HashMap::new();
     let (mut errors, mut warnings) = (0usize, 0usize);
@@ -201,9 +225,10 @@ pub fn digest(name: &str, text: &str, path: Option<&std::path::Path>) -> Digest 
 
     let mut out = String::new();
     out.push_str(&format!(
-        "[Digest of {name} ({}, {} lines): the file is too large to include in full. Below: an overview, each distinct error and warning with how often it occurs, the lines around the first occurrences (with stack traces), and the beginning and end of the file. Line numbers refer to the original file.{}]\n\n",
+        "[Digest of {name} ({}, {} lines): the file is too large to include in full. Below: an overview, each distinct error and warning with how often it occurs, the lines around the first occurrences (with stack traces), and the beginning and end of the file. Line numbers refer to the original file.{}{}]\n\n",
         human_size(text.len()),
         thousands(n),
+        if split { " Very long lines were cut into 1,000-byte pieces; line numbers count those pieces." } else { "" },
         path.map(|p| format!(" The full file is at {}.", p.display())).unwrap_or_default()
     ));
     out.push_str("## Overview\n");
@@ -254,11 +279,13 @@ pub fn digest(name: &str, text: &str, path: Option<&std::path::Path>) -> Digest 
     // Beginning and end: more of them when there's little else to show.
     let quiet = errors == 0 && warnings == 0;
     let (head_cap, tail_cap) = if quiet { (60 * 1024, 40 * 1024) } else { (6 * 1024, 30 * 1024) };
+    // bytes a line takes in the digest (as shown, with its number)
+    let cost = |l: &str| show(l).len() + 11;
     let head_end = {
         let mut s = 0usize;
         let mut k = 0;
-        while k < n && k < if quiet { 2000 } else { 40 } && s + lines[k].len() < head_cap {
-            s += lines[k].len().min(MAX_LINE) + 10;
+        while k < n && k < if quiet { 2000 } else { 40 } && s + cost(lines[k]) < head_cap {
+            s += cost(lines[k]);
             k += 1;
         }
         k
@@ -266,8 +293,8 @@ pub fn digest(name: &str, text: &str, path: Option<&std::path::Path>) -> Digest 
     let tail_start = {
         let mut s = 0usize;
         let mut k = n;
-        while k > head_end && n - k < if quiet { 2000 } else { 150 } && s + lines[k - 1].len().min(MAX_LINE) + 10 < tail_cap {
-            s += lines[k - 1].len().min(MAX_LINE) + 10;
+        while k > head_end && n - k < if quiet { 2000 } else { 150 } && s + cost(lines[k - 1]) < tail_cap {
+            s += cost(lines[k - 1]);
             k -= 1;
         }
         k
@@ -300,23 +327,26 @@ pub fn digest(name: &str, text: &str, path: Option<&std::path::Path>) -> Digest 
         }
     }
     let ctx_cap = BUDGET.saturating_sub(out.len() + head_txt.len() + tail_txt.len());
-    let cost = |l: &str| l.len().min(MAX_LINE) + 10;
     let mut shown = vec![false; n];
     let mut used = 0usize;
     for &i in &picks {
-        if i < head_end || i >= tail_start {
-            continue; // already in the beginning or end
+        if i >= tail_start {
+            continue; // already in the end
         }
         let mut to = i + 1;
-        while to < n && to - i <= 40 && is_continuation(lines[to]) {
+        while to < n && to - i <= 150 && is_continuation(lines[to]) {
             to += 1;
         }
         // the closing "SomeError: message" line of a Python traceback
         if to > i + 1 && to < n && !lines[to].starts_with(char::is_whitespace) && ERROR_RE.is_match(head(lines[to], 200)) {
             to += 1;
         }
+        // an error in the beginning still gets the rest of its stack trace
         let from = i.saturating_sub(3).max(head_end);
         let to = (to + 2).min(tail_start).min(n);
+        if from >= to {
+            continue;
+        }
         let added: usize = (from..to).filter(|&k| !shown[k]).map(|k| cost(lines[k])).sum();
         if used + added > ctx_cap {
             continue;
@@ -413,6 +443,42 @@ mod tests {
         assert!(d.text.contains("server starting on :8080"));
         assert!(d.text.contains("shutting down"));
         assert_eq!(d.warnings, 5);
+    }
+
+    #[test]
+    fn early_error_keeps_its_stack_trace() {
+        let mut s = String::new();
+        for i in 0..20 {
+            s.push_str(&format!("2026-11-20 01:00:{i:02} INFO boot step {i}\n"));
+        }
+        s.push_str("2026-11-20 01:00:20 ERROR Startup failed\n");
+        for f in 0..60 {
+            s.push_str(&format!("\tat com.acme.Boot.step{f}(Boot.java:{f})\n"));
+        }
+        s.push_str("Caused by: java.io.IOException: disk full\n");
+        for i in 0..30_000 {
+            s.push_str(&format!("2026-11-20 01:01:00 INFO heartbeat {i}\n"));
+        }
+        let d = digest("app.log", &s, None);
+        assert!(d.text.contains("Boot.step55"), "trace beyond the beginning section is kept");
+        assert!(d.text.contains("Caused by: java.io.IOException: disk full"));
+    }
+
+    #[test]
+    fn wide_characters_and_long_lines_stay_in_budget() {
+        let cjk: String = (0..12_000).map(|i| format!("{i} 日本語のテキスト行です。これは長い行のサンプルで、制限を確認するためのものです。日本語のテキスト行です。これは長い行のサンプル\n")).collect();
+        assert!(cjk.len() > TEXT_DIGEST_OVER);
+        let d = digest("notes.txt", &cjk, None);
+        assert!(d.text.len() <= BUDGET + 8 * 1024, "digest is {} bytes", d.text.len());
+        // one 2 MB line with an error in the middle
+        let mut one = "x".repeat(1_000_000);
+        one.push_str(" ERROR: checksum mismatch ");
+        one.push_str(&"y".repeat(1_000_000));
+        let d = digest("min.js", &one, None);
+        assert!(d.errors >= 1);
+        assert!(d.text.contains("checksum mismatch"));
+        assert!(d.text.contains("cut into 1,000-byte pieces"));
+        assert!(d.text.len() <= BUDGET + 8 * 1024);
     }
 
     #[test]
