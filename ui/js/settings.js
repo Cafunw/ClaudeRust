@@ -40,7 +40,7 @@ export function openSettings(tab = 'general') {
     b.onclick = () => show(id);
     nav.appendChild(b);
   }
-  const m = modal({ title: t('settings'), body: root, wide: true, onClose: () => { current = null; stopRecording(); off(); } });
+  const m = modal({ title: t('settings'), body: root, wide: true, cls: 'tall', onClose: () => { current = null; stopRecording(); off(); } });
   m.body.style.padding = '0';
   m.body.style.flex = '1';
   m.body.style.minHeight = '0';
@@ -515,6 +515,6 @@ function editConfig(status, redraw) {
   const saveB = button(t('save_restart'), 'primary', async () => {
     try { const r = await call('mcp_save_config', { config: ta.value }); toast(t('config_saved')); m.close(); redraw(r); } catch (e) { errorToast(e); }
   });
-  const m = modal({ title: 'claude_desktop_config.json', body, footer: [button(t('cancel'), '', () => m.close()), saveB], wide: true });
+  const m = modal({ title: 'claude_desktop_config.json', body, footer: [button(t('cancel'), '', () => m.close()), saveB], wide: true, cls: 'tall' });
   m.el.style.height = 'auto';
 }

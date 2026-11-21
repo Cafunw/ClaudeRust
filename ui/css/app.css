@@ -261,6 +261,21 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 .help { color: var(--text-2); font-size: 12.5px; margin-top: 6px; }
 .field { margin-bottom: 18px; }
 
+/* plain checkboxes, drawn in the theme's colours (WebKitGTK keeps the
+   light GTK one in dark mode); the .switch rules below override them */
+input[type=checkbox] {
+  -webkit-appearance: none; appearance: none; width: 15px; height: 15px; flex: none;
+  border: 1.5px solid var(--text-3); border-radius: 4px; background: var(--bg-0);
+  display: inline-grid; place-content: center; vertical-align: -3px; margin: 0 6px 0 2px; cursor: pointer;
+}
+input[type=checkbox]::before {
+  content: ''; width: 9px; height: 9px; background: #fff; transform: scale(0); transition: transform .1s;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+}
+input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
+input[type=checkbox]:checked::before { transform: scale(1); }
+input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .switch { position: relative; width: 34px; height: 20px; flex-shrink: 0; display: inline-block; }
 .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
 .switch .track { position: absolute; inset: 0; background: var(--bg-4); border-radius: 20px; transition: background 0.15s; cursor: pointer; }
@@ -642,7 +657,9 @@ input:focus-visible, textarea:focus-visible { outline: none; }
   background: var(--bg-0); border-radius: 18px; box-shadow: var(--shadow-lg); width: min(520px, 100%); max-height: 88vh;
   display: flex; flex-direction: column; border: 1px solid var(--border); animation: pop .15s var(--ease);
 }
-.modal.wide { width: min(900px, 100%); height: min(720px, 88vh); }
+.modal.wide { width: min(900px, 100%); max-height: min(720px, 88vh); }
+/* a fixed height where the content changes under tabs or is an editor */
+.modal.tall { height: min(720px, 88vh); }
 .modal-head { padding: 18px 20px 6px; display: flex; align-items: center; gap: 10px; }
 .modal-head h2 { margin: 0; font-size: 18px; font-weight: 600; flex: 1; }
 .modal-body { padding: 10px 20px; overflow-y: auto; }

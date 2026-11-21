@@ -44,6 +44,7 @@ export async function openConversation(id, { focus = true } = {}) {
   const bottom = h(`<div class="chat-bottom"><div class="inner"><div class="perm-area"></div><div class="composer-slot"></div><div class="composer-hint"></div></div></div>`);
   v.append(top, scroll, bottom);
 
+  if (cur && cur.ro) cur.ro.disconnect();
   cur = {
     id,
     conv,
@@ -96,6 +97,11 @@ export async function openConversation(id, { focus = true } = {}) {
   for (const p of data.pending_permissions || []) showPermission(p);
   scroll.addEventListener('scroll', onScroll);
   scrollToBottom(true);
+  // math, highlighted code and images lay out a moment later: keep the end
+  // in view while you haven't scrolled away
+  const state = cur;
+  state.ro = new ResizeObserver(() => { if (cur === state && cur.stick !== false) scrollToBottom(false); });
+  state.ro.observe(state.colEl);
   if (focus) composer.focus();
   artifacts.onConversationOpened(id, cur.artifacts);
   showQueue(id);
@@ -306,7 +312,12 @@ function scrollToBottom(force) {
 
 function onScroll() {
   if (!cur) return;
-  cur.stick = nearBottom();
+  // stop following the end only when you scroll up: scroll events arrive a
+  // frame late, after content may have grown below a programmatic jump
+  const top = cur.scrollEl.scrollTop;
+  if (nearBottom()) cur.stick = true;
+  else if (top < (cur.lastTop ?? 0) - 2) cur.stick = false;
+  cur.lastTop = top;
   updateScrollButton();
 }
 
@@ -829,6 +840,9 @@ function showPermission(p) {
   scrollToBottom(true);
 }
 
-export function closeCurrent() { cur = null; }
+export function closeCurrent() {
+  if (cur && cur.ro) cur.ro.disconnect();
+  cur = null;
+}
 
 on('compacted', ({ conversation_id, auto, error }) => { if (auto && !error && cur && cur.id === conversation_id) reload(); });

@@ -50,7 +50,11 @@ export function openSearch() {
     }
     const actionsOnly = raw.startsWith('>');
     const q = actionsOnly ? raw.slice(1) : raw;
-    const acts = (await actionItems(ctx)).map((a) => ({ a, s: score(a.title, q) })).filter((x) => x.s > 0).sort((x, y) => y.s - x.s).map((x) => x.a);
+    const scored = (await actionItems(ctx)).map((a) => ({ a, s: score(a.title, q) })).filter((x) => x.s > 0).sort((x, y) => y.s - x.s);
+    // mixed with conversations, only actions that contain the words: loose
+    // letters-in-order matches ("rust" in "/recap — Summarize this session…")
+    // would push the conversations down
+    const acts = scored.filter((x) => actionsOnly || x.s >= 150).map((x) => x.a);
     void match;
     if (actionsOnly) {
       items = acts.slice(0, 40);

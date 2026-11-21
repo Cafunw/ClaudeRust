@@ -31,7 +31,7 @@ async function openEditor(ctx) {
     ta.value = f.content || '';
   };
   draw();
-  modal({ title: t('memory_title'), body, wide: true });
+  modal({ title: t('memory_title'), body, wide: true, cls: 'tall' });
   body.querySelector('[data-a=save]').onclick = async () => {
     const f = files[sel];
     try {
