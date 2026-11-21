@@ -876,7 +876,7 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
         return;
     }
     let Ok(conv) = st.db.conv_get(conv_id) else { return };
-    if conv.options["engine"] == crate::claudecode::ENGINE || conv.model.starts_with(crate::oai::PREFIX) {
+    if conv.model.starts_with(crate::oai::PREFIX) || crate::claudecode::uses_cli(st, &conv).await {
         return;
     }
     let Ok(path) = st.db.path_to(parent) else { return };
@@ -961,7 +961,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
         if conv.model.starts_with(crate::oai::PREFIX) {
             return run_oai(app, st, conv_id, parent, cancel).await;
         }
-        if conv.kind == "code" && conv.options["engine"] == crate::claudecode::ENGINE {
+        if crate::claudecode::uses_cli(st, &conv).await {
             return crate::claudecode::run(app, st, conv_id, parent, cancel).await;
         }
     }

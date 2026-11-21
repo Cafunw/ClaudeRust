@@ -70,6 +70,8 @@ pub struct Settings {
     pub bash_timeout_secs: u64,
     /// auto | claude-code | builtin
     pub code_engine: String,
+    /// Chat conversations: auto (API key, else the Claude account) | api | claude-code (the Claude account, through the official CLI).
+    pub chat_engine: String,
     /// Optional path to the `claude` executable.
     pub claude_code_path: String,
     /// Git worktrees for code sessions: off | parallel | always
@@ -140,6 +142,7 @@ impl Default for Settings {
             code_model: DEFAULT_MODEL.into(),
             bash_timeout_secs: 120,
             code_engine: "auto".into(),
+            chat_engine: "auto".into(),
             claude_code_path: String::new(),
             code_worktree: "parallel".into(),
             code_checkpoints: true,

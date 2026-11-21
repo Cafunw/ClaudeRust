@@ -32,18 +32,21 @@ export function createComposer(opts) {
 
   const el = h(`<div class="composer" data-mode="${mode}">
     <div class="attachments hidden"></div>
-    <textarea rows="1" spellcheck="true" placeholder="${esc(opts.placeholder || t('help_today'))}"></textarea>
+    <div class="cbox">
+      <textarea rows="1" spellcheck="true" placeholder="${esc(opts.placeholder || t('help_today'))}"></textarea>
+      <button class="send-btn" data-act="send" aria-label="${t('send')}" disabled>${icon('arrowUp', 16)}</button>
+    </div>
     <div class="composer-bar">
       <button class="tool-btn" data-act="attach" title="${t('attach')}" aria-label="${t('attach')}">${icon('plus', 18)}</button>
       <button class="tool-btn" data-act="tools" title="${t('tools')}" aria-label="${t('tools')}">${icon('sliders', 16)}</button>
       ${mode === 'code' ? '<button class="mode-btn" data-act="mode"></button>' : ''}
       <div class="active-tools"></div>
-      <div class="grow"></div>
+      <div class="grow composer-note"></div>
       <button class="model-btn" data-act="model"></button>
-      <button class="send-btn" data-act="send" aria-label="${t('send')}" disabled>${icon('arrowUp', 18)}</button>
     </div>
   </div>`);
   const ta = $('textarea', el);
+  if (mode === 'chat') $('.composer-note', el).textContent = t('disclaimer');
   const sendBtn = $('[data-act=send]', el);
   const attEl = $('.attachments', el);
   const activeEl = $('.active-tools', el);
@@ -93,7 +96,7 @@ export function createComposer(opts) {
   function sendIcon(name) {
     if (sendBtn.__icon === name) return;
     sendBtn.__icon = name;
-    sendBtn.innerHTML = icon(name, 18);
+    sendBtn.innerHTML = icon(name, 16);
   }
 
   function updateSend() {
@@ -367,7 +370,7 @@ export function createComposer(opts) {
   // ---- events
   el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
-    if (!b) { if (e.target === el || e.target.classList.contains('composer-bar')) ta.focus(); return; }
+    if (!b) { if (e.target === el || e.target.classList.contains('composer-bar') || e.target.classList.contains('cbox')) ta.focus(); return; }
     const act = b.dataset.act;
     if (act === 'send') send();
     else if (act === 'model') modelMenu(b);

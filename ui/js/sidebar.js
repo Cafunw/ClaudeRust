@@ -21,7 +21,7 @@ function savedMode() {
 /** The mode a route belongs to (null when it can't be told yet). */
 function modeForRoute(r) {
   if (!r) return null;
-  if (r.name === 'code') return 'code';
+  if (r.name === 'code' || r.name === 'sessions') return 'code';
   if (CHAT_ROUTES.has(r.name)) return 'chat';
   if (r.name === 'chat') {
     const c = (store.conversations || []).find((x) => x.id === (r.params && r.params.id));
@@ -62,6 +62,14 @@ function rememberRoute() {
 }
 
 let bound = false;
+const hiddenGroups = new Set();
+const DAY = 864e5;
+
+/** Code sessions are listed by day, as in Claude Desktop. */
+function dayGroup(ms) {
+  const n = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(ms).setHours(0, 0, 0, 0)) / DAY);
+  return n <= 0 ? 'today' : n === 1 ? 'yesterday' : n <= 7 ? 'week' : 'older';
+}
 
 export function mountSidebar() {
   const el = $('#sidebar');
@@ -70,10 +78,10 @@ export function mountSidebar() {
     <div class="sidebar-top">
       <button class="icon-btn" data-act="toggle" title="${t('collapse')}" aria-label="${t('collapse')}">${icon('sidebar', 18)}</button>
       <span class="brand">ClaudeRust</span>
-    </div>
-    <div class="mode-switch" role="tablist">
-      <button role="tab" data-mode="chat" title="${t('mode_chat')}">${icon('chat', 15)}<span class="label">${t('mode_chat')}</span></button>
-      <button role="tab" data-mode="code" title="${t('mode_code')}">${icon('code', 15)}<span class="label">${t('mode_code')}</span></button>
+      <div class="mode-switch" role="tablist">
+        <button role="tab" data-mode="chat" title="${t('mode_chat')}" aria-label="${t('mode_chat')}">${icon('chat', 16)}</button>
+        <button role="tab" data-mode="code" title="${t('mode_code')}" aria-label="${t('mode_code')}">${icon('code', 16)}</button>
+      </div>
     </div>
     <nav class="nav"></nav>
     <div class="sidebar-scroll"></div>
@@ -92,6 +100,7 @@ export function mountSidebar() {
     const n = e.target.closest('[data-nav]');
     if (n) {
       if (n.dataset.nav === 'routines') { import('./routines.js').then((r) => r.openRoutines()); return; }
+      if (n.dataset.nav === 'search') { import('./search.js').then((r) => r.openSearch()); return; }
       emit('navigate', { name: n.dataset.nav });
       return;
     }
@@ -118,13 +127,10 @@ function renderNav() {
   if (!nav) return;
   const mod = isMac ? '⌘' : 'Ctrl+';
   document.querySelectorAll('#sidebar [data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === store.appMode));
+  const row = (nav, ic, label, kbd = '') => `<button class="nav-item" data-nav="${nav}">${icon(ic, 18)}<span class="label">${label}</span>${kbd ? `<span class="kbd">${kbd}</span>` : ''}</button>`;
   nav.innerHTML = store.appMode === 'code'
-    ? `<button class="nav-item new-chat" data-nav="code"><span class="plus-circle">${icon('plus', 15)}</span><span class="label">${t('new_session')}</span><span class="kbd">${mod}⇧O</span></button>
-       <button class="nav-item" data-nav="routines">${icon('clock', 18)}<span class="label">${t('rt_title')}</span></button>`
-    : `<button class="nav-item new-chat" data-nav="new"><span class="plus-circle">${icon('plus', 15)}</span><span class="label">${t('new_chat')}</span><span class="kbd">${mod}⇧O</span></button>
-       <button class="nav-item" data-nav="chats">${icon('chat', 18)}<span class="label">${t('chats')}</span></button>
-       <button class="nav-item" data-nav="projects">${icon('folder', 18)}<span class="label">${t('projects')}</span></button>
-       <button class="nav-item" data-nav="artifacts">${icon('layers', 18)}<span class="label">${t('artifacts')}</span></button>`;
+    ? row('code', 'plus', t('new_session'), `${mod}⇧O`) + row('search', 'search', t('sc_search'), `${mod}K`) + row('routines', 'clock', t('rt_title'))
+    : row('new', 'plus', t('new_chat'), `${mod}⇧O`) + row('search', 'search', t('sc_search'), `${mod}K`) + row('projects', 'folder', t('projects')) + row('artifacts', 'layers', t('artifacts'));
   highlight();
 }
 
@@ -138,7 +144,8 @@ function renderUserCard() {
   const card = $('#sidebar .user-card');
   if (!card) return;
   const name = displayName() || 'You';
-  card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><div class="name ellipsis">${esc(store.settings.full_name || name)}</div><div class="plan">${store.settings.has_api_key ? t('api_plan') : store.settings.code_engine === 'claude-code' ? 'Claude Code' : t('no_key')}</div></span><span class="chev muted">${icon('chevUp', 14)}</span>`;
+  const plan = store.settings.has_api_key ? t('api_plan') : store.settings.chat_engine === 'claude-code' ? t('acct_plan') : store.settings.code_engine === 'claude-code' ? 'Claude Code' : t('no_key');
+  card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><span class="name ellipsis">${esc(store.settings.full_name || name)}</span><span class="plan ellipsis">· ${esc(plan)}</span></span><span class="chev">${icon('chevDown', 12)}</span>`;
 }
 
 function accountMenu(anchor) {
@@ -213,7 +220,7 @@ function renderLists() {
   // would come out the same, the ones shown stay (and keep hover and focus)
   const shown = [...starred, ...convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT)];
   const waiting = new Set([...store.permissions.values()].map((p) => p.conversation_id));
-  const sig = snapshot([code, currentLanguage(), shown, shown.map((c) => store.running.has(c.id)), shown.map((c) => waiting.has(c.id)), convs.length - starred.length > RECENT_LIMIT]);
+  const sig = snapshot([code, [...hiddenGroups].join(), currentLanguage(), shown, shown.map((c) => store.running.has(c.id)), shown.map((c) => waiting.has(c.id)), convs.length - starred.length > RECENT_LIMIT]);
   if (sameSnapshot(box.__sig, sig)) { box.__sig = sig; highlight(); return; }
   box.__sig = sig;
   box.innerHTML = '';
@@ -223,13 +230,22 @@ function renderLists() {
   }
   const recents = convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT);
   if (recents.length) {
-    box.appendChild(h(`<div class="section-title">${code ? t('sessions') : t('recents')}</div>`));
-    recents.forEach((c) => box.appendChild(chatLink(c)));
-    if (convs.length - starred.length > RECENT_LIMIT) {
-      const all = h(`<button class="view-all">${t('view_all')} ${icon('chevRight', 12)}</button>`);
-      all.onclick = () => emit('navigate', { name: code ? 'code' : 'chats' });
-      box.appendChild(all);
+    const groups = new Map();
+    for (const c of recents) {
+      const k = code ? dayGroup(c.updated_at) : 'recents';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(c);
     }
+    for (const [k, items] of groups) {
+      const hidden = hiddenGroups.has(k);
+      const head = h(`<button class="section-title ${hidden ? 'closed' : ''}">${esc(code ? t('grp_' + k) : t('recents'))}${icon('chevDown', 12)}</button>`);
+      head.onclick = () => { if (hidden) hiddenGroups.delete(k); else hiddenGroups.add(k); box.__sig = null; renderLists(); };
+      box.appendChild(head);
+      if (!hidden) items.forEach((c) => box.appendChild(chatLink(c)));
+    }
+    const all = h(`<button class="view-all">${t('view_all')}</button>`);
+    all.onclick = () => emit('navigate', { name: code ? 'sessions' : 'chats' });
+    box.appendChild(all);
   } else if (!starred.length) {
     box.appendChild(h(`<div class="sidebar-empty muted small">${esc(code ? t('no_sessions') : t('no_chats'))}</div>`));
   }
@@ -240,7 +256,7 @@ function highlight() {
   const r = store.route;
   document.querySelectorAll('#sidebar [data-nav]').forEach((b) => {
     const n = b.dataset.nav;
-    b.classList.toggle('active', n !== 'new' && n !== 'code' && (r.name === n || (n === 'projects' && r.name === 'project')));
+    b.classList.toggle('active', r.name === n || (n === 'projects' && r.name === 'project'));
   });
   document.querySelectorAll('#sidebar .chat-link').forEach((b) => b.classList.toggle('active', r.name === 'chat' && r.params && r.params.id === b.dataset.id));
   void currentLanguage;

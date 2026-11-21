@@ -37,7 +37,7 @@ import './panes/history.js';
 import './panes/files.js';
 import * as artifacts from './artifacts.js';
 import { renderProjects, renderProject, refreshProjects } from './projects.js';
-import { renderCode, renderChats } from './code.js';
+import { renderCode, renderChats, renderSessions } from './code.js';
 import { openSettings } from './settings.js';
 import { openSearch } from './search.js';
 import { renderOnboarding } from './onboarding.js';
@@ -92,6 +92,7 @@ async function navigate({ name, params = {} }) {
       case 'project': await renderProject(view, params.id); break;
       case 'artifacts': await artifacts.renderGallery(view); break;
       case 'code': await renderCode(view); break;
+      case 'sessions': await renderSessions(view); break;
       default: renderNewChat(view, params); store.route = { name: 'new', params };
     }
   } catch (e) {

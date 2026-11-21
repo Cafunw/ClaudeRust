@@ -81,6 +81,126 @@ pub fn open_login_terminal(cli: &std::path::Path) -> AppResult<()> {
     open_in_terminal(None, cli, &[])
 }
 
+const NOT_INSTALLED: &str = "Claude Code isn't installed. Install it from claude.com/claude-code first.";
+
+/// Run `claude <args>` to the end (stdin closed) and keep what it printed.
+async fn cli_output(cli: &std::path::Path, args: &[&str], secs: u64) -> Option<std::process::Output> {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await.ok()?.ok()
+}
+
+/// Who the CLI is signed in as (`claude auth status`). That account is what
+/// Code sessions, and chats set to "Claude account", run on; the sign-in itself
+/// is the CLI's: this app never sees the token.
+pub async fn auth_status(override_path: &str) -> Value {
+    crate::shellenv::ready().await;
+    let Some(cli) = find_cli(override_path) else {
+        return json!({"found": false});
+    };
+    // not JSON from a CLI too old to have `auth status`
+    let v: Value = cli_output(&cli, &["auth", "status", "--json"], 15).await.and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or(Value::Null);
+    json!({"found": true, "logged_in": v["loggedIn"] == true, "method": v["authMethod"], "email": v["email"], "plan": v["subscriptionType"], "tier": v["planTier"]})
+}
+
+/// The running sign-in, so a second one (or Cancel) can stop it.
+static LOGIN: parking_lot::Mutex<Option<CancellationToken>> = parking_lot::Mutex::new(None);
+
+/// `claude auth login`: the CLI opens the browser and ends when the sign-in
+/// does. Resolves with the new status, or `{"cancelled": true}`.
+pub async fn auth_login(override_path: &str) -> AppResult<Value> {
+    crate::shellenv::ready().await;
+    let cli = find_cli(override_path).ok_or_else(|| AppError::msg(NOT_INSTALLED))?;
+    let cancel = CancellationToken::new();
+    if let Some(old) = LOGIN.lock().replace(cancel.clone()) {
+        old.cancel();
+    }
+    let args: Vec<String> = ["auth", "login", "--claudeai"].iter().map(|s| s.to_string()).collect();
+    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+        cmd.env_remove(k);
+    }
+    let mut child = cmd.spawn().map_err(|e| AppError::msg(format!("Could not start Claude Code ({}): {e}", cli.display())))?;
+    let mut stderr = child.stderr.take();
+    // shortcut: no way to paste the code the browser page shows (the CLI's fallback when it can't catch the redirect), so a sign-in that needs it times out; use the terminal sign-in then
+    let end = tokio::select! {
+        s = child.wait() => s.map(Some),
+        _ = cancel.cancelled() => Ok(None),
+        _ = tokio::time::sleep(Duration::from_secs(300)) => Err(std::io::Error::other("Sign-in didn't finish within 5 minutes.")),
+    };
+    if !cancel.is_cancelled() {
+        LOGIN.lock().take();
+    }
+    match end {
+        Ok(Some(status)) if status.success() => Ok(auth_status(override_path).await),
+        Ok(Some(_)) => {
+            let mut text = String::new();
+            if let Some(e) = stderr.as_mut() {
+                let _ = tokio::io::AsyncReadExt::read_to_string(e, &mut text).await;
+            }
+            Err(AppError::msg(if text.trim().is_empty() { "Sign-in failed.".to_string() } else { truncate_chars(text.trim(), 500) }))
+        }
+        Ok(None) => {
+            let _ = child.kill().await;
+            Ok(json!({"cancelled": true}))
+        }
+        Err(e) => {
+            let _ = child.kill().await;
+            Err(e.into())
+        }
+    }
+}
+
+pub fn auth_login_cancel() {
+    if let Some(t) = LOGIN.lock().take() {
+        t.cancel();
+    }
+}
+
+/// `claude auth logout`. It signs out the CLI itself, for Claude Code in a terminal too.
+pub async fn auth_logout(override_path: &str) -> AppResult<()> {
+    crate::shellenv::ready().await;
+    let cli = find_cli(override_path).ok_or_else(|| AppError::msg(NOT_INSTALLED))?;
+    match cli_output(&cli, &["auth", "logout"], 20).await {
+        Some(o) if o.status.success() => Ok(()),
+        Some(o) => {
+            let text = String::from_utf8_lossy(if o.stderr.is_empty() { &o.stdout } else { &o.stderr }).trim().to_string();
+            Err(AppError::msg(if text.is_empty() { "Sign-out failed.".to_string() } else { truncate_chars(&text, 500) }))
+        }
+        None => Err(AppError::msg("Sign-out didn't finish.")),
+    }
+}
+
+/// An empty folder of ours where chat conversations run the CLI, so no
+/// project's files, memory or settings are within its reach.
+fn chat_dir(st: &AppState) -> String {
+    let d = st.data_dir.join("chat-cli");
+    let _ = std::fs::create_dir_all(&d);
+    d.display().to_string()
+}
+
+/// Does a turn of this conversation run through the CLI (and so on the Claude
+/// account) rather than the API?
+pub async fn uses_cli(st: &AppState, conv: &crate::db::Conversation) -> bool {
+    if conv.model.starts_with(crate::oai::PREFIX) {
+        return false;
+    }
+    if conv.kind == "code" {
+        return conv.options["engine"] == ENGINE;
+    }
+    crate::shellenv::ready().await;
+    let s = st.settings.read();
+    match s.chat_engine.as_str() {
+        "claude-code" => true,
+        "api" => false,
+        // no API key: the account, when there is a CLI to sign in with
+        _ => st.api_key.read().is_none() && find_cli(&s.claude_code_path).is_some(),
+    }
+}
+
 /// Open the system terminal running `program args…`, in `cwd` when given.
 /// The folder and arguments are passed as separate words (never pasted into
 /// a shell line), so spaces and quotes in them are safe.
@@ -399,7 +519,9 @@ async fn run_once(
     let settings = st.settings.read().clone();
     let user = st.db.msg_get(&user_msg_id)?;
     let path = st.db.path_to(&user_msg_id)?;
-    let cwd = conv.cwd.clone().unwrap_or_default();
+    // a chat conversation: plain chat on the Claude account, in a folder of ours
+    let chat = conv.kind != "code";
+    let cwd = if chat { chat_dir(st) } else { conv.cwd.clone().unwrap_or_default() };
 
     let fail = |msg: String| -> AppResult<Outcome> {
         let m = Message {
@@ -447,7 +569,26 @@ async fn run_once(
         args.push("--fallback-model".into());
         args.push(fb);
     }
-    if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
+    if chat {
+        // our chat prompt (instructions, style, project knowledge) replaces the coding one, and
+        // nothing else is switched on: no tools, skills, MCP servers or the CLI's own settings and hooks.
+        // The prompt goes by file: a project's knowledge can pass the command-line limit.
+        // shortcut: no web search or memory search in these chats; the CLI would ask permission for them
+        let mut c = conv.clone();
+        c.options["web_search"] = json!(false);
+        let mut s = settings.clone();
+        s.chat_search = false;
+        let rc = crate::engine::build_request_context(st, &c, &s).await?;
+        let file = std::path::Path::new(&cwd).join(format!("system-{conv_id}.txt"));
+        if let Err(e) = std::fs::write(&file, rc.system) {
+            return fail(format!("Could not write the chat prompt ({}): {e}", file.display()));
+        }
+        for a in ["--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""] {
+            args.push(a.into());
+        }
+        args.push("--system-prompt-file".into());
+        args.push(file.display().to_string());
+    } else if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
         args.push("--append-system-prompt".into());
         args.push(block);
     }
@@ -858,6 +999,9 @@ async fn run_once(
             });
         }
         None => {}
+    }
+    if error.as_deref().is_some_and(|e| e.contains("Not logged in") || e.contains("/login")) {
+        error = Some("You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).".into());
     }
     if !fresh && ts.rows.is_empty() && !interrupted {
         let text = format!("{} {}", error.clone().unwrap_or_default(), err_text);

@@ -3,7 +3,7 @@ import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
 import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
-import { $, esc, h, showMenu, errorToast, relTime } from './util.js';
+import { $, esc, h, showMenu, errorToast, relTime, searchToggle } from './util.js';
 import { copyText, decorate } from './parts.js';
 
 let panel = null;
@@ -204,10 +204,10 @@ new MutationObserver(() => { if (panel) { panel.lastDocKey = null; render(); } }
 
 export async function renderGallery(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
-    <div class="page-head"><h1>${t('artifacts')}</h1></div>
-    <p class="muted" style="margin:-10px 0 22px">${t('artifacts_desc')}</p>
+    <div class="page-head"><h1>${t('artifacts')}</h1><div class="grow"></div></div>
     <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_artifacts')}"></div>
-    <div class="grid"></div></div></div>`;
+    <div class="grid artifacts"></div></div></div>`;
+  searchToggle(view);
   const grid = $('.grid', view);
   let items = [];
   try { items = await call('list_artifacts'); } catch (e) { errorToast(e); }
@@ -219,9 +219,9 @@ export async function renderGallery(view) {
     }
     grid.innerHTML = '';
     for (const a of f) {
-      const card = h(`<button class="card"><div class="preview"><pre>${esc(a.content.slice(0, 600))}</pre></div>
-        <div class="row">${icon(ARTIFACT_ICON[a.kind] || 'file', 15)}<div class="t ellipsis grow">${esc(a.title || a.identifier)}</div></div>
-        <div class="f">${esc(a.label)} · ${esc(a.conversation_title || t('untitled'))} · ${relTime(a.created_at)}</div></button>`);
+      const card = h(`<button class="card artifact-tile"><div class="preview"><pre>${esc(a.content.slice(0, 600))}</pre></div>
+        <div class="cap"><div class="row">${icon(ARTIFACT_ICON[a.kind] || 'file', 15)}<div class="t ellipsis grow">${esc(a.title || a.identifier)}</div></div>
+        <div class="f ellipsis">${esc(a.label)} · ${esc(a.conversation_title || t('untitled'))} · ${relTime(a.created_at)}</div></div></button>`);
       card.onclick = () => emit('navigate', { name: 'chat', params: { id: a.conversation_id, artifact: a.identifier } });
       grid.appendChild(card);
     }

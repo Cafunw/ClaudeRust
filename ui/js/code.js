@@ -1,11 +1,11 @@
 // Code page: start coding sessions in a local folder and list past ones.
 import { openRoutines } from './routines.js';
 import * as workspace from './workspace.js';
-import { icon } from './icons.js';
+import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, on, saveLocal, loadLocal } from './store.js';
-import { $, esc, h, relTime, errorToast, toast, confirmDialog } from './util.js';
+import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -21,91 +21,80 @@ export async function renderCode(view) {
   if (stale()) return;
   const recentFolders = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))].slice(0, 6);
   if (!folder && recentFolders.length) folder = recentFolders[0];
+  const base = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
 
-  view.innerHTML = `<div class="page"><div class="page-inner">
-    <div class="page-head"><h1>${t('code_title')}</h1></div>
-    <p class="muted" style="margin:-10px 0 22px">${t('code_desc')}</p>
-    <div class="code-hero">
-      <div class="engine-pick"></div>
-      <div class="folder-pick"></div>
-      <div class="composer-slot"></div>
+  // As in Claude Desktop: a quiet stage (where to work), the composer docked at the bottom and
+  // the environment (engine, folder, worktree) in the row under it.
+  view.innerHTML = `<div class="topbar"><span class="top-title">${esc(t('new_session'))}</span><span class="spacer"></span>
+      <button class="icon-btn" data-act="routines" title="${esc(t('rt_title'))}" aria-label="${esc(t('rt_title'))}">${icon('clock', 16)}</button>
+      <button class="icon-btn" data-act="import" title="${esc(t('imp_cc_btn'))}" aria-label="${esc(t('imp_cc_btn'))}">${icon('download', 16)}</button>
+      <button class="icon-btn" data-act="sessions" title="${esc(t('sessions'))}" aria-label="${esc(t('sessions'))}">${icon('list', 16)}</button></div>
+    <div class="code-stage">
+      <div class="env-card"><span class="env-mark">${spark(24)}</span><div class="env-list"></div>
+        <button class="env-choose" data-act="folder">${icon('folder', 14)}<span class="grow">${esc(t('choose_folder'))}</span>${icon('chevDown', 12)}</button></div>
+      <button class="env-card env-wt" data-act="wt"></button>
     </div>
-    <div class="section-title sessions-head" style="padding-left:2px"><span>${t('sessions')}</span><span class="grow"></span><button class="btn sm ghost" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button><button class="btn sm ghost" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button></div>
-    <div class="sessions"></div></div></div>`;
-  $('[data-act=import]', view).onclick = () => emit('open-settings', 'import');
-  $('[data-act=routines]', view).onclick = () => openRoutines();
+    <div class="code-dock"><div class="inner"><div class="composer-slot"></div></div></div>`;
 
-  const pick = $('.folder-pick', view);
-  const drawFolder = () => {
-    pick.innerHTML = '';
-    const chip = h(`<span class="folder-chip ${folder ? '' : 'empty'}" title="${esc(folder)}" role="button" tabindex="0">${icon('folder', 14)} <span class="ellipsis">${esc(folder || t('folder_missing'))}</span></span>`);
-    // Click the chip to type or paste a path directly.
-    const editPath = () => {
-      const input = h(`<input class="input mono" style="max-width:520px;height:32px" placeholder="/path/to/project">`);
-      input.value = folder;
-      chip.replaceWith(input);
-      input.focus();
-      input.select();
-      const commit = () => {
-        const v = input.value.trim();
-        if (v) { folder = v; saveLocal({ codeFolder: v }); }
-        drawFolder();
-        composer.focus();
-      };
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } if (e.key === 'Escape') drawFolder(); });
-      input.addEventListener('blur', commit);
-    };
-    chip.addEventListener('click', editPath);
-    chip.addEventListener('keydown', (e) => { if (e.key === 'Enter') editPath(); });
-    const b = h(`<button class="btn sm">${t('choose_folder')}</button>`);
-    b.onclick = async () => {
-      const d = await call('pick_directory').catch(errorToast);
-      if (d) { folder = d; saveLocal({ codeFolder: d }); drawFolder(); composer.focus(); }
-    };
-    // Worktree isolation: auto (setting) → on → off
-    const wtState = () => loadLocal().codeWorktree || 'auto';
-    const wt = h(`<button class="chip wt-chip" title="${esc(t('worktree_help'))}"></button>`);
-    const drawWt = () => {
-      const s = wtState();
-      wt.className = `chip wt-chip ${s}`;
-      wt.innerHTML = `${icon('code', 13)} ${esc(t('worktree_' + s))}`;
-    };
-    wt.onclick = () => { const order = ['auto', 'on', 'off']; saveLocal({ codeWorktree: order[(order.indexOf(wtState()) + 1) % 3] }); drawWt(); };
-    drawWt();
-    pick.append(chip, b, wt);
-    for (const f of recentFolders.filter((x) => x !== folder).slice(0, 4)) {
-      const r = h(`<button class="chip" title="${esc(f)}">${icon('history', 13)} ${esc(f.split(/[\\/]/).filter(Boolean).pop() || f)}</button>`);
-      r.onclick = () => { folder = f; saveLocal({ codeFolder: f }); drawFolder(); };
-      pick.appendChild(r);
-    }
-  };
   // Engine: the official Claude Code CLI (signs in with your Claude account) or the built-in agent (API key).
   const cc = await call('claude_code_info', {}).catch(() => ({ found: false }));
   if (stale()) return;
   const defEngine = store.settings.code_engine === 'builtin' ? 'builtin'
     : store.settings.code_engine === 'claude-code' ? 'claude-code' : (cc.found ? 'claude-code' : 'builtin');
   let engine = loadLocal().codeEngine || defEngine;
-  const ep = $('.engine-pick', view);
-  const drawEngine = () => {
-    ep.innerHTML = `<div class="segmented"><button data-e="claude-code" class="${engine === 'claude-code' ? 'on' : ''}">${icon('terminal', 13)} ${t('engine_cc')}</button><button data-e="builtin" class="${engine === 'builtin' ? 'on' : ''}">${icon('key', 13)} ${t('engine_builtin')}</button></div><span class="engine-status small"></span>`;
-    ep.querySelectorAll('[data-e]').forEach((b) => b.onclick = () => { engine = b.dataset.e; saveLocal({ codeEngine: engine }); drawEngine(); });
-    const stEl = $('.engine-status', ep);
-    if (engine === 'claude-code') {
-      if (cc.found) {
-        stEl.innerHTML = `<span class="muted">${esc(t('cc_found', { v: cc.version || 'claude' }))}</span> <button class="btn sm ghost" data-a="login">${t('cc_login')}</button>`;
-        stEl.querySelector('[data-a=login]').onclick = () => call('claude_code_login').catch(errorToast);
-      } else {
-        stEl.innerHTML = `<span style="color:var(--danger)">${esc(t('cc_missing'))}</span> <button class="btn sm" data-a="install">${t('cc_install')} ${icon('external', 12)}</button>`;
-        stEl.querySelector('[data-a=install]').onclick = () => call('open_external', { url: 'https://docs.claude.com/en/docs/claude-code/setup' }).catch(errorToast);
-      }
-    } else if (!store.settings.has_api_key) {
-      stEl.innerHTML = `<span style="color:var(--danger)">${esc(t('no_key'))}</span> <button class="btn sm ghost" data-a="key">${t('open_settings')}</button>`;
-      stEl.querySelector('[data-a=key]').onclick = () => emit('open-settings', 'account');
-    } else {
-      stEl.innerHTML = `<span class="muted">${esc(t('engine_builtin_d'))}</span>`;
+  const engineIssue = () => (engine === 'claude-code' ? (cc.found ? '' : t('cc_missing')) : (store.settings.has_api_key ? '' : t('no_key')));
+  // Worktree isolation: auto (setting) → on → off
+  const wtState = () => loadLocal().codeWorktree || 'auto';
+
+  const envRow = h('<div class="env-row"></div>');
+  const drawEnv = () => {
+    const rows = [...new Set([folder, ...recentFolders].filter(Boolean))].slice(0, 3);
+    const list = $('.env-list', view);
+    list.innerHTML = rows.length ? '' : `<div class="env-empty">${esc(t('folder_missing'))}</div>`;
+    for (const f of rows) {
+      const b = h(`<button class="env-item ${f === folder ? 'on' : ''}" title="${esc(f)}">${icon('folder', 14)}<span class="ellipsis grow">${esc(base(f))}</span>${f === folder ? icon('check', 14) : ''}</button>`);
+      b.onclick = () => setFolder(f);
+      list.appendChild(b);
     }
+    const w = wtState();
+    $('.env-wt', view).innerHTML = `<b>${esc(t(`code_wt_${w}_t`))}</b><span>${esc(t(`code_wt_${w}_d`))}</span>`;
+    const issue = engineIssue();
+    envRow.innerHTML = `<button class="env-btn" data-act="engine" title="${esc(issue)}">${icon(engine === 'claude-code' ? 'terminal' : 'key', 14)}<span>${esc(engine === 'claude-code' ? t('engine_cc') : t('engine_builtin'))}</span>${issue ? '<i class="warn-dot"></i>' : ''}${icon('chevDown', 11)}</button>
+      <button class="env-btn" data-act="folder" title="${esc(folder)}">${icon('folder', 14)}<span class="ellipsis">${esc(folder ? base(folder) : t('folder_missing'))}</span>${icon('chevDown', 11)}</button>
+      <button class="env-btn" data-act="wt" title="${esc(t('worktree_help'))}"><span class="chk ${w}">${w === 'on' ? icon('check', 11) : w === 'auto' ? '–' : ''}</span><span>Worktree</span></button>`;
   };
-  drawEngine();
+  const setFolder = (f) => { folder = f; saveLocal({ codeFolder: f }); drawEnv(); composer.focus(); };
+  const setEngine = (e) => { engine = e; saveLocal({ codeEngine: e }); drawEnv(); };
+
+  const folderMenu = (anchor, placement) => showMenu(anchor, [
+    ...[...new Set([folder, ...recentFolders].filter(Boolean))].map((f) => ({ label: base(f), sub: f, checked: f === folder, onClick: () => setFolder(f) })),
+    folder || recentFolders.length ? { sep: true } : null,
+    { label: t('choose_folder'), icon: 'folder', onClick: async () => { const d = await call('pick_directory').catch(errorToast); if (d) setFolder(d); } },
+    { label: t('code_type_path'), icon: 'edit', onClick: async () => { const v = await promptDialog(t('code_type_path'), folder, { placeholder: '/path/to/project' }); if (v && v.trim()) setFolder(v.trim()); } },
+  ], { placement, width: 280 });
+  const engineMenu = (anchor) => showMenu(anchor, [
+    { label: t('engine_cc'), icon: 'terminal', sub: cc.found ? t('cc_found', { v: cc.version || 'claude' }) : t('cc_missing'), checked: engine === 'claude-code', onClick: () => setEngine('claude-code') },
+    { label: t('engine_builtin'), icon: 'key', sub: store.settings.has_api_key ? t('engine_builtin_d') : t('no_key'), checked: engine === 'builtin', onClick: () => setEngine('builtin') },
+    { sep: true },
+    engine === 'claude-code'
+      ? (cc.found
+        ? { label: t('cc_login'), icon: 'user', onClick: () => call('claude_code_login').catch(errorToast) }
+        : { label: t('cc_install'), icon: 'external', onClick: () => call('open_external', { url: 'https://docs.claude.com/en/docs/claude-code/setup' }).catch(errorToast) })
+      : (store.settings.has_api_key ? null : { label: t('open_settings'), icon: 'settings', onClick: () => emit('open-settings', 'account') }),
+  ], { placement: 'top-start', width: 300 });
+
+  view.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b || b.closest('.composer .cbox')) return;
+    const act = b.dataset.act;
+    if (act === 'routines') openRoutines();
+    else if (act === 'import') emit('open-settings', 'import');
+    else if (act === 'sessions') emit('navigate', { name: 'sessions' });
+    else if (act === 'engine') engineMenu(b);
+    else if (act === 'folder') folderMenu(b, b.closest('.env-row') ? 'top-start' : 'bottom-start');
+    else if (act === 'wt') { const order = ['auto', 'on', 'off']; saveLocal({ codeWorktree: order[(order.indexOf(wtState()) + 1) % 3] }); drawEnv(); }
+  });
+
   const composer = createComposer({
     mode: 'code',
     placeholder: t('code_placeholder'),
@@ -118,9 +107,25 @@ export async function renderCode(view) {
       return startConversation({ text, atts, st, kind: 'code', cwd: folder, engine, worktree: w === 'on' ? true : w === 'off' ? false : null });
     },
   });
-  drawFolder();
+  composer.el.classList.add('dock');
+  $('.composer-bar', composer.el).prepend(envRow);
   $('.composer-slot', view).appendChild(composer.el);
+  drawEnv();
+  composer.focus();
+}
 
+/** All coding sessions: grouped by folder when there are many, with a filter and live status. */
+export async function renderSessions(view) {
+  const sessions = await call('list_conversations', { kind: 'code' }).catch(() => []);
+  view.innerHTML = `<div class="page"><div class="page-inner">
+    <div class="page-head"><h1>${t('sessions')}</h1><div class="grow"></div>
+      <button class="btn" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button>
+      <button class="btn" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button>
+      <button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_session')}</button></div>
+    <div class="sessions"></div></div></div>`;
+  $('[data-act=import]', view).onclick = () => emit('open-settings', 'import');
+  $('[data-act=routines]', view).onclick = () => openRoutines();
+  $('[data-act=new]', view).onclick = () => emit('navigate', { name: 'code' });
   const list = $('.sessions', view);
   const statusOf = (id) => ([...store.permissions.values()].some((p) => p.conversation_id === id) ? 'waiting' : store.running.has(id) ? 'running' : '');
   if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
@@ -145,7 +150,7 @@ export async function renderCode(view) {
         const status = statusOf(s.id);
         const row = h(`<button class="list-item" data-id="${esc(s.id)}">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${grouped ? '' : `${esc(s.cwd || '')} · `}${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
         row.addEventListener('click', (e) => {
-          if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderCode(view), onDelete: () => renderCode(view) }); return; }
+          if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderSessions(view), onDelete: () => renderSessions(view) }); return; }
           emit('navigate', { name: 'chat', params: { id: s.id } });
         });
         list.appendChild(row);
@@ -171,7 +176,6 @@ export async function renderCode(view) {
   const offs = [on('running-changed', refreshStatus)];
   // (nothing to do while the window is hidden: it's caught up within 1.5 s of coming back)
   const watch = setInterval(() => { if (!list.isConnected) { clearInterval(watch); offs.forEach((f) => f && f()); } else if (!document.hidden) refreshStatus(); }, 1500);
-  composer.focus();
 }
 
 export async function renderChats(view) {
@@ -180,6 +184,7 @@ export async function renderChats(view) {
     <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_chats')}"></div>
     <div class="list"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => emit('navigate', { name: 'new' });
+  searchToggle(view);
   const list = $('.list', view);
   // Chat mode's history: code sessions live in Code mode
   const all = (await call('list_conversations', {}).catch(() => [])).filter((c) => c.kind !== 'code');
@@ -215,8 +220,8 @@ export async function renderChats(view) {
     }
     list.innerHTML = items.length ? '' : `<div class="empty-state"><div class="big">${q ? t('no_results') : t('no_chats')}</div></div>`;
     for (const c of items) {
-      const snip = c.snippet ? `<div class="d">${esc(c.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>')}</div>` : `<div class="d">${t('last_message')} ${relTime(c.updated_at)}</div>`;
-      const row = h(`<button class="list-item"><input type="checkbox" class="${selecting ? '' : 'hidden'}" ${selected.has(c.id) ? 'checked' : ''}>${c.kind === 'code' ? icon('terminal', 16) : icon('chat', 16)}<div class="grow"><div class="t">${esc(c.title || t('untitled'))}</div>${snip}</div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+      const snip = c.snippet ? `<div class="d">${esc(c.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>')}</div>` : '';
+      const row = h(`<button class="list-item"><input type="checkbox" class="${selecting ? '' : 'hidden'}" ${selected.has(c.id) ? 'checked' : ''}><div class="grow"><div class="t ellipsis">${esc(c.title || t('untitled'))}</div>${snip}</div><span class="when">${relTime(c.updated_at)}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
       row.addEventListener('click', (e) => {
         if (selecting) {
           e.preventDefault();

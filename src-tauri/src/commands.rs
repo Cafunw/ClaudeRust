@@ -1149,6 +1149,32 @@ pub async fn claude_code_login(state: St<'_>) -> AppResult<()> {
     crate::claudecode::open_login_terminal(&cli)
 }
 
+// The Claude account sign-in: the official CLI does it (`claude auth …`).
+
+#[tauri::command]
+pub async fn claude_auth_status(state: St<'_>) -> AppResult<Value> {
+    let p = state.settings.read().claude_code_path.clone();
+    Ok(crate::claudecode::auth_status(&p).await)
+}
+
+#[tauri::command]
+pub async fn claude_auth_login(state: St<'_>) -> AppResult<Value> {
+    let p = state.settings.read().claude_code_path.clone();
+    crate::claudecode::auth_login(&p).await
+}
+
+#[tauri::command]
+pub async fn claude_auth_login_cancel() -> AppResult<()> {
+    crate::claudecode::auth_login_cancel();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn claude_auth_logout(state: St<'_>) -> AppResult<()> {
+    let p = state.settings.read().claude_code_path.clone();
+    crate::claudecode::auth_logout(&p).await
+}
+
 // ---------------------------------------------------------------- extensions
 
 #[tauri::command]
@@ -1761,7 +1787,7 @@ pub async fn rewind(app: AppHandle, state: St<'_>, conversation_id: String, mess
     }
     if conversation {
         st.db.conv_set_leaf(&conversation_id, msg.parent_id.as_deref())?;
-        if conv.options["engine"] == crate::claudecode::ENGINE {
+        if conv.options["cc_tip"].is_string() {
             // the next message must fork the CLI session before this point
             engine::update_conv_options(&st, &conversation_id, |o| {
                 if let Some(m) = o.as_object_mut() {

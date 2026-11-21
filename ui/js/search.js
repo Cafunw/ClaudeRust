@@ -9,11 +9,14 @@ import * as workspace from './workspace.js';
 import { allCommands, handle as runSlash } from './slash.js';
 
 let open = null;
+// result filters; "actions" is the ">" mode
+const TABS = [['all', () => t('pal_all')], ['chat', () => t('chats')], ['code', () => t('mode_code')], ['project', () => t('projects')], ['actions', () => t('pal_actions')]];
 
 export function openSearch() {
   if (open) { open.querySelector('input').focus(); return; }
   const scrim = h(`<div class="modal-scrim" style="align-items:flex-start"><div class="modal palette">
-    <div class="pinput">${icon('search', 18)}<input placeholder="${t('search_placeholder')}"><span class="small muted">esc</span></div>
+    <div class="pinput">${icon('search', 16)}<input placeholder="${t('search_placeholder')}"><span class="small muted">esc</span></div>
+    <div class="ptabs">${TABS.map(([k, label]) => `<button data-tab="${k}" class="${k === 'all' ? 'on' : ''}">${esc(label())}</button>`).join('')}</div>
     <div class="results"></div><div class="pal-hint small muted">${esc(t('pal_hint'))}</div></div></div>`);
   document.body.appendChild(scrim);
   open = scrim;
@@ -21,6 +24,7 @@ export function openSearch() {
   const res = $('.results', scrim);
   let items = [];
   let idx = 0;
+  let tab = 'all';
   const close = () => { scrim.remove(); open = null; };
   const choose = (it) => {
     close();
@@ -40,6 +44,7 @@ export function openSearch() {
   const run = async () => {
     const raw = input.value;
     const ctx = await chatContext();
+    const pick = (list) => (tab === 'all' ? list : list.filter((x) => x.cat === tab));
     // "@file": files of the current code session, inserted as a mention
     if (raw.startsWith('@') && ctx && ctx.cwd) {
       const r = await call('file_search', { conversationId: ctx.conversationId, cwd: ctx.cwd, query: raw.slice(1) }).catch(() => []);
@@ -48,8 +53,8 @@ export function openSearch() {
       draw();
       return;
     }
-    const actionsOnly = raw.startsWith('>');
-    const q = actionsOnly ? raw.slice(1) : raw;
+    const actionsOnly = raw.startsWith('>') || tab === 'actions';
+    const q = raw.startsWith('>') ? raw.slice(1) : raw;
     const scored = (await actionItems(ctx)).map((a) => ({ a, s: score(a.title, q) })).filter((x) => x.s > 0).sort((x, y) => y.s - x.s);
     // mixed with conversations, only actions that contain the words: loose
     // letters-in-order matches ("rust" in "/recap — Summarize this session…")
@@ -68,16 +73,25 @@ export function openSearch() {
       snippet: x.snippet ? esc(x.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') : '',
       meta: relTime(x.updated_at),
       icon: x.kind === 'code' ? 'terminal' : 'chat',
+      cat: x.kind === 'code' ? 'code' : 'chat',
       route: { name: 'chat', params: { id: x.conversation_id } },
     }));
     const ql = q.trim().toLowerCase();
     const projs = store.projects.filter((p) => !ql || p.name.toLowerCase().includes(ql)).slice(0, ql ? 5 : 3)
-      .map((p) => ({ title: p.name, snippet: esc(p.description || ''), meta: t('projects'), icon: 'folder', route: { name: 'project', params: { id: p.id } } }));
-    items = q.trim() ? [...acts.slice(0, 6), ...items.slice(0, 30), ...projs] : [...items.slice(0, 30), ...projs];
+      .map((p) => ({ title: p.name, snippet: esc(p.description || ''), meta: t('projects'), icon: 'folder', cat: 'project', route: { name: 'project', params: { id: p.id } } }));
+    items = pick(q.trim() ? [...acts.slice(0, 6).map((a) => ({ ...a, cat: 'actions' })), ...items.slice(0, 30), ...projs] : [...items.slice(0, 30), ...projs]);
     idx = 0;
     draw();
   };
   let tm;
+  $('.ptabs', scrim).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tab]');
+    if (!b) return;
+    tab = b.dataset.tab;
+    scrim.querySelectorAll('.ptabs button').forEach((x) => x.classList.toggle('on', x === b));
+    input.focus();
+    run();
+  });
   input.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(run, 120); });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); }

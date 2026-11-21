@@ -91,7 +91,7 @@ impl AppState {
             .ok_or_else(|| crate::error::AppError::Api {
                 status: 401,
                 kind: "no_api_key".into(),
-                message: "Add your Anthropic API key in Settings to start chatting.".into(),
+                message: "Add your Anthropic API key in Settings → Account, or sign in with your Claude account, to start chatting.".into(),
             })?;
         let base = self.settings.read().base_url.clone();
         crate::anthropic::Client::new(&base, &key)

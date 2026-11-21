@@ -15,6 +15,17 @@ export function h(html) {
   return tpl.content.firstElementChild;
 }
 
+/** The search icon of a page header: it shows and hides the page's search box (as in Claude). */
+export function searchToggle(view) {
+  const box = $('.search-box', view);
+  const head = $('.page-head', view);
+  if (!box || !head) return;
+  box.classList.add('hidden');
+  const b = h(`<button class="icon-btn" aria-label="${esc(t('sc_search'))}">${icon('search', 16)}</button>`);
+  b.onclick = () => { box.classList.toggle('hidden'); if (!box.classList.contains('hidden')) $('input', box).focus(); };
+  head.insertBefore(b, $('.btn', head));
+}
+
 export function debounce(fn, ms) {
   let tm;
   return (...a) => { clearTimeout(tm); tm = setTimeout(() => fn(...a), ms); };

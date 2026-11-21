@@ -7,6 +7,7 @@ import { $, esc, h, modal, button, toast, errorToast, promptDialog, confirmDialo
 import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
+import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -112,6 +113,43 @@ function field(label, control, help) {
   return f;
 }
 
+/** The Claude account block of Settings → Account: sign in / status / sign out, and which engine chats use. */
+function claudeAccount(body) {
+  body.appendChild(h(`<h4>${t('acct_title')}</h4>`));
+  const box = h('<div></div>');
+  body.appendChild(box);
+  const group = (...els) => { const g = h('<div class="row" style="gap:8px;flex-wrap:wrap;justify-content:flex-end"></div>'); g.append(...els); return g; };
+  const draw = async (fresh = false) => {
+    box.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
+    const a = await accountStatus(fresh);
+    box.innerHTML = '';
+    if (!a.found) {
+      box.appendChild(row(t('acct_title'), t('acct_need_cc'), group(
+        button(t('cc_install'), '', () => call('open_external', { url: CC_SETUP_URL })),
+        button(t('cc_detect'), 'ghost', () => draw(true)))));
+      return;
+    }
+    if (a.logged_in) {
+      const who = [a.email, planName(a)].filter(Boolean).join(' · ');
+      box.appendChild(row(who || t('acct_signed_in'), t('acct_signed_in'), button(t('acct_signout'), '', async () => {
+        if (!(await confirmDialog(t('acct_signout_confirm'), { okLabel: t('acct_signout'), danger: false }))) return;
+        await call('claude_auth_logout');
+        // chats set to the account would only fail now
+        if (store.settings.chat_engine === 'claude-code') save({ chat_engine: 'auto' });
+        toast(t('acct_signedout'));
+        draw(true);
+      })));
+    } else {
+      box.appendChild(row(t('acct_title'), t('acct_signedout_d'), group(
+        signInButton('primary', () => draw(true)),
+        button(t('acct_terminal'), 'ghost', () => call('claude_code_login')))));
+    }
+    box.appendChild(row(t('chat_engine'), t('chat_engine_d'), select('chat_engine', [['auto', t('chat_engine_auto')], ['api', t('api_plan')], ['claude-code', t('acct_plan')]])));
+    box.appendChild(h(`<p class="help" style="margin:-6px 0 18px">${esc(t('acct_chat_note'))}</p>`));
+  };
+  draw();
+}
+
 function modelOptions() {
   return store.models.filter((m) => m.available !== false).map((m) => [m.id, `${m.name}${m.legacy ? '' : ''}`]);
 }
@@ -161,14 +199,10 @@ const RENDER = {
 
   appearance(body) {
     body.appendChild(h(`<h3>${t('s_appearance')}</h3>`));
-    const cards = h('<div class="theme-cards"></div>');
-    const opts = [['light', t('light'), '#faf9f5', '#f0eee6'], ['dark', t('dark'), '#262624', '#1f1e1d'], ['system', t('system'), '#faf9f5', '#262624']];
-    for (const [id, label, a, b] of opts) {
-      const c = h(`<button class="theme-card ${store.settings.theme === id ? 'on' : ''}"><div class="sw"><div style="flex:1;background:${a}"></div><div style="flex:1;background:${b}"></div></div>${esc(label)}</button>`);
-      c.onclick = () => save({ theme: id });
-      cards.appendChild(c);
-    }
-    body.appendChild(field(t('theme'), cards));
+    const cur = store.settings.theme === 'light' || store.settings.theme === 'dark' ? store.settings.theme : 'system';
+    const th = h(`<div class="segmented icons">${[['system', 'monitor', t('system')], ['light', 'sun', t('light')], ['dark', 'moon', t('dark')]].map(([id, ic, label]) => `<button data-th="${id}" title="${esc(label)}" aria-label="${esc(label)}" class="${cur === id ? 'on' : ''}">${icon(ic, 15)}</button>`).join('')}</div>`);
+    th.querySelectorAll('button').forEach((b) => b.onclick = () => save({ theme: b.dataset.th }));
+    body.appendChild(row(t('theme'), '', th));
     const fonts = [['default', t('font_default')], ['sans', t('font_sans')], ['system', t('font_system')], ['dyslexic', t('font_dyslexic')]];
     body.appendChild(row(t('chat_font'), '', select('chat_font', fonts)));
     body.appendChild(row(t('chat_width'), t('chat_width_d'), select('chat_width', [['normal', t('width_normal')], ['wide', t('width_wide')], ['full', t('width_full')]])));
@@ -179,6 +213,8 @@ const RENDER = {
 
   account(body) {
     body.appendChild(h(`<h3>${t('s_account')}</h3>`));
+    claudeAccount(body);
+    body.appendChild(h(`<h4>${t('api_key')}</h4>`));
     const s = store.settings;
     if (s.has_api_key) {
       body.appendChild(row(t('current_key'), s.api_key_masked || '', h('<span></span>')));
@@ -306,9 +342,9 @@ const RENDER = {
       status.innerHTML = info.found
         ? `<span class="small">${icon('check', 13)} ${esc(info.version || 'claude')} · <span class="mono muted">${esc(info.path)}</span></span>`
         : `<span class="small" style="color:var(--danger)">${esc(t('cc_missing'))}</span>`;
-      const login = button(t('cc_login'), 'sm', () => call('claude_code_login').catch(errorToast));
+      const login = button(t('cc_login'), 'sm', () => emit('open-settings', 'account'));
       const detect = button(t('cc_detect'), 'sm ghost', drawStatus);
-      const install = button(t('cc_install'), 'sm ghost', () => call('open_external', { url: 'https://docs.claude.com/en/docs/claude-code/setup' }));
+      const install = button(t('cc_install'), 'sm ghost', () => call('open_external', { url: CC_SETUP_URL }));
       if (info.found) status.append(login, detect); else status.append(install, detect);
     };
     drawStatus();

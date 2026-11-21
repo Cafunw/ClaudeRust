@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit } from './store.js';
-import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64 } from './util.js';
+import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -19,8 +19,9 @@ export async function renderProjects(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head"><h1>${t('projects')}</h1><div class="grow"></div><button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_project')}</button></div>
     <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_projects')}"></div>
-    <div class="grid"></div></div></div>`;
+    <div class="grid projects"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => newProjectDialog();
+  searchToggle(view);
   await refreshProjects();
   const grid = $('.grid', view);
   const draw = (q) => {
@@ -31,9 +32,8 @@ export async function renderProjects(view) {
     }
     grid.innerHTML = '';
     for (const p of list) {
-      const card = h(`<button class="card"><div class="row"><div class="t grow ellipsis">${esc(p.name)}</div>${p.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}</div>
-        <div class="d">${esc(p.description || '')}</div>
-        <div class="f">${t('updated')} ${relTime(p.updated_at)} · ${p.conversation_count} ${t('chats').toLowerCase()}</div></button>`);
+      const card = h(`<button class="card project-card" title="${esc(p.description || '')}"><span class="tile">${icon('folder', 16)}</span><span class="grow"><span class="row"><span class="t ellipsis">${esc(p.name)}</span>${p.starred ? `<span style="color:var(--accent)">${icon('starFill', 13)}</span>` : ''}</span>
+        <span class="f">${t('updated')} ${relTime(p.updated_at)} · ${p.conversation_count} ${t('chats').toLowerCase()}</span></span></button>`);
       card.onclick = () => emit('navigate', { name: 'project', params: { id: p.id } });
       grid.appendChild(card);
     }
