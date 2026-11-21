@@ -3,6 +3,78 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.2] - 2026-11-22
+
+Sign-in for remote MCP servers, tools in chats on your Claude account,
+Claude's questions in the Code tab, and fewer leftovers after a crash.
+
+**MCP**
+- Remote MCP servers that need a sign-in show *Sign in* in Settings →
+  Developer: you sign in in your browser (OAuth) and the server connects.
+  The sign-in is kept in the system's credential store on Windows and macOS;
+  on Linux it lasts until the app quits.
+- A local (stdio) MCP server that stops is started again by itself, up to
+  five times in a row with a growing wait, and a server's changed tool list
+  shows without a Reload.
+- MCP tool calls show the server and the tool's name.
+
+**Chats on your Claude account**
+- They can use the MCP servers you enabled and web search. MCP tools follow
+  their Allow / Ask / Block setting, and web fetch asks first. Searching
+  your past chats is not available in them yet.
+- They get a generated title, like chats that use an API key.
+
+**Code**
+- Claude's questions (AskUserQuestion) show as a card in the Code tab: pick
+  an option or type your own answer. Before, they came up as a permission
+  request that could not be answered.
+- A turn in a resumed Claude Code session shows its own cost, no longer the
+  session's running total.
+
+**Stability**
+- Windows: the Claude Code CLI, MCP servers, terminals and shells now end
+  with the app, also when it crashes or is killed. On macOS and Linux they
+  still end only when the app quits normally.
+- An answer is saved while it streams in, so a crash keeps what had
+  arrived; it shows as stopped on the next start.
+
+**Faster**
+- Streaming sends only the new text to the window, not the whole answer
+  again on every update (a 5,000-character answer: 2.29 MB down to 0.21 MB).
+
+**Links**
+- `clauderust://` links open a conversation (`clauderust://chat/<id>`), a
+  new chat or code session with a prompt filled in
+  (`clauderust://new?prompt=...`, `clauderust://code?prompt=...`) or
+  Settings. The prompt only waits in the message box: nothing is sent by
+  itself.
+
+**Artifacts**
+- React artifacts can import 16 common shadcn/ui components from
+  `@/components/ui/...` (button, card, dialog, tabs, select and others) and
+  `cn` from `@/lib/utils`: ClaudeRust's stand-ins with the same names and
+  props, in the app's colours.
+- `window.storage` works in artifacts; the app keeps what they store (about
+  2 million characters for all artifacts together). `window.claude.complete`
+  is not available.
+
+**Security**
+- The window can only have the system open the app's own data folders and
+  the MCP config file, or show files in those and in your sessions'
+  folders.
+
+**Interface**
+- The terminal's Ask Claude bar sits above the terminal instead of covering
+  its output.
+- The "N files edited" summary counts only the lines that changed and shows
+  paths relative to the project, also on Windows.
+- Costs are written the same way everywhere; a narrow top bar keeps the
+  engine's icon and the context meter (details in their tooltips); in a
+  narrow window the open sidebar dims the page and a click beside it closes
+  it.
+- Model descriptions and the common error messages (no API key, rejected
+  key, rate limit, overload, network) are translated into Turkish.
+
 ## [0.1.1] - 2026-11-22
 
 Fixes for security, stability, start-up time and rendering.
