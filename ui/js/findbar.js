@@ -2,7 +2,7 @@
 // and steps through them.
 import { t } from './i18n.js';
 import { icon } from './icons.js';
-import { isMac } from './api.js';
+import * as keymap from './keymap.js';
 import { h, esc } from './util.js';
 
 let bar = null;
@@ -106,6 +106,5 @@ export function openFind() {
 }
 
 window.addEventListener('keydown', (e) => {
-  const mod = isMac ? e.metaKey : e.ctrlKey;
-  if (mod && !e.shiftKey && e.key.toLowerCase() === 'f' && document.querySelector('.chat-scroll')) { e.preventDefault(); openFind(); }
+  if (keymap.matches(e, 'find') && document.querySelector('.chat-scroll')) { e.preventDefault(); openFind(); }
 });

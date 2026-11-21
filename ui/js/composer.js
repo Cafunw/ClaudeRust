@@ -1,4 +1,5 @@
 // The message composer: text input, attachments, model / tools menus.
+import * as keymap from './keymap.js';
 import * as slash from './slash.js';
 import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
@@ -347,7 +348,7 @@ export function createComposer(opts) {
     if (e.key === 'Enter' && ((sendOnEnter && !e.shiftKey && !e.ctrlKey && !e.metaKey) || (!sendOnEnter && (e.ctrlKey || e.metaKey)))) {
       e.preventDefault();
       if (!running || ta.value.trim()) send();
-    } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'r') {
+    } else if (keymap.matches(e, 'history')) {
       // search messages sent before (like a shell's history search)
       e.preventDefault();
       import('./prompt_history.js').then((m) => m.openPromptHistory(api, el));

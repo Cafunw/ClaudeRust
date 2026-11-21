@@ -3,6 +3,7 @@
 import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { call } from './api.js';
+import * as keymap from './keymap.js';
 import { h, esc, relTime, debounce } from './util.js';
 
 let pop = null;
@@ -54,7 +55,7 @@ export function openPromptHistory(composer, anchor) {
     if (e.key === 'ArrowDown') { e.preventDefault(); if (items.length) { sel = (sel + 1) % items.length; draw(); } }
     else if (e.key === 'ArrowUp') { e.preventDefault(); if (items.length) { sel = (sel - 1 + items.length) % items.length; draw(); } }
     else if (e.key === 'Enter') { e.preventDefault(); pick(sel); }
-    else if (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r')) { e.preventDefault(); e.stopPropagation(); close(); composer.focus(); }
+    else if (e.key === 'Escape' || keymap.matches(e, 'history')) { e.preventDefault(); e.stopPropagation(); close(); composer.focus(); }
   });
   input.addEventListener('blur', () => setTimeout(() => { if (pop && !pop.contains(document.activeElement)) close(); }, 150));
   // start from what's typed in the box

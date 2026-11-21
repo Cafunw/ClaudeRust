@@ -8,6 +8,7 @@ import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
 import { setToolProgress } from './parts.js';
 import * as workspace from './workspace.js';
+import * as keymap from './keymap.js';
 import './commands_builtin.js';
 import './rewind.js';
 import './memory_ui.js';
@@ -152,11 +153,10 @@ function bindShortcuts() {
   window.addEventListener('keydown', (e) => {
     const mod = isMac ? e.metaKey : e.ctrlKey;
     const k = e.key.toLowerCase();
-    if (mod && e.shiftKey && k === 'o') { e.preventDefault(); navigate({ name: 'new' }); }
-    else if (mod && !e.shiftKey && k === 'n') { e.preventDefault(); navigate({ name: 'new' }); }
-    else if (mod && k === 'k') { e.preventDefault(); openSearch(); }
-    else if (mod && (k === 'b' || k === '.')) { e.preventDefault(); toggleSidebar(); }
-    else if (mod && k === ',') { e.preventDefault(); openSettings('general'); }
+    if (keymap.matches(e, 'new_chat')) { e.preventDefault(); navigate({ name: 'new' }); }
+    else if (keymap.matches(e, 'palette')) { e.preventDefault(); openSearch(); }
+    else if (keymap.matches(e, 'sidebar')) { e.preventDefault(); toggleSidebar(); }
+    else if (keymap.matches(e, 'settings')) { e.preventDefault(); openSettings('general'); }
     else if (mod && (k === '=' || k === '+')) { e.preventDefault(); setZoom((store.settings.zoom || 1) + 0.1); }
     else if (mod && k === '-') { e.preventDefault(); setZoom((store.settings.zoom || 1) - 0.1); }
     else if (mod && k === '0') { e.preventDefault(); setZoom(1); }

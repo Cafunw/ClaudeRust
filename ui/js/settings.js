@@ -5,6 +5,7 @@ import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
 import { $, esc, h, modal, button, toast, errorToast, promptDialog, confirmDialog } from './util.js';
 import { renderImport } from './importer.js';
+import * as keymap from './keymap.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -323,12 +324,52 @@ const RENDER = {
   shortcuts(body) {
     const mod = isMac ? '⌘' : 'Ctrl';
     body.appendChild(h(`<h3>${t('shortcuts_list')}</h3>`));
+    body.appendChild(h(`<p class="muted small">${esc(t('kb_help'))}</p>`));
+    const names = { new_chat: t('sc_new'), palette: t('sc_search'), sidebar: t('sc_sidebar'), settings: t('sc_settings'), workspace: t('ws_toggle'), find: t('sc_find'), history: t('sc_history'), shortcuts: t('sc_sheet') };
+    const user = () => ({ ...(store.settings.keybindings || {}) });
+    const draw = () => {
+      body.querySelectorAll('.kb-row').forEach((r) => r.remove());
+      const anchor = body.querySelector('.kb-fixed');
+      for (const action of keymap.ACTIONS) {
+        const changed = Object.prototype.hasOwnProperty.call(user(), action);
+        const ctl = h(`<div class="kb-ctl"><span class="chip mono kb-chip">${esc(keymap.shown(action) || t('kb_off'))}</span><button class="btn sm" data-a="change">${esc(t('kb_change'))}</button>${changed ? `<button class="btn sm ghost" data-a="reset">${esc(t('kb_reset'))}</button>` : ''}</div>`);
+        const r = row(names[action] || action, '', ctl);
+        r.classList.add('kb-row');
+        ctl.querySelector('[data-a=change]').onclick = () => record(action, ctl.querySelector('.kb-chip'));
+        const rs = ctl.querySelector('[data-a=reset]');
+        if (rs) rs.onclick = () => { const u = user(); delete u[action]; save({ keybindings: u }); setTimeout(draw, 300); };
+        body.insertBefore(r, anchor);
+      }
+    };
+    const record = (action, chip) => {
+      chip.textContent = t('kb_press');
+      chip.classList.add('rec');
+      const onKey = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const done = () => { window.removeEventListener('keydown', onKey, true); chip.classList.remove('rec'); };
+        if (e.key === 'Escape') { done(); draw(); return; }
+        if (e.key === 'Backspace' || e.key === 'Delete') { done(); save({ keybindings: { ...user(), [action]: '' } }); setTimeout(draw, 300); return; }
+        const b = keymap.fromEvent(e);
+        if (!b) { if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) chip.textContent = t('kb_need_mod'); return; }
+        const p = keymap.parse(b);
+        const other = keymap.ACTIONS.find((a) => a !== action && keymap.bindings(a).some((x) => { const q = keymap.parse(x); return q.key === p.key && q.mod === p.mod && q.ctrl === p.ctrl && q.alt === p.alt && q.shift === p.shift && q.meta === p.meta; }));
+        done();
+        if (other) { toast(t('kb_conflict', { key: keymap.label(b), action: names[other] || other }), 'error'); draw(); return; }
+        save({ keybindings: { ...user(), [action]: b } });
+        setTimeout(draw, 300);
+      };
+      window.addEventListener('keydown', onKey, true);
+    };
+    const fixed = h('<div class="kb-fixed"></div>');
+    body.appendChild(fixed);
     const list = [
-      [t('sc_new'), `${mod}+Shift+O`], [t('sc_search'), `${mod}+K`], [t('sc_sidebar'), `${mod}+B`], [t('sc_settings'), `${mod}+,`],
       [t('sc_send'), 'Enter'], [t('sc_newline'), 'Shift+Enter'], [t('sc_stop'), 'Esc'], [t('sc_edit_last'), '↑'],
+      [t('sc_switch_conv'), 'Ctrl+Tab'], [t('sc_panes'), 'Alt+1 … Alt+8'],
       [t('sc_zoom'), `${mod} + / − / 0`], [t('quick_entry'), store.settings.quick_entry_shortcut],
     ];
     for (const [a, b] of list) body.appendChild(row(a, '', h(`<span class="chip mono" style="height:26px">${esc(b)}</span>`)));
+    draw();
   },
 
   about(body) {

@@ -2,6 +2,7 @@
 // (Changes, Terminal, Plan, Tasks, Preview, …). Each tab is a small module
 // registered with registerPane(); panes keep their DOM per conversation so
 // switching tabs or conversations doesn't lose terminal state.
+import * as keymap from './keymap.js';
 import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { h, esc } from './util.js';
@@ -178,5 +179,5 @@ window.addEventListener('artifact-opened', () => { if (open) { open = false; ren
 
 window.addEventListener('keydown', (e) => {
   if (!ctx) return;
-  if ((e.ctrlKey || e.metaKey) && e.key === '`') { e.preventDefault(); toggle('terminal'); }
+  if (keymap.matches(e, 'workspace')) { e.preventDefault(); toggle('terminal'); }
 });

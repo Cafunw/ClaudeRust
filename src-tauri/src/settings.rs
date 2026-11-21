@@ -84,6 +84,8 @@ pub struct Settings {
 
     // Tools: per tool policy, key "server/tool" -> ask | allow | deny
     pub tool_policies: serde_json::Map<String, Value>,
+    /// Changed keyboard shortcuts: action -> binding ("Mod+Shift+O"; "" = off)
+    pub keybindings: serde_json::Map<String, Value>,
     /// Project folders whose hook configuration the user trusted: root -> hash
     pub trusted_hooks: serde_json::Map<String, Value>,
     /// OpenAI-compatible endpoint for local / other models ("" = off), e.g. http://localhost:11434/v1
@@ -142,6 +144,7 @@ impl Default for Settings {
             turn_budget_usd: 0.0,
             overload_fallback: "auto".into(),
             tool_policies: Default::default(),
+            keybindings: Default::default(),
             trusted_hooks: Default::default(),
             oai_base_url: String::new(),
             oai_api_key: String::new(),

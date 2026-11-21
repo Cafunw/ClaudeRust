@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  kb_help: "Click Change, then press the new keys (with Ctrl, ⌘ or Alt). Esc cancels; Backspace turns the shortcut off.",
+  kb_change: "Change",
+  kb_reset: "Reset",
+  kb_off: "off",
+  kb_press: "Press keys…",
+  kb_need_mod: "Add Ctrl, ⌘ or Alt…",
+  kb_conflict: "{key} is already used for “{action}”.",
+  sc_customize: "Shortcuts can be changed in Settings → Shortcuts.",
   code_run: "Run",
   code_run_tip: "Paste into the terminal (press Enter there to run it)",
   code_run_failed: "The terminal couldn't be opened.",
@@ -484,6 +492,14 @@ const en = {
 };
 
 const tr = {
+  kb_help: "Değiştir'e tıklayın, sonra yeni tuşlara basın (Ctrl, ⌘ ya da Alt ile). Esc iptal eder; Backspace kısayolu kapatır.",
+  kb_change: "Değiştir",
+  kb_reset: "Sıfırla",
+  kb_off: "kapalı",
+  kb_press: "Tuşlara basın…",
+  kb_need_mod: "Ctrl, ⌘ ya da Alt ekleyin…",
+  kb_conflict: "{key} zaten “{action}” için kullanılıyor.",
+  sc_customize: "Kısayollar Ayarlar → Kısayollar'dan değiştirilebilir.",
   code_run: "Çalıştır",
   code_run_tip: "Terminale yapıştır (çalıştırmak için orada Enter'a basın)",
   code_run_failed: "Terminal açılamadı.",
