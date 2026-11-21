@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  code_save_tip: "Save as a file…",
   settings_backup_title: "Back up settings",
   settings_backup_d: "Save your settings (preferences, styles, shortcuts, tool permissions) to a file, or restore them — e.g. on a new computer. API keys and machine-specific paths aren't included.",
   settings_backup: "Save to file…",
@@ -560,6 +561,7 @@ const en = {
 };
 
 const tr = {
+  code_save_tip: "Dosya olarak kaydet…",
   settings_backup_title: "Ayarları yedekle",
   settings_backup_d: "Ayarlarınızı (tercihler, stiller, kısayollar, araç izinleri) bir dosyaya kaydedin ya da geri yükleyin — örneğin yeni bir bilgisayarda. API anahtarları ve bu makineye özgü yollar dahil edilmez.",
   settings_backup: "Dosyaya kaydet…",

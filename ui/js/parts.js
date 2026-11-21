@@ -45,8 +45,13 @@ export function decorate(root) {
     if (b.dataset.ready) return;
     b.dataset.ready = '1';
     b.innerHTML = `${icon('copy', 14)}<span>${t('copy_code')}</span>`;
-    // shell snippets in a code session can go straight to the terminal
     const block = b.closest('.code-block');
+    // any code block can be saved as a file
+    if (block && !block.querySelector('.code-save')) {
+      const save = h(`<button class="code-run code-save" type="button" title="${t('code_save_tip')}">${icon('download', 14)}</button>`);
+      b.before(save);
+    }
+    // shell snippets in a code session can go straight to the terminal
     if (store.codeRoot && block && SHELL_LANGS.has((block.dataset.lang || '').toLowerCase()) && block.closest('.turn.assistant')) {
       const run = h(`<button class="code-run" type="button" title="${t('code_run_tip')}">${icon('terminal', 14)}<span>${t('code_run')}</span></button>`);
       b.before(run);
@@ -76,8 +81,30 @@ export function shellCommands(code) {
   return lines.map((l) => l.replace(/^\s*[$%] /, '')).join('\n');
 }
 
+const EXT = {
+  javascript: 'js', js: 'js', jsx: 'jsx', typescript: 'ts', ts: 'ts', tsx: 'tsx', python: 'py', py: 'py', rust: 'rs', rs: 'rs', go: 'go',
+  java: 'java', kotlin: 'kt', swift: 'swift', c: 'c', cpp: 'cpp', 'c++': 'cpp', csharp: 'cs', cs: 'cs', ruby: 'rb', rb: 'rb', php: 'php',
+  html: 'html', css: 'css', scss: 'scss', json: 'json', yaml: 'yaml', yml: 'yml', toml: 'toml', xml: 'xml', sql: 'sql', markdown: 'md', md: 'md',
+  bash: 'sh', sh: 'sh', shell: 'sh', zsh: 'sh', powershell: 'ps1', ps1: 'ps1', dockerfile: 'Dockerfile', makefile: 'Makefile', lua: 'lua', r: 'r',
+  dart: 'dart', scala: 'scala', elixir: 'ex', haskell: 'hs', vue: 'vue', svelte: 'svelte', graphql: 'graphql', ini: 'ini', csv: 'csv', txt: 'txt',
+};
+
+/** A file name for a code block of language `lang`. */
+export function codeFileName(lang) {
+  const l = String(lang || '').toLowerCase();
+  const ext = EXT[l] || 'txt';
+  return ext === 'Dockerfile' || ext === 'Makefile' ? ext : `snippet.${ext}`;
+}
+
 // Global delegated click handling for rendered content.
 document.addEventListener('click', async (e) => {
+  const saveBtn = e.target.closest('.code-save');
+  if (saveBtn) {
+    const block = saveBtn.closest('.code-block');
+    const code = block?.querySelector('code')?.innerText || '';
+    try { await call('save_text_file', { name: codeFileName(block?.dataset.lang), content: code }); } catch (err) { toast(String((err && err.message) || err), 'error'); }
+    return;
+  }
   const runBtn = e.target.closest('.code-run');
   if (runBtn) {
     const code = runBtn.closest('.code-block')?.querySelector('code')?.innerText || '';
