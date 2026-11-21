@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  review_pr_p: "Review pull request #{n} “{title}” by {author} ({head} → {base}, +{add} −{del} in {files} files): {url}\n\nIts description:\n\n{body}\n\nThe full diff is attached. Read the surrounding code in this repository where it helps. Report problems ordered by severity — bugs and broken behaviour first, then security, performance, error handling and missing tests — each with file and line, a concrete failure scenario and the fix. Finish with a short verdict. Don't modify files.",
   fv_blame: "Blame: who last changed each line",
   blame_uncommitted: "not committed yet",
   fv_explain: "Explain this file",
@@ -512,6 +513,7 @@ const en = {
 };
 
 const tr = {
+  review_pr_p: "{author} tarafından açılan #{n} numaralı “{title}” çekme isteğini incele ({head} → {base}, {files} dosyada +{add} −{del}): {url}\n\nAçıklaması:\n\n{body}\n\nDiff'in tamamı ekte. Gerektiğinde bu depodaki çevre kodu oku. Sorunları önem sırasına göre bildir — önce hatalar ve bozuk davranışlar, sonra güvenlik, performans, hata yönetimi ve eksik testler — her biri için dosya ve satır, somut bir hata senaryosu ve düzeltme. Kısa bir değerlendirmeyle bitir. Dosyaları değiştirme.",
   fv_blame: "Blame: her satırı en son kim değiştirdi",
   blame_uncommitted: "henüz commit edilmedi",
   fv_explain: "Bu dosyayı açıkla",

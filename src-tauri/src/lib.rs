@@ -386,6 +386,7 @@ pub fn run() {
             commands::pr_info,
             commands::pr_suggest,
             commands::pr_create,
+            commands::pr_fetch,
             commands::slash_list,
             commands::slash_expand,
             commands::slash_save,

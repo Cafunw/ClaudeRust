@@ -205,6 +205,33 @@ pub async fn create(root: &Path, title: &str, body: &str, base: &str, draft: boo
     }
 }
 
+/// Whether `pr` names a pull request: a number (`42`, `#42`) or a pull
+/// request URL. Anything else (notably text starting with `-`) is refused.
+pub fn pr_ref(pr: &str) -> Option<String> {
+    let p = pr.trim().trim_start_matches('#');
+    if !p.is_empty() && p.len() <= 10 && p.chars().all(|c| c.is_ascii_digit()) {
+        return Some(p.to_string());
+    }
+    let u = pr.trim();
+    if (u.starts_with("https://") || u.starts_with("http://")) && (u.contains("/pull/") || u.contains("/merge_requests/")) && !u.contains(char::is_whitespace) {
+        return Some(u.to_string());
+    }
+    None
+}
+
+/// A pull request's details and diff, through `gh`.
+pub async fn fetch(root: &Path, pr: &str) -> AppResult<Value> {
+    let Some(r) = pr_ref(pr) else { return Err(AppError::msg("Give a pull request number or URL.")) };
+    if !crate::shellenv::which("gh") {
+        return Err(AppError::msg("Reviewing a pull request needs the GitHub CLI (gh), signed in with `gh auth login`."));
+    }
+    let meta = gh(root, &["pr", "view", &r, "--json", "number,title,body,url,author,baseRefName,headRefName,additions,deletions,changedFiles"], None).await?;
+    let mut v: Value = serde_json::from_str(&meta).map_err(|_| AppError::msg("gh returned something unexpected."))?;
+    let diff = gh(root, &["pr", "diff", &r, "--color", "never"], None).await?;
+    v["diff"] = json!(diff);
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +246,17 @@ mod tests {
         assert!(compare_url("git@gitlab.com:grp/sub/app.git", "main", "b").unwrap().starts_with("https://gitlab.com/grp/sub/app/-/merge_requests/new?"));
         assert_eq!(compare_url("/srv/git/app.git", "main", "b"), None);
         assert_eq!(compare_url("https://example.org/acme/app.git", "main", "b"), None);
+    }
+
+    #[test]
+    fn pr_refs() {
+        assert_eq!(pr_ref("42").as_deref(), Some("42"));
+        assert_eq!(pr_ref("#7").as_deref(), Some("7"));
+        assert_eq!(pr_ref("https://github.com/a/b/pull/9").as_deref(), Some("https://github.com/a/b/pull/9"));
+        assert_eq!(pr_ref("--repo=x"), None);
+        assert_eq!(pr_ref("focus on security"), None);
+        assert_eq!(pr_ref("https://github.com/a/b/pull/9 --web"), None);
+        assert_eq!(pr_ref(""), None);
     }
 
     #[test]

@@ -60,7 +60,10 @@ export async function handle(text, ctx) {
   const b = builtinCommands(ctx).find((c) => c.name === p.name);
   if (b) {
     const r = await b.run(p.args, ctx);
-    return typeof r === 'string' ? { prompt: r } : { handled: true };
+    if (typeof r === 'string') return { prompt: r };
+    // a command can also hand back attachments to send with its prompt
+    if (r && typeof r === 'object' && typeof r.prompt === 'string') return { prompt: r.prompt, attachments: r.attachments || [] };
+    return { handled: true };
   }
   if (ctx.kind === 'code') {
     try {

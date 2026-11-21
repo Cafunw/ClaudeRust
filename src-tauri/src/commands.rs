@@ -2012,6 +2012,13 @@ pub async fn pr_suggest(state: St<'_>, conversation_id: String, base: String) ->
     Ok(json!({"title": title, "body": body}))
 }
 
+/// A pull request's details and diff (for `/review <number or URL>`).
+#[tauri::command]
+pub async fn pr_fetch(state: St<'_>, conversation_id: String, pr: String) -> AppResult<Value> {
+    let root = session_repo(&state, &conversation_id).await?;
+    crate::pullrequest::fetch(&root, &pr).await
+}
+
 /// Push and open the pull request (or return the host's compare page).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]

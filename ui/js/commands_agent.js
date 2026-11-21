@@ -35,9 +35,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 registerCommand({
   name: 'review',
   description: () => t('cmd_review'),
-  hint: '[focus]',
+  hint: '[focus | PR number or URL]',
   kinds: ['code'],
-  run: async (args, ctx) => (ctx.engine === 'claude-code' ? `/review ${args}`.trim() : REVIEW_PROMPT(args)),
+  run: async (args, ctx) => {
+    if (ctx.engine === 'claude-code') return `/review ${args}`.trim();
+    // `/review 42` or a pull request URL: review that pull request
+    const a = (args || '').trim();
+    if (/^#?\d+$/.test(a) || /^https?:\/\/\S+\/(pull|merge_requests)\/\d+/.test(a)) {
+      try {
+        const pr = await call('pr_fetch', { conversationId: ctx.conversationId, pr: a });
+        const att = await call('stage_text', { name: `PR-${pr.number}.diff`, text: pr.diff || '' });
+        return {
+          prompt: t('review_pr_p', {
+            n: pr.number, title: pr.title || '', author: (pr.author && pr.author.login) || '', head: pr.headRefName || '', base: pr.baseRefName || '',
+            add: pr.additions ?? 0, del: pr.deletions ?? 0, files: pr.changedFiles ?? 0, url: pr.url || '', body: (pr.body || '').trim() || '—',
+          }),
+          attachments: [att],
+        };
+      } catch (e) { errorToast(e); return undefined; }
+    }
+    return REVIEW_PROMPT(args);
+  },
 });
 
 registerCommand({

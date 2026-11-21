@@ -202,6 +202,7 @@ export function createComposer(opts) {
           return;
         }
         if (r && r.prompt) text = r.prompt;
+        if (r && r.attachments && r.attachments.length) atts.push(...r.attachments);
       }
       const ok = await opts.onSend(text, atts, { ...st });
       if (ok !== false) {
