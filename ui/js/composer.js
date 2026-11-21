@@ -259,8 +259,25 @@ export function createComposer(opts) {
     showMenu(anchor, items, { placement: 'top-end', width: 300 });
   }
 
+  async function improve() {
+    const before = ta.value;
+    if (!before.trim() || busy) return;
+    busy = true; updateSend();
+    ta.classList.add('improving');
+    try {
+      const out = await call('improve_prompt', { text: before, code: mode === 'code' });
+      if (ta.value === before) {
+        ta.value = out; autoGrow(ta); updateSend();
+        toast(t('improved'), '', { action: t('undo'), onAction: () => { ta.value = before; autoGrow(ta); updateSend(); ta.focus(); } });
+      }
+    } catch (e) { errorToast(e); } finally {
+      busy = false; ta.classList.remove('improving'); updateSend(); ta.focus();
+    }
+  }
+
   function toolsMenu(anchor) {
     const items = [];
+    items.push({ label: t('improve_msg'), sub: t('improve_msg_d'), icon: 'sparkle', disabled: !ta.value.trim() || busy, onClick: improve }, { sep: true });
     if (mode === 'chat') {
       const row = h(`<label class="menu-item" style="cursor:pointer">${icon('globe', 16)}<span class="mtext">${t('web_search')}</span><span class="switch"><input type="checkbox" ${st.web_search ? 'checked' : ''}><span class="track"></span></span></label>`);
       row.querySelector('input').addEventListener('change', (e) => persist({ web_search: e.target.checked }));

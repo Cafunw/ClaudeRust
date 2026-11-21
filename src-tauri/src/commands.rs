@@ -2167,6 +2167,40 @@ pub async fn pr_suggest(state: St<'_>, conversation_id: String, base: String) ->
     Ok(json!({"title": title, "body": body}))
 }
 
+/// One short completion from the fast model (titles, rewrites, drafts).
+async fn quick_complete(st: &AppState, system: &str, user: String, max_tokens: u32) -> AppResult<String> {
+    let client = st.client()?;
+    let model_id = st.settings.read().title_model.clone();
+    let model = models::info(&model_id);
+    let mut body = json!({"model": model_id, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]});
+    match model.thinking {
+        models::Thinking::Disableable => body["thinking"] = json!({"type": "disabled"}),
+        models::Thinking::BetweenTools => body["thinking"] = json!({"type": "between_tools"}),
+        _ => {}
+    }
+    let v = tokio::time::timeout(std::time::Duration::from_secs(60), client.create(&body, &[]))
+        .await
+        .map_err(|_| AppError::msg("That took too long."))??;
+    Ok(v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<String>().trim().to_string())
+}
+
+pub const IMPROVE_PROMPT: &str = "You rewrite a draft message that a user is about to send to Claude so it gets a better answer. Keep the user's intent, facts, language and voice; make it clearer and more specific: state the goal, the relevant context and constraints, and the kind of answer wanted. Keep @mentions, file paths, code and slash commands exactly as written. Don't answer the message, don't add assumptions the user didn't make, and don't make it much longer than needed. Reply with the rewritten message only.";
+
+/// A clearer version of a draft message (composer → Improve my message).
+#[tauri::command]
+pub async fn improve_prompt(state: St<'_>, text: String, code: bool) -> AppResult<String> {
+    if text.trim().is_empty() {
+        return Err(AppError::msg("Write a message first."));
+    }
+    let ctx = if code { "It's for a coding agent working in the user's project." } else { "It's for a chat with Claude." };
+    let out = quick_complete(&state, IMPROVE_PROMPT, format!("{ctx}\n\n<draft>\n{}\n</draft>", text.trim()), 2048).await?;
+    let out = out.trim().trim_start_matches("<draft>").trim_end_matches("</draft>").trim().to_string();
+    if out.is_empty() {
+        return Err(AppError::msg("No rewrite came back."));
+    }
+    Ok(out)
+}
+
 /// A pull request's details and diff (for `/review <number or URL>`).
 #[tauri::command]
 pub async fn pr_fetch(state: St<'_>, conversation_id: String, pr: String) -> AppResult<Value> {

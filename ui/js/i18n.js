@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  improve_msg: "Improve my message",
+  improve_msg_d: "Rewrite the draft to be clearer and more specific",
+  improved: "Message rewritten.",
   changes_apply_patch: "Apply a patch…",
   changes_apply: "Apply",
   changes_applied: "Patch applied to {n} files.",
@@ -544,6 +547,9 @@ const en = {
 };
 
 const tr = {
+  improve_msg: "Mesajımı iyileştir",
+  improve_msg_d: "Taslağı daha açık ve net olacak şekilde yeniden yaz",
+  improved: "Mesaj yeniden yazıldı.",
   changes_apply_patch: "Yama uygula…",
   changes_apply: "Uygula",
   changes_applied: "Yama {n} dosyaya uygulandı.",

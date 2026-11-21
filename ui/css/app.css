@@ -1176,3 +1176,4 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .dv-hunk td { position: relative; }
 .dv-hunk-revert { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); height: 20px; padding: 0 6px; font-size: 11px; visibility: hidden; }
 .dv-hunk:hover .dv-hunk-revert { visibility: visible; }
+.composer textarea.improving { opacity: .55; }
