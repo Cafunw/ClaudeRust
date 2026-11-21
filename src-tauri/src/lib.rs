@@ -196,6 +196,44 @@ fn artifact_protocol(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> ta
     }
 }
 
+/// The database couldn't be opened (damaged by a crash or a sync conflict,
+/// written by an incompatible version, disk full): say so and offer to keep
+/// the file aside and start with a new one, instead of failing silently on
+/// every start. Runs on its own thread: the dialog needs the event loop.
+fn offer_fresh_db(app: &AppHandle, path: &std::path::Path, err: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let show_error = |msg: &str| {
+        app.dialog().message(msg).title("ClaudeRust").kind(MessageDialogKind::Error).blocking_show();
+    };
+    let fresh = app
+        .dialog()
+        .message(format!(
+            "ClaudeRust couldn't open its database:\n{err}\n\n{}\n\nStart with a new, empty database? The current file is kept next to it (renamed), so nothing is deleted.",
+            path.display()
+        ))
+        .title("ClaudeRust")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom("Start with a new database".into(), "Quit".into()))
+        .blocking_show();
+    if !fresh {
+        app.exit(1);
+        return;
+    }
+    let stamp = util::now_ms();
+    for suffix in ["", "-wal", "-shm"] {
+        let from = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        if from.exists() {
+            let to = std::path::PathBuf::from(format!("{}.unreadable-{stamp}{suffix}", path.display()));
+            if let Err(e) = std::fs::rename(&from, &to) {
+                show_error(&format!("Moving {} aside failed: {e}\n\nCheck that the folder is writable.", from.display()));
+                app.exit(1);
+                return;
+            }
+        }
+    }
+    app.restart();
+}
+
 pub fn run() {
     display::prepare();
     let builder = tauri::Builder::default()
@@ -232,7 +270,22 @@ pub fn run() {
             std::fs::create_dir_all(&config_dir)?;
             let mcp_path = config_dir.join("claude_desktop_config.json");
             let _ = mcp::ensure_config(&mcp_path);
-            let db = db::Db::open(&data_dir.join("clauderust.db")).map_err(|e| e.to_string())?;
+            let db_path = data_dir.join("clauderust.db");
+            let db = match db::Db::open(&db_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    // nothing else starts (the window stays hidden); the user
+                    // decides in a dialog, and the app restarts or quits
+                    log::error!("opening {} failed: {e}", db_path.display());
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                    let app = app.handle().clone();
+                    let err = e.to_string();
+                    std::thread::spawn(move || offer_fresh_db(&app, &db_path, &err));
+                    return Ok(());
+                }
+            };
             let _ = db.mark_interrupted();
             let _ = db.delete_unfinished_imports();
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
