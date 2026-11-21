@@ -31,6 +31,7 @@ pub mod prompts;
 pub mod pullrequest;
 pub mod render;
 pub mod routines;
+pub mod scripts;
 pub mod settings;
 pub mod shellenv;
 pub mod slash;
@@ -380,6 +381,7 @@ pub fn run() {
             commands::project_dir,
             commands::project_file,
             commands::scan_todos,
+            commands::project_scripts,
             commands::cc_open_in_terminal,
             commands::file_blame,
             commands::search_in_files,

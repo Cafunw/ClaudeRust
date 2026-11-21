@@ -26,12 +26,16 @@ async function draw(el, ctx) {
     started: s.started_at, finished: s.finished_at, exit: s.exit_code,
   }));
   for (const fn of extra) { try { rows.push(...(await fn(ctx))); } catch { /* ignore */ } }
+  // everything is fetched before the pane is cleared, so overlapping redraws
+  // (the 2 s timer, events) can't both append
+  const scripts = await scriptsFor(ctx);
   counts.set(ctx.convId, rows.filter((r) => r.status === 'running').length);
   updateTabs();
   el.innerHTML = '';
   const head = h(`<div class="pane-head"><span class="muted">${t('ws_tasks_d')}</span><div class="grow"></div><button class="btn sm ghost" data-a="clear">${t('clear_finished')}</button></div>`);
   head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); await call('subagents_clear', { conversationId: ctx.convId }).catch(() => {}); draw(el, ctx); };
   el.appendChild(head);
+  el.appendChild(scriptsSection(el, ctx, scripts));
   if (!rows.length) { el.appendChild(h(`<div class="pane-empty">${icon('list', 22)}<div>${t('ws_tasks_empty')}</div></div>`)); return; }
   for (const r of rows) {
     const open = expanded.has(r.id);
@@ -62,6 +66,49 @@ async function draw(el, ctx) {
     }
     el.appendChild(row);
   }
+}
+
+// ---- the project's scripts (package.json, Makefile, justfile, Cargo, …)
+
+const scriptCache = new Map(); // convId -> { at, list }
+const scriptsOpen = new Map(); // convId -> bool
+
+async function scriptsFor(ctx, force) {
+  const c = scriptCache.get(ctx.convId);
+  if (c && !force && Date.now() - c.at < 30_000) return c.list;
+  let list = [];
+  try { list = await call('project_scripts', { conversationId: ctx.convId }); } catch { list = []; }
+  scriptCache.set(ctx.convId, { at: Date.now(), list });
+  return list;
+}
+
+function scriptsSection(el, ctx, list) {
+  const box = h('<div class="scripts"></div>');
+  if (!list.length) return box;
+  const open = scriptsOpen.has(ctx.convId) ? scriptsOpen.get(ctx.convId) : list.length <= 12;
+  const head = h(`<button class="scripts-head">${icon(open ? 'chevDown' : 'chevRight', 13)}<span>${esc(t('scripts_title'))}</span><span class="muted">${list.length}</span></button>`);
+  head.onclick = () => { scriptsOpen.set(ctx.convId, !open); draw(el, ctx); };
+  box.appendChild(head);
+  if (!open) return box;
+  for (const sc of list) {
+    const r = h(`<div class="script-row" title="${esc(sc.detail ? `${sc.command}\n${sc.detail}` : sc.command)}">
+      <span class="sc-src">${esc(sc.source)}</span><span class="sc-name ellipsis">${esc(sc.name)}</span><span class="sc-cmd ellipsis">${esc(sc.detail || sc.command)}</span>
+      <button class="icon-btn sm" data-a="run" title="${esc(t('scripts_run'))}">${icon('play', 13)}</button>
+      <button class="icon-btn sm" data-a="fix" title="${esc(t('scripts_fix'))}">${icon('sparkle', 13)}</button></div>`);
+    r.querySelector('[data-a=run]').onclick = async () => {
+      const term = await import('./terminal.js');
+      if (!(await term.runInTerminal(sc.command))) errorToast(new Error(t('code_run_failed')));
+    };
+    r.querySelector('[data-a=fix]').onclick = async () => {
+      const chat = await import('../chat.js');
+      const c = chat.current();
+      if (!c || c.id !== ctx.convId) return;
+      c.composer.setText(t('scripts_fix_p', { cmd: sc.command }));
+      c.composer.send();
+    };
+    box.appendChild(r);
+  }
+  return box;
 }
 
 let timer = null;

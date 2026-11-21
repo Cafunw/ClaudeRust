@@ -1227,6 +1227,16 @@ pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppR
     crate::claudecode::open_in_terminal(Some(std::path::Path::new(&cwd)), &cli, &["--resume".to_string(), sid])
 }
 
+/// Runnable scripts the session's folder declares (Tasks pane).
+#[tauri::command]
+pub async fn project_scripts(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Ok(json!([])) };
+    let list = tokio::task::spawn_blocking(move || crate::scripts::detect(&root))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?;
+    Ok(serde_json::to_value(list)?)
+}
+
 /// TODO / FIXME / HACK / XXX / BUG comments in the session's project.
 #[tauri::command]
 pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Value> {

@@ -200,3 +200,12 @@ export async function pasteToTerminal(text) {
   }
   return false;
 }
+
+/** Run `cmd` in the session's terminal (typed and entered, as if by you). */
+export async function runInTerminal(cmd) {
+  if (!(await pasteToTerminal(cmd))) return false;
+  const ctx = context();
+  const s = ctx && sessions.get(ctx.convId);
+  if (s && s.ptyId) await call('term_write', { id: s.ptyId, data: '\r' }).catch(() => {});
+  return true;
+}
