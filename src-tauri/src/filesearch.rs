@@ -187,12 +187,26 @@ pub fn expand(text: &str, session: &crate::codetools::CodeSession) -> Vec<Value>
                 "<system-reminder>The user mentioned the directory {}. Its layout (.gitignore respected):\n{}</system-reminder>", p.display(), dir_tree(&p, 3, 300))}));
             continue;
         }
-        if meta.len() > 256 * 1024 || total > 600 * 1024 {
+        // a device (`/dev/zero` never ends) or a FIFO (blocks until someone
+        // writes) is not something to read into a message
+        if !meta.is_file() {
+            blocks.push(json!({"type": "text", "text": format!(
+                "<system-reminder>The user mentioned {}, which is not a regular file (a device, pipe or socket); its contents were not included.</system-reminder>", p.display())}));
+            continue;
+        }
+        if meta.len() > MENTION_MAX_BYTES || total > 600 * 1024 {
             blocks.push(json!({"type": "text", "text": format!(
                 "<system-reminder>The user mentioned {} ({} bytes); it is too large to include, read the parts you need.</system-reminder>", p.display(), meta.len())}));
             continue;
         }
-        let Ok(bytes) = std::fs::read(&p) else { continue };
+        // at most the limit, even if the file grew since it was measured
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&p).and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, MENTION_MAX_BYTES), &mut bytes));
+        if let Err(e) = read {
+            blocks.push(json!({"type": "text", "text": format!(
+                "<system-reminder>The user mentioned {}, but it could not be read: {e}</system-reminder>", p.display())}));
+            continue;
+        }
         if bytes.iter().take(8000).any(|&b| b == 0) {
             continue;
         }
@@ -229,35 +243,64 @@ pub fn url_mentions(text: &str) -> Vec<String> {
     mentions(text).into_iter().filter(|m| m.starts_with("http://") || m.starts_with("https://")).take(3).collect()
 }
 
-/// Fetch a mentioned web page as text (hidden reminder block).
+/// Most of a mentioned file that is read into a message.
+const MENTION_MAX_BYTES: u64 = 256 * 1024;
+/// Most of a mentioned web page that is downloaded.
+const PAGE_MAX_BYTES: usize = 3_000_000;
+
+/// Fetch a mentioned web page as text (hidden reminder block). `None` only
+/// for something that isn't an http(s) URL; a page that can't be fetched
+/// gives a block saying why, so the mention doesn't silently vanish.
 pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).user_agent("ClaudeRust").build().ok()?;
-    let body = match client.get(url).send().await {
-        Ok(r) => {
-            let status = r.status();
-            let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-            let bytes = r.bytes().await.ok()?;
-            let bytes = &bytes[..bytes.len().min(3_000_000)];
-            let text = if ct.contains("html") || ct.is_empty() {
-                html2text::from_read(bytes, 100).unwrap_or_else(|_| String::from_utf8_lossy(bytes).to_string())
-            } else if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") {
-                String::from_utf8_lossy(bytes).to_string()
-            } else {
-                format!("(binary content: {ct}, {} bytes)", bytes.len())
-            };
-            if status.is_success() {
-                crate::util::truncate_middle(text.trim(), 100_000)
-            } else {
-                format!("(the page answered {status})\n{}", crate::util::truncate_middle(text.trim(), 4_000))
-            }
-        }
+    let body = match fetch_page(url, std::time::Duration::from_secs(20)).await {
+        Ok(text) => text,
         Err(e) => format!("(could not fetch the page: {e})"),
     };
     Some(json!({"type": "text", "text": format!("<system-reminder>The user mentioned {url}. Its content:\n{body}</system-reminder>")}))
+}
+
+/// A page as text, reading at most `PAGE_MAX_BYTES` of it (a page that
+/// never ends, or a huge download, stops there).
+async fn fetch_page(url: &str, timeout: std::time::Duration) -> Result<String, String> {
+    let client = reqwest::Client::builder().timeout(timeout).user_agent("ClaudeRust").build().map_err(|e| e.to_string())?;
+    let mut r = client.get(url).send().await.map_err(|e| if e.is_timeout() { format!("no answer within {} s", timeout.as_secs()) } else { e.to_string() })?;
+    let status = r.status();
+    let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut cut = false;
+    loop {
+        match r.chunk().await {
+            Ok(Some(c)) => {
+                let room = PAGE_MAX_BYTES - bytes.len();
+                if c.len() >= room {
+                    bytes.extend_from_slice(&c[..room]);
+                    cut = true;
+                    break;
+                }
+                bytes.extend_from_slice(&c);
+            }
+            Ok(None) => break,
+            Err(e) if e.is_timeout() => return Err(format!("the page didn't finish loading within {} s", timeout.as_secs())),
+            Err(e) => return Err(format!("the connection broke while reading it ({e})")),
+        }
+    }
+    let text = if ct.contains("html") || ct.is_empty() {
+        html2text::from_read(&bytes[..], 100).unwrap_or_else(|_| String::from_utf8_lossy(&bytes).to_string())
+    } else if ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") {
+        String::from_utf8_lossy(&bytes).to_string()
+    } else {
+        format!("(binary content: {ct}, {}{} bytes)", if cut { "over " } else { "" }, bytes.len())
+    };
+    let note = if cut { format!("\n(only the first {} MB of the page were read)", PAGE_MAX_BYTES / 1_000_000) } else { String::new() };
+    Ok(if status.is_success() {
+        format!("{}{note}", crate::util::truncate_middle(text.trim(), 100_000))
+    } else {
+        format!("(the page answered {status})\n{}", crate::util::truncate_middle(text.trim(), 4_000))
+    })
 }
 
 /// An indented listing of `dir` (`depth` levels, at most `max` entries),
@@ -471,6 +514,67 @@ mod tests {
         assert_eq!(mentions("(@a.rs) @b.rs."), vec!["a.rs", "b.rs"]);
         assert!(mentions("email me@x.com").is_empty());
         assert_eq!(url_mentions("read @https://example.com/a and @src/x.rs"), vec!["https://example.com/a"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mentions_of_devices_and_pipes_are_not_read() {
+        let dir = std::env::temp_dir().join(format!("cr-fs-fifo-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: mkfifo with a valid, NUL-terminated path
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let s = crate::codetools::CodeSession::new(dir.clone());
+        // in a thread: reading /dev/zero never ends, opening a FIFO blocks
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(expand("look at @pipe and @/dev/zero", &s));
+        });
+        let b = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("expanding the mentions hung");
+        assert_eq!(b.len(), 2, "{b:?}");
+        assert!(b.iter().all(|x| x["text"].as_str().unwrap().contains("not a regular file")), "{b:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Answer one request with `head`, then `body`, then keep the connection
+    /// open for a while (`linger`) or close it.
+    async fn serve_once(head: String, body: Vec<u8>, linger: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        std::env::set_var("NO_PROXY", "127.0.0.1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(head.as_bytes()).await;
+            let _ = s.write_all(&body).await;
+            if linger {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+        format!("http://{addr}/page")
+    }
+
+    #[tokio::test]
+    async fn a_huge_page_is_read_only_up_to_the_cap() {
+        // 4 MB and then the page never ends
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\n".to_string();
+        let url = serve_once(head, vec![b'a'; 4_000_000], true).await;
+        let b = tokio::time::timeout(std::time::Duration::from_secs(10), fetch_url_block(&url)).await.expect("read past the cap");
+        let text = b.expect("the mention vanished")["text"].as_str().unwrap().to_string();
+        assert!(text.contains("only the first 3 MB"), "{}", &text[..200.min(text.len())]);
+    }
+
+    #[tokio::test]
+    async fn a_page_that_fails_to_load_says_so() {
+        // promises 1000 bytes, sends 10, hangs up
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 1000\r\n\r\n".to_string();
+        let url = serve_once(head, b"0123456789".to_vec(), false).await;
+        let b = fetch_url_block(&url).await.expect("the mention vanished");
+        let text = b["text"].as_str().unwrap();
+        assert!(text.contains(&url) && text.contains("could not fetch the page"), "{text}");
     }
 
     #[test]

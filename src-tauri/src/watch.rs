@@ -90,6 +90,16 @@ pub struct Watch {
 }
 
 impl Watch {
+    fn new(root: &Path, command: String) -> Arc<Watch> {
+        Arc::new(Watch {
+            root: root.to_path_buf(),
+            state: Mutex::new(WatchState { command, status: "idle".into(), ..Default::default() }),
+            stop: CancellationToken::new(),
+            kick: tokio::sync::Notify::new(),
+            _watcher: Mutex::new(None),
+        })
+    }
+
     pub fn summary(&self, conv_id: &str) -> Value {
         let s = self.state.lock();
         json!({
@@ -136,6 +146,16 @@ impl Watches {
         }
     }
 
+    /// Make `w` the watch of `conv_id` and stop the one it replaces, which
+    /// can be there although `start` stopped it: an overlapping `start`
+    /// may have put its own in while this one was building its watcher.
+    fn install(&self, conv_id: &str, w: Arc<Watch>) {
+        let replaced = self.map.lock().insert(conv_id.to_string(), w);
+        if let Some(old) = replaced {
+            old.stop.cancel();
+        }
+    }
+
     pub fn set_auto_fix(&self, conv_id: &str, on: bool) {
         if let Some(w) = self.get(conv_id) {
             w.state.lock().auto_fix = on;
@@ -160,14 +180,9 @@ impl Watches {
         busy: Arc<dyn Fn() -> bool + Send + Sync>,
         on_result: Arc<dyn Fn(Value) + Send + Sync>,
     ) -> AppResult<Value> {
+        // the old watch stops checking now, not once the new one is ready
         self.stop(conv_id);
-        let w = Arc::new(Watch {
-            root: root.to_path_buf(),
-            state: Mutex::new(WatchState { command: command.clone(), status: "idle".into(), ..Default::default() }),
-            stop: CancellationToken::new(),
-            kick: tokio::sync::Notify::new(),
-            _watcher: Mutex::new(None),
-        });
+        let w = Watch::new(root, command);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let root2 = root.to_path_buf();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -208,7 +223,8 @@ impl Watches {
             .watch(root, RecursiveMode::Recursive)
             .map_err(|e| AppError::msg(format!("Can't watch {}: {e}", root.display())))?;
         *w._watcher.lock() = Some(watcher);
-        self.map.lock().insert(conv_id.to_string(), w.clone());
+        self.install(conv_id, w.clone());
+        let summary = w.summary(conv_id);
 
         let app = app.clone();
         let conv = conv_id.to_string();
@@ -216,6 +232,10 @@ impl Watches {
             let emit = |w: &Watch| {
                 let _ = app.emit("watch-status", w.summary(&conv));
             };
+            // replaced by an overlapping start before it began
+            if w.stop.is_cancelled() {
+                return;
+            }
             emit(&w);
             let mut first = true;
             loop {
@@ -268,7 +288,7 @@ impl Watches {
                 on_result(w.summary(&conv));
             }
         });
-        Ok(self.get(conv_id).map(|w| w.summary(conv_id)).unwrap_or_default())
+        Ok(summary)
     }
 
     pub fn stop_all(&self) {
@@ -357,6 +377,24 @@ mod tests {
         assert!(relevant(&dir.join("src/a.rs"), &dir));
         assert!(!relevant(&dir.join("target/debug/x"), &dir));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_watch_replaced_by_an_overlapping_start_is_stopped() {
+        let dir = std::env::temp_dir();
+        let ws = Watches::default();
+        let (a, b) = (Watch::new(&dir, "true".into()), Watch::new(&dir, "true".into()));
+        // two starts at once: both stop what is there (nothing yet), build
+        // their watcher, then register
+        ws.stop("c");
+        ws.stop("c");
+        ws.install("c", a.clone());
+        ws.install("c", b.clone());
+        assert!(a.stop.is_cancelled(), "the first watch would run on, unreachable");
+        assert!(!b.stop.is_cancelled());
+        assert!(Arc::ptr_eq(&ws.get("c").unwrap(), &b));
+        ws.stop_all();
+        assert!(b.stop.is_cancelled());
     }
 
     #[cfg(unix)]

@@ -26,9 +26,20 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
+/// Limit for the whole update check (a small manifest).
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest the download may go without receiving anything. The installer
+/// itself may take as long as the connection needs, so it has no overall
+/// limit, but a stalled download fails instead of hanging the install.
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn updater(app: &AppHandle) -> AppResult<tauri_plugin_updater::Updater> {
     #[allow(unused_mut)]
-    let mut b = app.updater_builder().timeout(Duration::from_secs(30));
+    let mut b = app
+        .updater_builder()
+        .timeout(CHECK_TIMEOUT)
+        // applies to the check and the download alike
+        .configure_client(|c| c.read_timeout(DOWNLOAD_IDLE_TIMEOUT));
     // debug builds can be pointed at a test manifest
     #[cfg(debug_assertions)]
     if let Ok(url) = std::env::var("CLAUDERUST_UPDATE_ENDPOINT") {
@@ -71,11 +82,16 @@ pub async fn install(app: &AppHandle) -> AppResult<()> {
 }
 
 async fn install_inner(app: &AppHandle) -> AppResult<()> {
-    let update = updater(app)?
+    let mut update = updater(app)?
         .check()
         .await
         .map_err(|e| AppError::msg(format!("Couldn't check for updates: {e}")))?
         .ok_or_else(|| AppError::msg("ClaudeRust is up to date."))?;
+    // The check's limit is for the check: as a total request timeout on the
+    // download it would fail any installer that takes longer to arrive. (The
+    // plugin documents the builder's timeout as covering downloads too;
+    // 2.14.1 happens not to pass it on to the update it returns.)
+    update.timeout = None;
     let progress_app = app.clone();
     let mut downloaded: u64 = 0;
     let mut last = Instant::now() - Duration::from_secs(1);

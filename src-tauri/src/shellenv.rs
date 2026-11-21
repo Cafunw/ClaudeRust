@@ -14,29 +14,42 @@ pub fn path() -> OsString {
     PATH.get_or_init(compute).clone()
 }
 
+/// Where tools like node, npx, gh or claude usually live (Homebrew on Apple
+/// silicon and on Intel, the system's own folders): added when they exist,
+/// so they are found even when the login shell can't tell us its PATH.
+#[cfg(unix)]
+const COMMON_BIN_DIRS: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+
 fn compute() -> OsString {
     let current = std::env::var_os("PATH").unwrap_or_default();
     #[cfg(unix)]
     {
-        if let Some(login) = login_shell_path() {
-            let mut parts: Vec<std::path::PathBuf> = std::env::split_paths(&login).collect();
-            for p in std::env::split_paths(&current) {
-                if !parts.contains(&p) {
-                    parts.push(p);
-                }
-            }
-            for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-                let p = std::path::PathBuf::from(extra);
-                if p.exists() && !parts.contains(&p) {
-                    parts.push(p);
-                }
-            }
-            if let Ok(joined) = std::env::join_paths(parts) {
-                return joined;
-            }
+        let login = login_shell_path();
+        if login.is_none() {
+            // a slow or broken shell profile: a GUI launch then only has
+            // launchd's bare PATH, which lacks Homebrew and /usr/local
+            log::info!("couldn't read the login shell's PATH; adding the common install folders to the app's own");
+        }
+        let common: Vec<std::path::PathBuf> = COMMON_BIN_DIRS.iter().map(std::path::PathBuf::from).collect();
+        if let Some(joined) = merge_paths(login.as_deref(), &current, &common) {
+            return joined;
         }
     }
     current
+}
+
+/// The login shell's PATH (when known), then the app's own, then those of
+/// `common` that exist: each folder once, empty entries left out.
+#[cfg(unix)]
+fn merge_paths(login: Option<&std::ffi::OsStr>, current: &std::ffi::OsStr, common: &[std::path::PathBuf]) -> Option<OsString> {
+    let mut parts: Vec<std::path::PathBuf> = vec![];
+    let listed = login.into_iter().chain(std::iter::once(current)).flat_map(std::env::split_paths);
+    for p in listed.chain(common.iter().filter(|p| p.exists()).cloned()) {
+        if !p.as_os_str().is_empty() && !parts.contains(&p) {
+            parts.push(p);
+        }
+    }
+    std::env::join_paths(parts).ok()
 }
 
 #[cfg(unix)]
@@ -163,6 +176,23 @@ pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn common_folders_are_added_even_without_the_login_path() {
+        let brew = std::env::temp_dir().join(format!("cr-brew-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&brew).unwrap();
+        let missing = std::path::PathBuf::from("/nonexistent/cr-bin");
+        let common = vec![brew.clone(), missing.clone(), "/usr/bin".into()];
+        let split = |p: OsString| std::env::split_paths(&p).collect::<Vec<_>>();
+        // the login shell's PATH couldn't be read: launchd's bare PATH, plus the common folders
+        let p = split(merge_paths(None, std::ffi::OsStr::new("/usr/bin:/bin"), &common).unwrap());
+        assert_eq!(p, vec![std::path::PathBuf::from("/usr/bin"), "/bin".into(), brew.clone()]);
+        // with it: login first, then the app's, then what is missing; no repeats, no empty entries
+        let p = split(merge_paths(Some(std::ffi::OsStr::new("/login/bin::/usr/bin")), std::ffi::OsStr::new(""), &common).unwrap());
+        assert_eq!(p, vec![std::path::PathBuf::from("/login/bin"), "/usr/bin".into(), brew.clone()]);
+        let _ = std::fs::remove_dir_all(&brew);
+    }
 
     #[test]
     fn npm_shims() {
