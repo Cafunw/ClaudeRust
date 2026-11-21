@@ -259,21 +259,29 @@ pub fn api_error(status: u16, body: &str) -> AppError {
 
 // ------------------------------------------------------------------ SSE
 
+/// Server-sent events, from bytes as they arrive (LF or CRLF line endings).
 #[derive(Default)]
-struct SseParser {
+pub(crate) struct SseParser {
     event: String,
     data: Vec<String>,
 }
 
-struct SseEvent {
+pub(crate) struct SseEvent {
     #[allow(dead_code)]
-    event: String,
-    data: String,
+    pub(crate) event: String,
+    pub(crate) data: String,
 }
 
 impl SseParser {
+    /// The end of the stream: what is left in `buf` (a last line without a
+    /// line break, an event without the blank line that ends it).
+    pub(crate) fn finish(&mut self, buf: &mut Vec<u8>) -> Vec<SseEvent> {
+        buf.extend_from_slice(b"\n\n");
+        self.feed(buf)
+    }
+
     /// Consume complete lines from `buf`, returning finished events.
-    fn feed(&mut self, buf: &mut Vec<u8>) -> Vec<SseEvent> {
+    pub(crate) fn feed(&mut self, buf: &mut Vec<u8>) -> Vec<SseEvent> {
         let mut out = vec![];
         let mut start = 0usize;
         let mut i = 0usize;
@@ -348,8 +356,17 @@ impl Accumulator {
                 Ok(None)
             }
             "content_block_start" => {
-                let idx = ev["index"].as_u64().unwrap_or(self.blocks.len() as u64) as usize;
+                let idx = match ev["index"].as_u64() {
+                    None => self.blocks.len(),
+                    // blocks arrive in order; a far-off index (a broken proxy)
+                    // must not make us allocate up to it
+                    Some(i) if i <= (self.blocks.len() + MAX_BLOCK_GAP) as u64 => i as usize,
+                    Some(i) => return Err(malformed(format!("content block {i} started after only {} blocks", self.blocks.len()))),
+                };
                 let block = ev["content_block"].clone();
+                if !block.is_object() {
+                    return Err(malformed(format!("content block {idx} is not an object")));
+                }
                 while self.blocks.len() <= idx {
                     self.blocks.push(Value::Null);
                 }
@@ -366,12 +383,15 @@ impl Accumulator {
                     return Ok(None);
                 }
                 let d = &ev["delta"];
-                let b = &mut self.blocks[idx];
+                // a delta only applies to a block that started (an object)
+                let Some(b) = self.blocks[idx].as_object_mut() else {
+                    return Err(malformed(format!("delta for content block {idx}, which never started")));
+                };
                 match d["type"].as_str().unwrap_or("") {
                     "text_delta" => append_str(b, "text", d["text"].as_str().unwrap_or("")),
                     "thinking_delta" => append_str(b, "thinking", d["thinking"].as_str().unwrap_or("")),
                     "signature_delta" => {
-                        b["signature"] = d["signature"].clone();
+                        b.insert("signature".into(), d["signature"].clone());
                     }
                     "input_json_delta" => {
                         self.partial
@@ -380,10 +400,11 @@ impl Accumulator {
                             .push_str(d["partial_json"].as_str().unwrap_or(""));
                     }
                     "citations_delta" => {
-                        if !b["citations"].is_array() {
-                            b["citations"] = json!([]);
+                        let list = b.entry("citations").or_insert_with(|| json!([]));
+                        if !list.is_array() {
+                            *list = json!([]);
                         }
-                        if let Some(arr) = b["citations"].as_array_mut() {
+                        if let Some(arr) = list.as_array_mut() {
                             arr.push(d["citation"].clone());
                         }
                     }
@@ -399,20 +420,21 @@ impl Accumulator {
             "content_block_stop" => {
                 let idx = ev["index"].as_u64().unwrap_or(0) as usize;
                 if let Some(raw) = self.partial.remove(&idx) {
-                    if idx < self.blocks.len() {
-                        let b = &mut self.blocks[idx];
+                    if let Some(b) = self.blocks.get_mut(idx).and_then(|b| b.as_object_mut()) {
                         if raw.trim().is_empty() {
-                            if !b["input"].is_object() {
-                                b["input"] = json!({});
+                            if !b.get("input").is_some_and(|i| i.is_object()) {
+                                b.insert("input".into(), json!({}));
                             }
                         } else {
                             match serde_json::from_str::<Value>(&raw) {
-                                Ok(v) if v.is_object() => b["input"] = v,
+                                Ok(v) if v.is_object() => {
+                                    b.insert("input".into(), v);
+                                }
                                 _ => {
-                                    if let Some(id) = b["id"].as_str() {
+                                    if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
                                         self.invalid_json.insert(id.to_string(), raw);
                                     }
-                                    b["input"] = json!({});
+                                    b.insert("input".into(), json!({}));
                                 }
                             }
                         }
@@ -465,19 +487,20 @@ impl Accumulator {
     pub fn content(&self) -> Vec<Value> {
         let mut blocks = self.blocks.clone();
         for (idx, raw) in &self.partial {
-            if let Some(b) = blocks.get_mut(*idx) {
+            if let Some(b) = blocks.get_mut(*idx).and_then(|b| b.as_object_mut()) {
                 if let Ok(v) = serde_json::from_str::<Value>(raw) {
                     if v.is_object() {
-                        b["input"] = v;
+                        b.insert("input".into(), v);
                         continue;
                     }
                 }
-                if !b["input"].is_object() {
-                    b["input"] = json!({});
+                if !b.get("input").is_some_and(|i| i.is_object()) {
+                    b.insert("input".into(), json!({}));
                 }
             }
         }
-        blocks.into_iter().filter(|b| !b.is_null()).collect()
+        // only real blocks: never the gaps, nor anything else a server sent
+        blocks.into_iter().filter(|b| b.is_object()).collect()
     }
 
     pub fn usage_value(&self) -> Value {
@@ -485,12 +508,19 @@ impl Accumulator {
     }
 }
 
-fn append_str(b: &mut Value, key: &str, s: &str) {
+/// How far ahead of the blocks seen so far a new block's index may be.
+const MAX_BLOCK_GAP: usize = 64;
+
+fn malformed(what: String) -> AppError {
+    AppError::msg(format!("The API sent a malformed stream ({what})."))
+}
+
+fn append_str(b: &mut Map<String, Value>, key: &str, s: &str) {
     if s.is_empty() {
         return;
     }
-    let cur = b[key].as_str().unwrap_or("").to_string();
-    b[key] = Value::String(cur + s);
+    let cur = b.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    b.insert(key.to_string(), Value::String(cur + s));
 }
 
 #[cfg(test)]
@@ -539,6 +569,61 @@ mod tests {
         assert_eq!(acc.usage["output_tokens"], 7);
         assert_eq!(acc.usage["input_tokens"], 10);
         assert_eq!(acc.model().as_deref(), Some("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn hostile_block_indexes_and_shapes_are_stream_errors() {
+        // an index far beyond the blocks seen must not allocate up to it
+        let mut acc = Accumulator::default();
+        let e = acc.apply(&json!({"type": "content_block_start", "index": 4294967295u64, "content_block": {"type": "text", "text": ""}}));
+        assert!(e.is_err(), "{:?}", e.ok());
+        assert!(acc.blocks.is_empty());
+        // a small gap is fine (the missing block is simply left out)
+        acc.apply(&json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": "a"}})).unwrap();
+        assert_eq!(acc.content(), vec![json!({"type": "text", "text": "a"})]);
+        // a delta for a block that never started is an error, not a panic
+        assert!(acc.apply(&json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "x"}})).is_err());
+
+        // blocks that aren't objects
+        let mut acc = Accumulator::default();
+        assert!(acc.apply(&json!({"type": "content_block_start", "index": 0, "content_block": "text"})).is_err());
+        assert!(acc.apply(&json!({"type": "content_block_start", "index": 0, "content_block": [1, 2]})).is_err());
+        let mut acc = Accumulator::default();
+        acc.apply(&json!({"type": "message_start", "message": {"content": ["x", 5, {"type": "text", "text": "ok"}]}})).unwrap();
+        for (i, delta) in [
+            json!({"type": "text_delta", "text": "y"}),
+            json!({"type": "signature_delta", "signature": "s"}),
+            json!({"type": "citations_delta", "citation": {}}),
+            json!({"type": "something_new", "text": "z"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(acc.apply(&json!({"type": "content_block_delta", "index": i % 2, "delta": delta})).is_err());
+        }
+        assert_eq!(acc.content(), vec![json!({"type": "text", "text": "ok"})]);
+        // a tool block replaced by a non-object before it stops
+        let mut acc = Accumulator::default();
+        acc.apply(&json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t", "name": "x", "input": {}}})).unwrap();
+        acc.apply(&json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"a\":1"}})).unwrap();
+        acc.apply(&json!({"type": "message_start", "message": {"content": ["x"]}})).unwrap();
+        assert!(acc.content().is_empty());
+        acc.apply(&json!({"type": "content_block_stop", "index": 0})).unwrap();
+        assert!(acc.content().is_empty());
+    }
+
+    #[test]
+    fn sse_finish_flushes_the_last_event() {
+        let mut p = SseParser::default();
+        let mut buf = b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}".to_vec();
+        let first = p.feed(&mut buf);
+        assert_eq!(first.len(), 1);
+        let rest = p.finish(&mut buf);
+        assert_eq!(rest.iter().map(|e| e.data.as_str()).collect::<Vec<_>>(), vec!["{\"b\":2}"]);
+        let mut buf = b"data: x\n".to_vec();
+        let mut p = SseParser::default();
+        assert!(p.feed(&mut buf).is_empty());
+        assert_eq!(p.finish(&mut buf).len(), 1);
     }
 
     #[test]
