@@ -9,7 +9,7 @@ import { copyText, decorate } from './parts.js';
 let panel = null;
 let renderTimer = null;
 let renderSeq = 0;
-let fetching = null; // the panel whose document is being fetched
+let fetching = null; // { panel, id } of the document request under way
 
 function aside() { return $('#artifact-panel'); }
 
@@ -132,11 +132,14 @@ async function render() {
   // highlights all of it: one request at a time, and the latest version is
   // drawn when the one under way is back (newer requests used to make the
   // older ones stale, so a slow highlighter showed nothing until the end)
-  if (!a.complete && fetching === panel) { panel.again = true; return; }
+  // (only for the same artifact: one switched to is drawn right away)
+  const myId = a.identifier;
+  if (!a.complete && fetching && fetching.panel === panel && fetching.id === myId) { panel.again = true; return; }
   panel.lastDocKey = docKey;
   const seq = ++renderSeq;
-  const stale = () => seq !== renderSeq || !panel;
-  const mine = panel;
+  // stale: a newer render started, the panel closed or shows another artifact
+  const stale = () => seq !== renderSeq || !panel || (currentArtifact() || {}).identifier !== myId;
+  const mine = { panel, id: myId };
   fetching = mine;
   try {
     if (view === 'preview' && a.type === 'text/markdown') {
@@ -166,7 +169,7 @@ async function render() {
     panel && (panel.lastDocKey = null);
   } finally {
     if (fetching === mine) fetching = null;
-    if (mine.again && panel === mine) { mine.again = false; render(); }
+    if (mine.panel.again && panel === mine.panel) { mine.panel.again = false; render(); }
   }
 }
 
