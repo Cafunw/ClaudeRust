@@ -267,6 +267,31 @@ fn emit(app: &AppHandle, st: &AppState, conv_id: &str, ts: &mut TurnState, mcp: 
     );
 }
 
+/// Stop the CLI at the end of a turn: closing its stdin lets it exit on its
+/// own; if it doesn't, it and everything it started (its process group) get
+/// SIGTERM, then are killed. `broke_off`: the turn ended on an error, so it
+/// isn't given time to finish by itself.
+async fn stop_cli(mut child: tokio::process::Child, stdin: Option<tokio::process::ChildStdin>, broke_off: bool) {
+    drop(stdin);
+    if !broke_off && tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_ok() {
+        return;
+    }
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        crate::codetools::signal_process_group(pid, libc::SIGTERM);
+    }
+    if tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+        if let Some(pid) = child.id() {
+            #[cfg(unix)]
+            crate::codetools::kill_process_group(pid);
+            #[cfg(windows)]
+            crate::codetools::kill_process_tree(pid);
+        }
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    }
+}
+
 async fn write_line(stdin: &mut Option<tokio::process::ChildStdin>, v: &Value) {
     if let Some(w) = stdin.as_mut() {
         let _ = w.write_all(format!("{v}\n").as_bytes()).await;
@@ -526,8 +551,10 @@ async fn run_once(
     {
         let err_tail = err_tail.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            // read to the end, whatever the encoding (a message in the system
+            // code page must not stop it): the CLI blocks on a full pipe
+            let mut r = BufReader::new(stderr);
+            while let Ok(Some((l, _))) = crate::mcp::read_line_lossy(&mut r, 8 * 1024).await {
                 let mut t = err_tail.lock();
                 if t.len() > 40 {
                     t.pop_front();
@@ -538,7 +565,6 @@ async fn run_once(
     }
     write_line(&mut stdin, &first_line).await;
 
-    let nodes = st.db.tree_nodes(conv_id)?;
     let turn_start = path
         .iter()
         .rposition(|m| m.role == "user" && !render::is_tool_result_msg(m))
@@ -552,7 +578,6 @@ async fn run_once(
         tracker: view::tracker_for(&path[..turn_start]),
         last_emit: Instant::now() - Duration::from_secs(1),
     };
-    let _ = nodes;
     let mcp: HashMap<String, (String, String)> = HashMap::new();
     let math = settings.latex_enabled;
     let mut session_id: Option<String> = None;
@@ -596,192 +621,199 @@ async fn run_once(
         }};
     }
 
-    loop {
-        let line = tokio::select! {
-            l = lines.next_line() => l,
-            _ = cancel.cancelled(), if !interrupted => {
-                interrupted = true;
-                interrupt_deadline = Some(Instant::now() + Duration::from_secs(5));
-                write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}})).await;
-                continue;
-            }
-            Some(done) = perm_rx.recv() => {
-                let key = rid_key(&done.cli_request_id);
-                // Already cancelled by the CLI: nothing to answer.
-                if open_perms.remove(&key).is_none() {
+    // The event loop. Its errors (storing a row fails, say because the chat
+    // was deleted mid-turn) end it like the CLI ending does, so the cleanup
+    // after it always runs: open prompts taken down, the CLI stopped.
+    let events: AppResult<()> = async {
+        loop {
+            let line = tokio::select! {
+                l = lines.next_line() => l,
+                _ = cancel.cancelled(), if !interrupted => {
+                    interrupted = true;
+                    interrupt_deadline = Some(Instant::now() + Duration::from_secs(5));
+                    write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}})).await;
                     continue;
                 }
-                st.permissions.lock().remove(&done.req_id);
-                st.pending_perms.lock().remove(&done.req_id);
-                awaiting.remove(&done.tool_use_id);
-                let _ = app.emit("permission-resolved", json!({"request_id": done.req_id, "conversation_id": conv_id}));
-                let response = permission_response(app, st, conv_id, &done);
-                write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": done.cli_request_id, "response": response}})).await;
-                emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
-                continue;
-            }
-            _ = tokio::time::sleep(Duration::from_millis(250)), if interrupt_deadline.is_some() || result_at.is_some() => {
-                let now = Instant::now();
-                let interrupt_over = interrupt_deadline.map(|d| now > d).unwrap_or(false);
-                let result_over = result_at.map(|t| now.duration_since(t) > Duration::from_secs(3)).unwrap_or(false);
-                if interrupt_over || result_over {
-                    break;
+                Some(done) = perm_rx.recv() => {
+                    let key = rid_key(&done.cli_request_id);
+                    // Already cancelled by the CLI: nothing to answer.
+                    if open_perms.remove(&key).is_none() {
+                        continue;
+                    }
+                    st.permissions.lock().remove(&done.req_id);
+                    st.pending_perms.lock().remove(&done.req_id);
+                    awaiting.remove(&done.tool_use_id);
+                    let _ = app.emit("permission-resolved", json!({"request_id": done.req_id, "conversation_id": conv_id}));
+                    let response = permission_response(app, st, conv_id, &done);
+                    write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": done.cli_request_id, "response": response}})).await;
+                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                    continue;
                 }
-                continue;
-            }
-        };
-        let Ok(Some(line)) = line else { break };
-        let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
-        let top_level = ev["parent_tool_use_id"].is_null();
-        match ev["type"].as_str().unwrap_or("") {
-            "system" => {
-                if ev["subtype"] == "init" {
-                    if let Some(sid) = ev["session_id"].as_str() {
-                        session_id = Some(sid.to_string());
-                        let sid = sid.to_string();
-                        update_conv_options(st, conv_id, |o| o["cc_session"] = json!(sid));
+                _ = tokio::time::sleep(Duration::from_millis(250)), if interrupt_deadline.is_some() || result_at.is_some() => {
+                    let now = Instant::now();
+                    let interrupt_over = interrupt_deadline.map(|d| now > d).unwrap_or(false);
+                    let result_over = result_at.map(|t| now.duration_since(t) > Duration::from_secs(3)).unwrap_or(false);
+                    if interrupt_over || result_over {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let Ok(Some(line)) = line else { break };
+            let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+            let top_level = ev["parent_tool_use_id"].is_null();
+            match ev["type"].as_str().unwrap_or("") {
+                "system" => {
+                    if ev["subtype"] == "init" {
+                        if let Some(sid) = ev["session_id"].as_str() {
+                            session_id = Some(sid.to_string());
+                            let sid = sid.to_string();
+                            update_conv_options(st, conv_id, |o| o["cc_session"] = json!(sid));
+                        }
                     }
                 }
-            }
-            "stream_event" if top_level => {
-                let se = &ev["event"];
-                if se["type"] == "message_start" {
-                    let api_id = se["message"]["id"].as_str().unwrap_or("").to_string();
+                "stream_event" if top_level => {
+                    let se = &ev["event"];
+                    if se["type"] == "message_start" {
+                        let api_id = se["message"]["id"].as_str().unwrap_or("").to_string();
+                        let idx = match &ts.current {
+                            Some((id, i)) if *id == api_id => *i,
+                            _ => {
+                                let model = se["message"]["model"].clone();
+                                let i = new_row!("assistant", json!([]), json!({"model": model, "engine": ENGINE}));
+                                ts.current = Some((api_id, i));
+                                i
+                            }
+                        };
+                        let mut acc = Accumulator::default();
+                        let _ = acc.apply(se);
+                        ts.streaming = Some((idx, acc));
+                    } else if let Some((_, acc)) = ts.streaming.as_mut() {
+                        let _ = acc.apply(se);
+                        if se["type"] == "message_stop" {
+                            ts.streaming = None;
+                        }
+                    }
+                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, false);
+                }
+                "assistant" if top_level => {
+                    let msg = &ev["message"];
+                    let api_id = msg["id"].as_str().unwrap_or("").to_string();
+                    let blocks = msg["content"].as_array().cloned().unwrap_or_default();
                     let idx = match &ts.current {
                         Some((id, i)) if *id == api_id => *i,
                         _ => {
-                            let model = se["message"]["model"].clone();
-                            let i = new_row!("assistant", json!([]), json!({"model": model, "engine": ENGINE}));
-                            ts.current = Some((api_id, i));
+                            let i = new_row!("assistant", json!([]), json!({"model": msg["model"], "engine": ENGINE}));
+                            ts.current = Some((api_id.clone(), i));
                             i
                         }
                     };
-                    let mut acc = Accumulator::default();
-                    let _ = acc.apply(se);
-                    ts.streaming = Some((idx, acc));
-                } else if let Some((_, acc)) = ts.streaming.as_mut() {
-                    let _ = acc.apply(se);
-                    if se["type"] == "message_stop" {
+                    let row = &mut ts.rows[idx];
+                    let mut stored = row.content.as_array().cloned().unwrap_or_default();
+                    stored.extend(blocks);
+                    row.content = Value::Array(stored);
+                    row.meta["cc_uuid"] = ev["uuid"].clone();
+                    row.meta["cc_session"] = json!(ev["session_id"].as_str().or(session_id.as_deref()));
+                    if !msg["usage"].is_null() {
+                        row.meta["usage"] = msg["usage"].clone();
+                    }
+                    st.db.msg_update(&row.id, &row.content, &row.meta)?;
+                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                }
+                "user" if top_level => {
+                    let c = ev["message"]["content"].as_array().cloned().unwrap_or_default();
+                    if c.iter().any(|b| b["type"] == "tool_result") {
+                        let meta = json!({
+                            "tool_results": true,
+                            "cc_uuid": ev["uuid"],
+                            "cc_session": ev["session_id"].as_str().or(session_id.as_deref()),
+                        });
+                        let _ = new_row!("user", Value::Array(c), meta);
+                        let _ = app.emit("files-changed", json!({"conversation_id": conv_id}));
+                        ts.current = None;
                         ts.streaming = None;
+                        emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
                     }
                 }
-                emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, false);
-            }
-            "assistant" if top_level => {
-                let msg = &ev["message"];
-                let api_id = msg["id"].as_str().unwrap_or("").to_string();
-                let blocks = msg["content"].as_array().cloned().unwrap_or_default();
-                let idx = match &ts.current {
-                    Some((id, i)) if *id == api_id => *i,
-                    _ => {
-                        let i = new_row!("assistant", json!([]), json!({"model": msg["model"], "engine": ENGINE}));
-                        ts.current = Some((api_id.clone(), i));
-                        i
-                    }
-                };
-                let row = &mut ts.rows[idx];
-                let mut stored = row.content.as_array().cloned().unwrap_or_default();
-                stored.extend(blocks);
-                row.content = Value::Array(stored);
-                row.meta["cc_uuid"] = ev["uuid"].clone();
-                row.meta["cc_session"] = json!(ev["session_id"].as_str().or(session_id.as_deref()));
-                if !msg["usage"].is_null() {
-                    row.meta["usage"] = msg["usage"].clone();
-                }
-                st.db.msg_update(&row.id, &row.content, &row.meta)?;
-                emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
-            }
-            "user" if top_level => {
-                let c = ev["message"]["content"].as_array().cloned().unwrap_or_default();
-                if c.iter().any(|b| b["type"] == "tool_result") {
-                    let meta = json!({
-                        "tool_results": true,
-                        "cc_uuid": ev["uuid"],
-                        "cc_session": ev["session_id"].as_str().or(session_id.as_deref()),
-                    });
-                    let _ = new_row!("user", Value::Array(c), meta);
-                    let _ = app.emit("files-changed", json!({"conversation_id": conv_id}));
-                    ts.current = None;
-                    ts.streaming = None;
-                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
-                }
-            }
-            "control_request" => {
-                let req = &ev["request"];
-                let rid = ev["request_id"].clone();
-                if req["subtype"] == "can_use_tool" {
-                    let tool = req["tool_name"].as_str().unwrap_or("").to_string();
-                    let input = req["input"].clone();
-                    let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
-                    let kind = if tool == "ExitPlanMode" { "plan" } else { "code" };
-                    // Auto mode: approve safe requests without asking.
-                    let mode_now = st.db.conv_get(conv_id).ok().and_then(|c| c.options["permission_mode"].as_str().map(String::from)).unwrap_or_default();
-                    if mode_now == "auto" && tool != "ExitPlanMode" {
-                        let sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
-                        if crate::codetools::check_permission("auto", &tool, &input, &[], Some(&sess)) == crate::codetools::Perm::Allow {
-                            write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
-                                "response": {"behavior": "allow", "updatedInput": input, "toolUseID": tool_use_id}}})).await;
-                            continue;
+                "control_request" => {
+                    let req = &ev["request"];
+                    let rid = ev["request_id"].clone();
+                    if req["subtype"] == "can_use_tool" {
+                        let tool = req["tool_name"].as_str().unwrap_or("").to_string();
+                        let input = req["input"].clone();
+                        let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
+                        let kind = if tool == "ExitPlanMode" { "plan" } else { "code" };
+                        // Auto mode: approve safe requests without asking.
+                        let mode_now = st.db.conv_get(conv_id).ok().and_then(|c| c.options["permission_mode"].as_str().map(String::from)).unwrap_or_default();
+                        if mode_now == "auto" && tool != "ExitPlanMode" {
+                            let sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                            if crate::codetools::check_permission("auto", &tool, &input, &[], Some(&sess)) == crate::codetools::Perm::Allow {
+                                write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
+                                    "response": {"behavior": "allow", "updatedInput": input, "toolUseID": tool_use_id}}})).await;
+                                continue;
+                            }
                         }
-                    }
-                    let diff = {
-                        let session = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
-                        let (tool, input) = (tool.clone(), input.clone());
-                        tokio::task::spawn_blocking(move || crate::codetools::preview_diff(Some(&session), &tool, &input))
-                            .await
-                            .ok()
-                            .flatten()
-                    };
-                    let req_id = new_id();
-                    let (tx, rx) = oneshot::channel::<PermissionReply>();
-                    st.permissions.lock().insert(req_id.clone(), tx);
-                    let payload = json!({
-                        "kind": kind, "tool": tool, "input": input, "diff": diff, "cwd": cwd,
-                        "request_id": req_id, "conversation_id": conv_id, "tool_use_id": tool_use_id,
-                        "description": req["description"],
-                    });
-                    st.pending_perms.lock().insert(req_id.clone(), payload.clone());
-                    awaiting.insert(tool_use_id.clone(), "awaiting_permission".into());
-                    open_perms.insert(rid_key(&rid), (req_id.clone(), tool_use_id.clone()));
-                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
-                    let _ = app.emit("permission-request", &payload);
-                    crate::engine::notify_attention(app, st, conv_id, &payload);
-                    // Wait for the answer without blocking the event stream.
-                    let tx = perm_tx.clone();
-                    let cancel = cancel.clone();
-                    let suggestions = req["permission_suggestions"].clone();
-                    tokio::spawn(async move {
-                        let reply = tokio::select! {
-                            r = rx => r.ok(),
-                            _ = cancel.cancelled() => None,
+                        let diff = {
+                            let session = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
+                            let (tool, input) = (tool.clone(), input.clone());
+                            tokio::task::spawn_blocking(move || crate::codetools::preview_diff(Some(&session), &tool, &input))
+                                .await
+                                .ok()
+                                .flatten()
                         };
-                        let _ = tx.send(PermDone { cli_request_id: rid, req_id, tool, input, tool_use_id, suggestions, reply });
-                    });
-                } else {
-                    write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "error", "request_id": rid, "error": "Not supported by ClaudeRust"}})).await;
+                        let req_id = new_id();
+                        let (tx, rx) = oneshot::channel::<PermissionReply>();
+                        st.permissions.lock().insert(req_id.clone(), tx);
+                        let payload = json!({
+                            "kind": kind, "tool": tool, "input": input, "diff": diff, "cwd": cwd,
+                            "request_id": req_id, "conversation_id": conv_id, "tool_use_id": tool_use_id,
+                            "description": req["description"],
+                        });
+                        st.pending_perms.lock().insert(req_id.clone(), payload.clone());
+                        awaiting.insert(tool_use_id.clone(), "awaiting_permission".into());
+                        open_perms.insert(rid_key(&rid), (req_id.clone(), tool_use_id.clone()));
+                        emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                        let _ = app.emit("permission-request", &payload);
+                        crate::engine::notify_attention(app, st, conv_id, &payload);
+                        // Wait for the answer without blocking the event stream.
+                        let tx = perm_tx.clone();
+                        let cancel = cancel.clone();
+                        let suggestions = req["permission_suggestions"].clone();
+                        tokio::spawn(async move {
+                            let reply = tokio::select! {
+                                r = rx => r.ok(),
+                                _ = cancel.cancelled() => None,
+                            };
+                            let _ = tx.send(PermDone { cli_request_id: rid, req_id, tool, input, tool_use_id, suggestions, reply });
+                        });
+                    } else {
+                        write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "error", "request_id": rid, "error": "Not supported by ClaudeRust"}})).await;
+                    }
                 }
-            }
-            "control_cancel_request" => {
-                // The CLI no longer needs an answer (a hook decided, or the
-                // tool call was aborted): take the card down.
-                let rid = if ev["request_id"].is_null() { ev["request"]["request_id"].clone() } else { ev["request_id"].clone() };
-                if let Some((req_id, tool_use_id)) = open_perms.remove(&rid_key(&rid)) {
-                    st.permissions.lock().remove(&req_id);
-                    st.pending_perms.lock().remove(&req_id);
-                    awaiting.remove(&tool_use_id);
-                    let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
-                    emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                "control_cancel_request" => {
+                    // The CLI no longer needs an answer (a hook decided, or the
+                    // tool call was aborted): take the card down.
+                    let rid = if ev["request_id"].is_null() { ev["request"]["request_id"].clone() } else { ev["request_id"].clone() };
+                    if let Some((req_id, tool_use_id)) = open_perms.remove(&rid_key(&rid)) {
+                        st.permissions.lock().remove(&req_id);
+                        st.pending_perms.lock().remove(&req_id);
+                        awaiting.remove(&tool_use_id);
+                        let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
+                        emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                    }
                 }
+                "result" => {
+                    result = Some(ev.clone());
+                    result_at = Some(Instant::now());
+                    // closing stdin lets the CLI exit
+                    stdin = None;
+                }
+                _ => {}
             }
-            "result" => {
-                result = Some(ev.clone());
-                result_at = Some(Instant::now());
-                // closing stdin lets the CLI exit
-                stdin = None;
-            }
-            _ => {}
         }
+        Ok(())
     }
+    .await;
 
     // Prompts the CLI never got an answer to.
     for (_, (req_id, _)) in open_perms.drain() {
@@ -790,23 +822,8 @@ async fn run_once(
         let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
     }
     // Let the CLI exit on its own, then stop it and everything it started.
-    drop(stdin);
-    if tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_err() {
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            crate::codetools::signal_process_group(pid, libc::SIGTERM);
-        }
-        if tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() {
-            if let Some(pid) = child.id() {
-                #[cfg(unix)]
-                crate::codetools::kill_process_group(pid);
-                #[cfg(windows)]
-                crate::codetools::kill_process_tree(pid);
-            }
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-        }
-    }
+    stop_cli(child, stdin, events.is_err()).await;
+    events?;
     ts.streaming = None;
 
     // Bookkeeping on the last assistant row.
@@ -1005,6 +1022,56 @@ mod tests {
         assert!(is_resume_lost("Error: No conversation found with session ID: abc"));
         assert!(is_resume_lost("No message found with message.uuid of: x"));
         assert!(!is_resume_lost("rate limited"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stopping_the_cli_stops_its_process_group() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-stop-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("bg.pid");
+        // like the CLI with a background shell, ignoring the end of its input
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 60 & echo $! > \"$0\"; trap '' TERM; while :; do sleep 1; done")
+            .arg(&pidfile)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let stdin = child.stdin.take();
+        while !pidfile.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let started = Instant::now();
+        // the turn broke off: no waiting for the CLI to finish by itself
+        stop_cli(child, stdin, true).await;
+        assert!(started.elapsed() < Duration::from_secs(6), "{:?}", started.elapsed());
+        let running = || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| !r.trim_start().starts_with('Z')));
+        for _ in 0..30 {
+            if !running() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!running(), "the CLI's background process {pid} survived");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn stderr_that_isnt_utf8_is_read_to_the_end() {
+        // what the stderr task reads: a code-page line must not end it
+        let data = b"warn: C:\\Users\\\xdeule\nlater line\n".to_vec();
+        let mut r = BufReader::new(&data[..]);
+        let mut got = vec![];
+        while let Ok(Some((l, _))) = crate::mcp::read_line_lossy(&mut r, 8 * 1024).await {
+            got.push(l);
+        }
+        assert_eq!(got, vec!["warn: C:\\Users\\\u{fffd}ule".to_string(), "later line".to_string()]);
     }
 
     #[test]
