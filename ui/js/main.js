@@ -2,7 +2,7 @@
 import { t, setLanguage, currentLanguage } from './i18n.js';
 import { call, on as onBackend, isMac } from './api.js';
 import { store, on, emit, loadLocal, saveLocal } from './store.js';
-import { $, closeMenu, debounce, errorToast } from './util.js';
+import { $, closeMenu, debounce, errorToast, toast } from './util.js';
 import { mountSidebar, refreshSidebar, toggleSidebar } from './sidebar.js';
 import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
@@ -199,6 +199,9 @@ function bindBackend() {
   onBackend('permission-resolved', (p) => chat.onPermissionResolved(p));
   onBackend('mcp-changed', () => refreshMcp());
   onBackend('menu-new-chat', () => navigate({ name: 'new' }));
+  // things the backend finished in the background (e.g. where a deleted
+  // session's work was kept)
+  onBackend('notice', (n) => toast(n.message, n.error ? 'error' : '', { duration: 12000 }));
   // the backend changed a setting itself (e.g. "always allow" on a prompt)
   onBackend('settings-updated', async () => {
     try { store.settings = await call('get_settings'); emit('settings-changed'); } catch { /* keep the current copy */ }

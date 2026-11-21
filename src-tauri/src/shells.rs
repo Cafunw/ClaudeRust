@@ -216,6 +216,11 @@ impl Shells {
         }
     }
 
+    /// Whether any background command is still running (not yet reaped).
+    pub fn any_running(&self) -> bool {
+        self.map.lock().values().any(|s| s.exit.lock().is_none())
+    }
+
     /// Remove finished shells of a conversation from the list.
     pub fn clear_finished(&self, conv_id: &str) {
         self.map.lock().retain(|_, s| s.conv_id != conv_id || s.running());

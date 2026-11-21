@@ -33,7 +33,7 @@ pub struct Term {
 
 #[derive(Default)]
 pub struct Terminals {
-    map: Mutex<HashMap<String, Arc<Term>>>,
+    map: Arc<Mutex<HashMap<String, Arc<Term>>>>,
 }
 
 /// Queued writes per terminal before typing is refused as "not reading".
@@ -107,7 +107,7 @@ fn pump_output(rx: Receiver<Vec<u8>>, mut emit: impl FnMut(String)) {
 }
 
 impl Terminals {
-    pub fn open(&self, app: &AppHandle, conv_id: &str, cwd: &str, cols: u16, rows: u16) -> AppResult<Value> {
+    pub fn open<R: tauri::Runtime>(&self, app: &AppHandle<R>, conv_id: &str, cwd: &str, cols: u16, rows: u16) -> AppResult<Value> {
         let pty = native_pty_system();
         let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
         let pair = pty.openpty(size).map_err(|e| AppError::msg(format!("Could not open a terminal: {e}")))?;
@@ -165,12 +165,16 @@ impl Terminals {
                 }
             }
         });
-        // the shell's end: drop the master (on Windows the reader only sees
-        // EOF once the pseudo console is closed), then report the exit code
+        // the shell's end: forget the terminal (its pid may be reused by an
+        // unrelated process, which must never be signalled on close), drop
+        // the master (on Windows the reader only sees EOF once the pseudo
+        // console is closed), then report the exit code
         let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Option<u32>>();
         let waited = term.clone();
+        let map = self.map.clone();
         std::thread::spawn(move || {
             let code = child.wait().ok().map(|s| s.exit_code());
+            map.lock().remove(&waited.id);
             waited.master.lock().take();
             let _ = exit_tx.send(code);
         });
@@ -306,6 +310,24 @@ mod tests {
         terms.close("t");
         let _ = child.wait();
         assert!(terms.write("t", "x").is_err(), "closed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_shell_is_forgotten() {
+        let terms = Terminals::default();
+        let app = tauri::test::mock_app();
+        let opened = terms.open(app.handle(), "c", ".", 80, 24).unwrap();
+        let id = opened["id"].as_str().unwrap().to_string();
+        terms.write(&id, "exit\r").unwrap();
+        // once it has ended it's out of the map: closing the conversation
+        // later can't signal whatever process reuses its pid
+        let start = Instant::now();
+        while terms.map.lock().contains_key(&id) && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!terms.map.lock().contains_key(&id));
+        assert!(terms.list("c").is_empty());
     }
 
     #[cfg(unix)]

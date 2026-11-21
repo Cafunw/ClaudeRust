@@ -761,7 +761,7 @@ pub(crate) fn hook_config(st: &AppState, cwd: &std::path::Path) -> crate::hooks:
 }
 
 /// Snapshot the project before a code turn starts (once per user message).
-async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
+async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str, cancel: &CancellationToken) {
     let Ok(conv) = st.db.conv_get(conv_id) else { return };
     if conv.kind != "code" || !st.settings.read().code_checkpoints {
         return;
@@ -779,13 +779,16 @@ async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
         sh.suitable().map_err(crate::error::AppError::msg)?;
         sh.snapshot(&label)
     });
-    // a slow disk must not hold up the turn for long
-    let r = match tokio::time::timeout(Duration::from_secs(90), snap).await {
-        Ok(r) => r,
-        Err(_) => {
-            log::warn!("checkpoint took too long; continuing without it");
-            return;
-        }
+    // a slow disk must not hold up the turn for long, and Stop ends the wait
+    let r = tokio::select! {
+        r = tokio::time::timeout(Duration::from_secs(90), snap) => match r {
+            Ok(r) => r,
+            Err(_) => {
+                log::warn!("checkpoint took too long; continuing without it");
+                return;
+            }
+        },
+        _ = cancel.cancelled() => return,
     };
     match r {
         Ok(Ok(sha)) => {
@@ -800,7 +803,7 @@ async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str) {
 
 /// Before a turn of the built-in engine: if the context is nearly full,
 /// summarize everything before the new user message.
-async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: &str) {
+async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: &str, cancel: &CancellationToken) {
     let pct = st.settings.read().auto_compact_pct;
     if pct == 0 {
         return;
@@ -822,13 +825,21 @@ async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent
         return;
     }
     let _ = app.emit("compacting", json!({"conversation_id": conv_id, "auto": true}));
-    match crate::compact::summarize(st, &conv.model, before, None).await {
+    // Stop ends the summary too (nothing is written or charged further)
+    let summary = tokio::select! {
+        s = crate::compact::summarize(st, &conv.model, before, None) => s,
+        _ = cancel.cancelled() => Err(AppError::Cancelled),
+    };
+    match summary {
         Ok(summary) => {
             let user = &path[ui];
             let mut meta = user.meta.clone();
             meta["compact_summary"] = json!(summary);
             meta["compact_auto"] = json!(true);
             let _ = st.db.msg_update(&user.id, &user.content, &meta);
+            let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true}));
+        }
+        Err(AppError::Cancelled) => {
             let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true}));
         }
         Err(e) => {
@@ -873,8 +884,11 @@ pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
 }
 
 async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
-    checkpoint_turn(st, conv_id, &parent).await;
-    auto_compact(app, st, conv_id, &parent).await;
+    checkpoint_turn(st, conv_id, &parent, cancel).await;
+    auto_compact(app, st, conv_id, &parent, cancel).await;
+    if cancel.is_cancelled() {
+        return Err(AppError::Cancelled);
+    }
     {
         let conv = st.db.conv_get(conv_id)?;
         if conv.model.starts_with(crate::oai::PREFIX) {
@@ -1310,6 +1324,10 @@ async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: Str
         cur.content = json!([{"type": "text", "text": text}]);
         let mut l = live.clone();
         l.content = cur.content.clone();
+        // kept current for a view opened mid-answer (it reads `live`)
+        if let Some(x) = st.live.lock().get_mut(conv_id) {
+            x.content = l.content.clone();
+        }
         emit_turn(app, conv_id, &renderer.render(&cur, &l));
     })
     .await;
@@ -1437,15 +1455,24 @@ pub(crate) fn allowed_rules(conv: &Conversation) -> Vec<String> {
     opt_strs(&conv.options, "allowed_rules")
 }
 
+/// Change a conversation's options (read, modify, write as one step: the
+/// engine and the UI both write them, and a change in between was lost).
 pub(crate) fn update_conv_options(st: &AppState, conv_id: &str, f: impl FnOnce(&mut Value)) {
-    if let Ok(c) = st.db.conv_get(conv_id) {
-        let mut o = c.options;
-        if !o.is_object() {
-            o = json!({});
-        }
-        f(&mut o);
-        let _ = st.db.conv_set_options(conv_id, &o);
+    if let Err(e) = try_update_conv_options(st, conv_id, f) {
+        log::warn!("updating the options of {conv_id} failed: {e}");
     }
+}
+
+pub(crate) fn try_update_conv_options(st: &AppState, conv_id: &str, f: impl FnOnce(&mut Value)) -> AppResult<()> {
+    static OPTIONS: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _one_at_a_time = OPTIONS.lock();
+    let c = st.db.conv_get(conv_id)?;
+    let mut o = c.options;
+    if !o.is_object() {
+        o = json!({});
+    }
+    f(&mut o);
+    st.db.conv_set_options(conv_id, &o)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1757,6 +1784,32 @@ mod tests {
         assert!(a.cancelled());
         drop(a);
         assert!(RunSlot::reserve(&st, "c", "busy").is_ok(), "released on drop (any early return)");
+    }
+
+    #[test]
+    fn concurrent_option_updates_are_all_kept() {
+        let st = test_state();
+        let c = st.db.conv_create("code", "m", None, None, &json!({})).unwrap();
+        // the engine (cc_session, allowed_rules…) and the UI (permission mode,
+        // instructions) writing different keys at the same time
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let st = st.clone();
+                let id = c.id.clone();
+                std::thread::spawn(move || {
+                    for n in 0..50 {
+                        update_conv_options(&st, &id, |o| o[format!("k{i}")] = json!(n));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let o = st.db.conv_get(&c.id).unwrap().options;
+        for i in 0..8 {
+            assert_eq!(o[format!("k{i}")], 49, "update of k{i} lost: {o}");
+        }
     }
 
     fn rc(fp: &str) -> ReqCtx {

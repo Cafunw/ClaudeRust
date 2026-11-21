@@ -45,8 +45,11 @@ pub async fn bootstrap(app: AppHandle, state: St<'_>) -> AppResult<Value> {
     }))
 }
 
+/// Async on purpose: from the main thread `restart` exits at once and skips
+/// the exit cleanup (stopping turns, background commands, MCP servers);
+/// from another thread it goes through the event loop's normal exit.
 #[tauri::command]
-pub fn restart_app(app: AppHandle) {
+pub async fn restart_app(app: AppHandle) {
     app.restart();
 }
 
@@ -150,13 +153,28 @@ pub async fn set_api_key(state: St<'_>, key: Option<String>) -> AppResult<Value>
     Ok(settings_json(&st))
 }
 
+/// Which endpoint and key a model list belongs to.
+fn models_source(st: &AppState) -> (String, Option<String>) {
+    (st.settings.read().base_url.clone(), st.api_key.read().clone())
+}
+
+/// Cache a model list fetched for `source`, unless the key or the endpoint
+/// changed while it was being fetched (the list would be the old one's).
+fn store_models(st: &AppState, source: &(String, Option<String>), list: Vec<Value>) {
+    if &models_source(st) == source {
+        *st.models.lock() = Some(list);
+    }
+}
+
 #[tauri::command]
 pub async fn test_connection(state: St<'_>) -> AppResult<Value> {
     let st = state.inner().clone();
+    let source = models_source(&st);
     let client = st.client()?;
     let list = client.list_models().await?;
-    *st.models.lock() = Some(list.clone());
-    Ok(json!({"ok": true, "models": list.len()}))
+    let n = list.len();
+    store_models(&st, &source, list);
+    Ok(json!({"ok": true, "models": n}))
 }
 
 async fn models_view(st: &AppState) -> Value {
@@ -204,9 +222,10 @@ async fn models_view(st: &AppState) -> Value {
 pub async fn get_models(state: St<'_>, refresh: bool) -> AppResult<Value> {
     let st = state.inner().clone();
     if refresh || st.models.lock().is_none() {
+        let source = models_source(&st);
         if let Ok(client) = st.client() {
             if let Ok(list) = client.list_models().await {
-                *st.models.lock() = Some(list);
+                store_models(&st, &source, list);
             }
         }
     }
@@ -586,19 +605,19 @@ pub async fn update_conversation(app: AppHandle, state: St<'_>, req: ConvUpdate)
         st.db.conv_set_project(&req.id, p.as_deref())?;
     }
     if let Some(patch) = req.options.as_ref().and_then(|p| p.as_object()) {
-        let c = st.db.conv_get(&req.id)?;
-        let mut o = if c.options.is_object() { c.options } else { json!({}) };
-        for (k, v) in patch {
-            o[k] = v.clone();
-        }
-        st.db.conv_set_options(&req.id, &o)?;
+        // through the same one-at-a-time path as the engine's own updates
+        engine::try_update_conv_options(&st, &req.id, |o| {
+            for (k, v) in patch {
+                o[k] = v.clone();
+            }
+        })?;
     }
     engine::emit_conv_updated(&app, &req.id);
     Ok(serde_json::to_value(st.db.conv_get(&req.id)?)?)
 }
 
 #[tauri::command]
-pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
+pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     engine::stop(&st, &id);
     let worktree = st.db.conv_get(&id).ok().map(|c| c.options["worktree"].clone()).filter(|w| w.is_object());
@@ -623,11 +642,32 @@ pub async fn delete_conversation(state: St<'_>, id: String) -> AppResult<()> {
         st.permissions.lock().remove(&k);
     }
     if let Some(info) = worktree {
-        // after the shells and terminals using it have stopped
-        tauri::async_runtime::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            if let Err(e) = crate::worktree::remove(&info) {
-                log::warn!("removing worktree failed: {e}");
+        // only once the cancelled turn has really finished (a Write in
+        // progress, the Claude Code CLI shutting down), so the safety commit
+        // of uncommitted work sees everything; the outcome is reported
+        let st = st.clone();
+        tauri::async_runtime::spawn(async move {
+            let start = std::time::Instant::now();
+            while st.runs.lock().contains_key(&id) && start.elapsed() < std::time::Duration::from_secs(20) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let path = info["path"].as_str().unwrap_or_default().to_string();
+            let r = if st.runs.lock().contains_key(&id) {
+                Err(AppError::msg("the session was still stopping"))
+            } else {
+                tauri::async_runtime::spawn_blocking(move || crate::worktree::remove(&info))
+                    .await
+                    .unwrap_or_else(|e| Err(AppError::msg(e.to_string())))
+            };
+            match r {
+                Ok(Some(note)) => {
+                    let _ = app.emit("notice", json!({"message": note}));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("removing worktree {path} failed: {e}");
+                    let _ = app.emit("notice", json!({"message": format!("The session's worktree was kept at {path}: {e}"), "error": true}));
+                }
             }
         });
     }

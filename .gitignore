@@ -12,3 +12,5 @@ node_modules
 *.p12
 .idea/
 .vscode/
+# agent worktrees (Claude Code)
+.claude/worktrees/

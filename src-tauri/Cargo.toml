@@ -65,3 +65,7 @@ libc = "0.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
+
+[dev-dependencies]
+# MockRuntime for tests of code that emits events
+tauri = { version = "2", features = ["test"] }

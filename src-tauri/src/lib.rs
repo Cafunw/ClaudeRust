@@ -509,10 +509,24 @@ pub fn run() {
         RunEvent::Exit => {
             if let Some(st) = handle.try_state::<Arc<AppState>>() {
                 let st = st.inner().clone();
+                // stop running turns too: their commands (a server the agent
+                // started, the Claude Code CLI) run in their own process
+                // groups and would outlive the app
+                for c in st.runs.lock().values() {
+                    c.cancel();
+                }
                 st.shells.kill_all();
                 st.terminals.close_all();
                 st.watches.stop_all();
-                tauri::async_runtime::block_on(async move { st.mcp.stop_all().await });
+                tauri::async_runtime::block_on(async move {
+                    // the cancelled tasks kill their process groups on the
+                    // runtime's threads; give them a moment before exiting
+                    let start = std::time::Instant::now();
+                    while (!st.runs.lock().is_empty() || st.shells.any_running()) && start.elapsed() < std::time::Duration::from_millis(2500) {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    st.mcp.stop_all().await
+                });
             }
         }
         _ => {}

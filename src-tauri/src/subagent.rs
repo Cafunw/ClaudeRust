@@ -63,9 +63,16 @@ impl SubAgent {
     }
 }
 
+/// Token usage of one response's sub-agents, with that response's conversation.
+type Spent = HashMap<String, (String, serde_json::Map<String, Value>)>;
+
 #[derive(Default)]
 pub struct Registry {
     map: Mutex<HashMap<String, SubAgent>>,
+    /// Token usage per response that started sub-agents (and its
+    /// conversation), kept apart from the list: "clear finished" must not
+    /// drop usage the response hasn't counted yet.
+    spent: Mutex<Spent>,
 }
 
 impl Registry {
@@ -97,19 +104,28 @@ impl Registry {
             }
         }
         m.retain(|_, s| s.conv_id != conv_id);
+        self.spent.lock().retain(|_, (c, _)| c != conv_id);
     }
     /// Token usage of the sub-agents a response started (added to its cost).
     pub fn usage_for(&self, parent_msg: &str) -> serde_json::Map<String, Value> {
-        let mut tot = serde_json::Map::new();
-        for s in self.map.lock().values().filter(|s| s.parent_msg == parent_msg) {
-            for (k, v) in &s.usage {
+        self.spent.lock().get(parent_msg).map(|(_, u)| u.clone()).unwrap_or_default()
+    }
+    fn add_usage(&self, id: &str, usage: &serde_json::Map<String, Value>) {
+        let add = |into: &mut serde_json::Map<String, Value>| {
+            for (k, v) in usage {
                 if let Some(n) = v.as_u64() {
-                    let prev = tot.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                    tot.insert(k.clone(), json!(prev + n));
+                    let prev = into.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                    into.insert(k.clone(), json!(prev + n));
                 }
             }
+        };
+        let mut map = self.map.lock();
+        if let Some(s) = map.get_mut(id) {
+            add(&mut s.usage);
+            let mut spent = self.spent.lock();
+            let e = spent.entry(s.parent_msg.clone()).or_insert_with(|| (s.conv_id.clone(), Default::default()));
+            add(&mut e.1);
         }
-        tot
     }
     fn update(&self, id: &str, f: impl FnOnce(&mut SubAgent)) {
         if let Some(s) = self.map.lock().get_mut(id) {
@@ -177,6 +193,10 @@ pub async fn run_task(
     let settings = st.settings.read().clone();
     let mode = if explore { "plan".to_string() } else { conv.options["permission_mode"].as_str().unwrap_or(&settings.code_permission_mode).to_string() };
 
+    let client = match st.client() {
+        Ok(c) => c,
+        Err(e) => return (text(e.to_string()), true),
+    };
     let id = format!("agent_{}", &new_id()[..8]);
     let my_cancel = cancel.child_token();
     st.subagents.map.lock().insert(id.clone(), SubAgent {
@@ -214,10 +234,6 @@ pub async fn run_task(
         mcp_read_only: Default::default(),
         first_party: rc.first_party,
     };
-    let client = match st.client() {
-        Ok(c) => c,
-        Err(e) => return (text(e.to_string()), true),
-    };
     let mut messages: Vec<Value> = vec![json!({"role": "user", "content": [{"type": "text", "text": prompt}]})];
     let mut final_text = String::new();
     let mut failed: Option<String> = None;
@@ -240,15 +256,7 @@ pub async fn run_task(
             }
         };
         let acc = out.acc;
-        let usage = acc.usage.clone();
-        st.subagents.update(&id, |s| {
-            for (k, v) in usage.iter() {
-                if let Some(n) = v.as_u64() {
-                    let prev = s.usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                    s.usage.insert(k.clone(), json!(prev + n));
-                }
-            }
-        });
+        st.subagents.add_usage(&id, &acc.usage);
         let raw = Value::Array(acc.content());
         let content: Vec<Value> = crate::engine::sanitize_assistant(&raw, &crate::engine::all_tool_ids(&raw));
         if let Some(e) = out.error {
@@ -274,7 +282,10 @@ pub async fn run_task(
             progress(app, &log);
             let hook_input = json!({"session_id": conv_id, "tool_name": name, "tool_input": tin, "agent": description});
             let pre = crate::hooks::run(&hooks, "PreToolUse", &name, hook_input.clone(), &session.root).await;
-            let mut perm = codetools::check_permission(&mode, &name, &tin, &crate::engine::allowed_rules(&conv), Some(&session));
+            // re-read: "allow for this session" given meanwhile (here or in
+            // the main conversation) applies to the following calls
+            let rules = st.db.conv_get(conv_id).map(|c| crate::engine::allowed_rules(&c)).unwrap_or_else(|_| crate::engine::allowed_rules(&conv));
+            let mut perm = codetools::check_permission(&mode, &name, &tin, &rules, Some(&session));
             if let Some(reason) = &pre.block {
                 perm = Perm::Deny(format!("A PreToolUse hook blocked this tool call: {reason}"));
             } else {
@@ -292,7 +303,21 @@ pub async fn run_task(
                     let payload = json!({"kind": "code", "tool": name, "input": tin, "diff": diff, "cwd": session.root,
                         "description": format!("Sub-agent \"{description}\""), "tool_use_id": tool_use_id});
                     match ask(app, st, conv_id, payload, &my_cancel).await.map(|r| r.decision) {
-                        Some(d) if matches!(d.as_str(), "once" | "session" | "chat" | "always" | "approve_edits") => Ok(()),
+                        Some(d) if matches!(d.as_str(), "session" | "chat" | "always") => {
+                            // remembered like in the main conversation
+                            let new_rules = codetools::session_rules(&session, &name, &tin);
+                            crate::engine::update_conv_options(st, conv_id, |o| {
+                                let mut arr = o["allowed_rules"].as_array().cloned().unwrap_or_default();
+                                for rule in new_rules {
+                                    if !arr.iter().any(|x| x == &json!(rule)) {
+                                        arr.push(json!(rule));
+                                    }
+                                }
+                                o["allowed_rules"] = json!(arr);
+                            });
+                            Ok(())
+                        }
+                        Some(d) if matches!(d.as_str(), "once" | "approve_edits") => Ok(()),
                         _ => Err("The user denied this tool call.".into()),
                     }
                 }
@@ -353,13 +378,18 @@ mod tests {
         for i in 0..2 {
             r.map.lock().insert(format!("a{i}"), SubAgent {
                 id: format!("a{i}"), conv_id: "c".into(), parent_msg: "m".into(), tool_use_id: "t".into(), description: "d".into(),
-                status: "completed".into(), started_at: i, finished_at: None, log: vec![], usage: usage.clone(), cancel: CancellationToken::new(),
+                status: "completed".into(), started_at: i, finished_at: None, log: vec![], usage: Default::default(), cancel: CancellationToken::new(),
             });
+            r.add_usage(&format!("a{i}"), &usage);
         }
         assert_eq!(r.usage_for("m")["input_tokens"], 200);
         assert_eq!(r.list("c").len(), 2);
         r.clear_finished("c");
         assert!(r.list("c").is_empty());
+        // clearing the list while the response still runs doesn't lose its cost
+        assert_eq!(r.usage_for("m")["input_tokens"], 200);
+        r.forget_conversation("c");
+        assert!(r.usage_for("m").is_empty());
         assert_eq!(definition()["name"], "Task");
     }
 }
