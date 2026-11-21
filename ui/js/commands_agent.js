@@ -61,6 +61,14 @@ registerCommand({
 });
 
 registerCommand({
+  name: 'tour',
+  description: () => t('cmd_tour'),
+  hint: '[area to focus on]',
+  kinds: ['code'],
+  run: async (args) => t('tour_p') + (args && args.trim() ? `\n\n${t('tour_focus', { what: args.trim() })}` : ''),
+});
+
+registerCommand({
   name: 'recap',
   description: () => t('cmd_recap'),
   hint: '[for whom / format]',

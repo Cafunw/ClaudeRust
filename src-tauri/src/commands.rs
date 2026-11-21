@@ -2490,11 +2490,22 @@ button {{ display:none; }} .code-block .lang {{ font-size:12px; color:var(--mute
 
 /// Recent commits of the session's repository.
 #[tauri::command]
-pub async fn git_log(state: St<'_>, conversation_id: String, limit: Option<u32>) -> AppResult<Value> {
+pub async fn git_log(state: St<'_>, conversation_id: String, limit: Option<u32>, query: Option<String>, mode: Option<String>) -> AppResult<Value> {
     let cwd = conv_cwd(&state, &conversation_id)?;
     let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
     let n = limit.unwrap_or(60).clamp(1, 500).to_string();
-    let out = crate::gitops::git(&root, &["log", "-n", &n, "--date=unix", "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e"]).await.unwrap_or_default();
+    let mut args: Vec<String> = vec!["log".into(), "-n".into(), n, "--date=unix".into(), "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e".into()];
+    // search: the value is glued to its option, so it can't become an option itself
+    if let Some(q) = query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        match mode.as_deref().unwrap_or("message") {
+            "author" => args.extend(["-i".to_string(), format!("--author={q}")]),
+            // pickaxe: commits that added or removed this text
+            "code" => args.push(format!("-S{q}")),
+            _ => args.extend(["-i".to_string(), "--fixed-strings".to_string(), format!("--grep={q}")]),
+        }
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = crate::gitops::git(&root, &refs).await.unwrap_or_default();
     let commits: Vec<Value> = out
         .split('\x1e')
         .filter_map(|rec| {

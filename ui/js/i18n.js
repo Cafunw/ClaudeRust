@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  hist_commit_one: "1 commit",
+  hist_search_ph: "Search commits…",
+  hist_mode_message: "Message",
+  hist_mode_author: "Author",
+  hist_mode_code: "Code added / removed",
+  cmd_tour: "A guided tour of this codebase (read-only)",
+  tour_p: "Give me a guided tour of this codebase, as for a new teammate. Explore it first (read the README, manifests, entry points and the main modules); don't change any files. Then explain in Markdown: what the project does; the architecture and how the main parts fit together (with file paths); how data and control flow through a typical request or run; how to build, run and test it; conventions worth knowing; and where to start for the most common kinds of change. Cite files as path:line where it helps.",
+  tour_focus: "Focus especially on: {what}",
   improve_msg: "Improve my message",
   improve_msg_d: "Rewrite the draft to be clearer and more specific",
   improved: "Message rewritten.",
@@ -547,6 +555,14 @@ const en = {
 };
 
 const tr = {
+  hist_commit_one: "1 commit",
+  hist_search_ph: "Commit'lerde ara…",
+  hist_mode_message: "Mesaj",
+  hist_mode_author: "Yazar",
+  hist_mode_code: "Eklenen / silinen kod",
+  cmd_tour: "Bu kod tabanında rehberli tur (salt okunur)",
+  tour_p: "Bu kod tabanında yeni bir ekip arkadaşına yapar gibi rehberli bir tur ver. Önce keşfet (README, manifest dosyaları, giriş noktaları ve ana modüller); hiçbir dosyayı değiştirme. Sonra Markdown ile açıkla: projenin ne yaptığı; mimari ve ana parçaların nasıl bir araya geldiği (dosya yollarıyla); tipik bir istek ya da çalışmada veri ve kontrolün nasıl aktığı; nasıl derlenip çalıştırılıp test edildiği; bilinmeye değer kurallar; ve en sık değişiklik türleri için nereden başlanacağı. Yardımcı olduğunda dosyaları yol:satır olarak belirt.",
+  tour_focus: "Özellikle şuna odaklan: {what}",
   improve_msg: "Mesajımı iyileştir",
   improve_msg_d: "Taslağı daha açık ve net olacak şekilde yeniden yaz",
   improved: "Mesaj yeniden yazıldı.",

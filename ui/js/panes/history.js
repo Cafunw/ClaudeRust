@@ -25,13 +25,44 @@ async function ask(ctx, prompt) {
   c.composer.send();
 }
 
-async function draw(el, ctx) {
-  let data;
-  try { data = await call('git_log', { conversationId: ctx.convId }); } catch (e) { el.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+const searches = new Map(); // convId -> { q, mode, seq }
+
+function searchFor(convId) {
+  if (!searches.has(convId)) searches.set(convId, { q: '', mode: 'message', seq: 0 });
+  return searches.get(convId);
+}
+
+/** The head (branch, count, search) is built once, so typing isn't interrupted. */
+function ensureHead(el, ctx) {
+  if (el.querySelector('.hist-head')) return;
+  const s = searchFor(ctx.convId);
   el.innerHTML = '';
-  el.appendChild(h(`<div class="pane-head"><span class="branch">${icon('code', 13)} ${esc(data.branch)}</span><span class="muted">${data.commits.length} ${esc(t('hist_commits'))}</span><div class="grow"></div><button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>`));
-  el.querySelector('[data-a=refresh]').onclick = () => draw(el, ctx);
-  if (!data.commits.length) { el.appendChild(h(`<div class="pane-empty">${esc(t('hist_empty'))}</div>`)); return; }
+  const head = h(`<div class="hist-head"><div class="pane-head"><span class="branch">${icon('code', 13)} <span class="b"></span></span><span class="muted cnt"></span><div class="grow"></div><button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>
+    <div class="hist-search"><input class="input sm" placeholder="${esc(t('hist_search_ph'))}" spellcheck="false"><select class="select sm">
+      <option value="message">${esc(t('hist_mode_message'))}</option><option value="author">${esc(t('hist_mode_author'))}</option><option value="code">${esc(t('hist_mode_code'))}</option></select></div></div>`);
+  el.append(head, h('<div class="hist-list"></div>'));
+  const input = head.querySelector('input');
+  const sel = head.querySelector('select');
+  input.value = s.q;
+  sel.value = s.mode;
+  let tm;
+  input.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => { s.q = input.value; draw(el, ctx); }, 350); });
+  sel.addEventListener('change', () => { s.mode = sel.value; if (s.q.trim()) draw(el, ctx); });
+  head.querySelector('[data-a=refresh]').onclick = () => draw(el, ctx);
+}
+
+async function draw(el, ctx) {
+  ensureHead(el, ctx);
+  const s = searchFor(ctx.convId);
+  const seq = ++s.seq;
+  const list = el.querySelector('.hist-list');
+  let data;
+  try { data = await call('git_log', { conversationId: ctx.convId, query: s.q.trim() || null, mode: s.mode }); } catch (e) { list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+  if (seq !== s.seq) return; // a newer search is on its way
+  el.querySelector('.hist-head .b').textContent = data.branch;
+  el.querySelector('.hist-head .cnt').textContent = data.commits.length === 1 ? t('hist_commit_one') : `${data.commits.length} ${t('hist_commits')}`;
+  list.innerHTML = '';
+  if (!data.commits.length) { list.appendChild(h(`<div class="pane-empty">${esc(s.q.trim() ? t('no_results') : t('hist_empty'))}</div>`)); return; }
   for (const c of data.commits) {
     const isOpen = open.get(ctx.convId) === c.sha;
     const row = h(`<div class="hist-row ${isOpen ? 'on' : ''}">
@@ -56,7 +87,7 @@ async function draw(el, ctx) {
         body.innerHTML = `${d.message && d.message !== c.subject ? `<pre class="hist-msg">${esc(d.message)}</pre>` : ''}${d.files.map((f, i) => `<details class="hist-file" ${i < 3 ? 'open' : ''}><summary><code>${esc(f.path)}</code> <span class="diff-stat"><span class="a">+${f.added}</span> <span class="d">-${f.removed}</span></span></summary><div class="diff-view">${diffTable(f.diff)}</div></details>`).join('')}`;
       }).catch((e) => { body.textContent = e.message || String(e); });
     }
-    el.appendChild(row);
+    list.appendChild(row);
   }
 }
 
