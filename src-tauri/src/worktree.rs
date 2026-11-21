@@ -10,12 +10,15 @@ use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn git(dir: &Path, args: &[&str]) -> AppResult<String> {
     git_bytes(dir, args).map(|b| String::from_utf8_lossy(&b).trim().to_string())
 }
 
-/// git's raw stdout (patches must not be trimmed or re-encoded).
+/// git's raw stdout (patches must not be trimmed or re-encoded). Bounded in
+/// time like every other git call (`gitops::git_timeout`): `worktree add`
+/// can run hooks and LFS downloads, and must not hang a session's start.
 fn git_bytes(dir: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
     let mut c = Command::new("git");
     c.current_dir(dir)
@@ -28,12 +31,73 @@ fn git_bytes(dir: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000);
     }
-    let out = c.output().map_err(|e| AppError::msg(format!("Could not run git: {e}")))?;
+    let limit = crate::gitops::git_timeout(args);
+    let out = output_within(c, limit)
+        .map_err(|e| AppError::msg(format!("Could not run git: {e}")))?
+        .ok_or_else(|| AppError::msg(format!("git {} didn't finish within {} minutes and was stopped.", args.join(" "), limit.as_secs().div_ceil(60))))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(AppError::msg(if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err }));
     }
     Ok(out.stdout)
+}
+
+/// Run `cmd` and collect its output, or stop it and everything it started
+/// once `limit` has passed (`Ok(None)`): on Unix SIGTERM first, so git can
+/// remove its lock files, then SIGKILL two seconds later.
+fn output_within(mut cmd: Command, limit: Duration) -> std::io::Result<Option<std::process::Output>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    // both pipes drained meanwhile, or a chatty command blocks on a full one
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let wait_until = |child: &mut std::process::Child, deadline: Instant| -> std::io::Result<Option<std::process::ExitStatus>> {
+        let mut pause = Duration::from_millis(1);
+        loop {
+            if let Some(s) = child.try_wait()? {
+                return Ok(Some(s));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(50));
+        }
+    };
+    let status = match wait_until(&mut child, Instant::now() + limit)? {
+        Some(s) => s,
+        None => {
+            #[cfg(unix)]
+            {
+                crate::codetools::signal_process_group(child.id(), libc::SIGTERM);
+                if wait_until(&mut child, Instant::now() + Duration::from_secs(2))?.is_none() {
+                    crate::codetools::kill_process_group(child.id());
+                }
+            }
+            #[cfg(windows)]
+            crate::codetools::kill_process_tree(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+    };
+    Ok(Some(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() }))
 }
 
 /// Top level of the repository containing `dir`, if any.
@@ -205,6 +269,35 @@ pub fn commit_all(info: &Value, message: &str) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_past_its_time_is_stopped_with_what_it_started() {
+        let pidfile = std::env::temp_dir().join(format!("cr-wt-slow-{}", crate::util::new_id()));
+        let mut c = Command::new("sh");
+        // like a hook or an LFS filter that hangs, with a child of its own
+        c.arg("-c").arg("sleep 60 & echo $! > \"$0\"; echo started; wait").arg(&pidfile);
+        let started = Instant::now();
+        assert!(output_within(c, Duration::from_millis(400)).unwrap().is_none(), "reported as stopped");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let alive = || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| !r.trim_start().starts_with('Z')));
+        for _ in 0..30 {
+            if !alive() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if cfg!(target_os = "linux") {
+            assert!(!alive(), "its child {pid} was left running");
+        }
+        let _ = std::fs::remove_file(pidfile);
+        // a quick one is unaffected, output and all
+        let mut ok = Command::new("sh");
+        ok.arg("-c").arg("echo out; echo err >&2; exit 3");
+        let out = output_within(ok, Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!((out.stdout.as_slice(), out.stderr.as_slice(), out.status.code()), (&b"out\n"[..], &b"err\n"[..], Some(3)));
+    }
 
     fn init_repo() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cr-wt-{}", crate::util::new_id()));

@@ -70,7 +70,7 @@ const SLOW_SUBCOMMANDS: &[&str] = &[
     "restore", "reset", "cherry-pick", "revert", "submodule", "gc", "lfs",
 ];
 
-fn git_timeout(args: &[&str]) -> std::time::Duration {
+pub(crate) fn git_timeout(args: &[&str]) -> std::time::Duration {
     if subcommand(args).map(|s| SLOW_SUBCOMMANDS.contains(&s)).unwrap_or(false) {
         std::time::Duration::from_secs(15 * 60)
     } else {

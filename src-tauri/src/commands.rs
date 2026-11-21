@@ -265,6 +265,14 @@ pub struct NewConversation {
     pub options: Value,
 }
 
+/// `create_conversation_inner` off the async runtime: starting a code
+/// session runs git (`worktree add` can run hooks and LFS downloads) and
+/// scans the project's environment.
+async fn create_conversation_blocking(st: &Arc<AppState>, req: NewConversation) -> AppResult<crate::db::Conversation> {
+    let st = st.clone();
+    tauri::async_runtime::spawn_blocking(move || create_conversation_inner(&st, req)).await.map_err(|e| AppError::msg(e.to_string()))?
+}
+
 fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<crate::db::Conversation> {
     let s = st.settings.read().clone();
     let kind = req.kind.unwrap_or_else(|| "chat".into());
@@ -306,9 +314,13 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
                 "always" => crate::worktree::repo_root(&p).is_some(),
                 "parallel" => match crate::worktree::repo_root(&p) {
                     Some(root) => {
+                        // git gives the real path; a session's folder may be
+                        // reached through a link (/tmp vs /private/tmp)
+                        let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                        let root = real(&root);
                         let running: Vec<String> = st.runs.lock().keys().cloned().collect();
                         running.iter().filter_map(|id| st.db.conv_get(id).ok()).any(|c| {
-                            c.kind == "code" && c.cwd.as_deref().map(|d| std::path::Path::new(d).starts_with(&root)).unwrap_or(false)
+                            c.kind == "code" && c.cwd.as_deref().map(|d| real(std::path::Path::new(d)).starts_with(&root)).unwrap_or(false)
                         })
                     }
                     None => false,
@@ -338,7 +350,7 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
 #[tauri::command]
 pub async fn create_conversation(state: St<'_>, req: NewConversation) -> AppResult<Value> {
     let st = state.inner().clone();
-    let c = create_conversation_inner(&st, req)?;
+    let c = create_conversation_blocking(&st, req).await?;
     Ok(serde_json::to_value(c)?)
 }
 
@@ -370,10 +382,10 @@ pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq
     let (conv, created) = match (&req.conversation_id, &req.new_conversation) {
         (Some(id), _) => (st.db.conv_get(id)?, false),
         (None, Some(nc)) => (
-            create_conversation_inner(&st, NewConversation { kind: nc.kind.clone(), model: nc.model.clone(), project_id: nc.project_id.clone(), cwd: nc.cwd.clone(), options: nc.options.clone() })?,
+            create_conversation_blocking(&st, NewConversation { kind: nc.kind.clone(), model: nc.model.clone(), project_id: nc.project_id.clone(), cwd: nc.cwd.clone(), options: nc.options.clone() }).await?,
             true,
         ),
-        (None, None) => (create_conversation_inner(&st, NewConversation { kind: None, model: None, project_id: None, cwd: None, options: json!({}) })?, true),
+        (None, None) => (create_conversation_blocking(&st, NewConversation { kind: None, model: None, project_id: None, cwd: None, options: json!({}) }).await?, true),
     };
     let r = send_into(app, &st, &conv, &req).await;
     if created {
