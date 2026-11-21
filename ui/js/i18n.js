@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  stash_push: "Stash uncommitted changes",
+  stash_pop: "Apply the latest stash",
+  stash_count: "{n} saved",
   hunk_revert_tip: "Undo just this part of the change",
   outline_title: "Your messages in this conversation",
   outline_empty: "No messages yet.",
@@ -535,6 +538,9 @@ const en = {
 };
 
 const tr = {
+  stash_push: "Commit edilmemiş değişiklikleri sakla (stash)",
+  stash_pop: "Son saklananı geri uygula",
+  stash_count: "{n} kayıtlı",
   hunk_revert_tip: "Değişikliğin yalnızca bu kısmını geri al",
   outline_title: "Bu sohbetteki mesajlarınız",
   outline_empty: "Henüz mesaj yok.",

@@ -388,6 +388,8 @@ pub fn run() {
             commands::change_revert_hunk,
             commands::git_branches,
             commands::git_switch,
+            commands::git_stash,
+            commands::git_stash_count,
             commands::project_scripts,
             commands::cc_open_in_terminal,
             commands::file_blame,

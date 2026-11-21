@@ -129,6 +129,12 @@ function draw(el, ctx) {
 async function branchMenu(anchor, el, ctx) {
   let list = [];
   try { list = await call('git_branches', { conversationId: ctx.convId }); } catch (e) { errorToast(e); return; }
+  const stashes = await call('git_stash_count', { conversationId: ctx.convId }).catch(() => 0);
+  const dirty = !!(stateFor(ctx.convId).data && stateFor(ctx.convId).data.files && stateFor(ctx.convId).data.files.length);
+  const stash = async (pop) => {
+    try { toast(await call('git_stash', { conversationId: ctx.convId, pop })); } catch (e) { errorToast(e); }
+    load(el, ctx);
+  };
   const go = async (name, create) => {
     try { toast(await call('git_switch', { conversationId: ctx.convId, name, create })); } catch (e) { errorToast(e); }
     load(el, ctx);
@@ -141,6 +147,9 @@ async function branchMenu(anchor, el, ctx) {
       const name = await promptDialog(t('branch_new'), 'clauderust/');
       if (name && name.trim()) go(name.trim(), true);
     } },
+    { sep: true },
+    { label: t('stash_push'), icon: 'download', disabled: !dirty, onClick: () => stash(false) },
+    { label: t('stash_pop'), sub: stashes ? t('stash_count', { n: stashes }) : '', icon: 'retry', disabled: !stashes, onClick: () => stash(true) },
   ], { placement: 'bottom-start', width: 300 });
 }
 

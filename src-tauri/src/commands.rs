@@ -2025,6 +2025,30 @@ pub async fn git_branches(state: St<'_>, conversation_id: String) -> AppResult<V
     Ok(json!(list))
 }
 
+/// Stash the uncommitted changes (untracked files too), or apply the latest
+/// stash back (`pop`).
+#[tauri::command]
+pub async fn git_stash(app: AppHandle, state: St<'_>, conversation_id: String, pop: bool) -> AppResult<String> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let r = if pop {
+        crate::gitops::git(&root, &["stash", "pop"]).await.map(|_| "Applied the latest stash.".to_string())
+    } else {
+        let msg = format!("ClaudeRust {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+        crate::gitops::git(&root, &["stash", "push", "--include-untracked", "-m", &msg]).await.map(|o| {
+            if o.contains("No local changes") { "There's nothing to stash.".to_string() } else { "Changes stashed.".to_string() }
+        })
+    };
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    r
+}
+
+/// How many stashes the repository has.
+#[tauri::command]
+pub async fn git_stash_count(state: St<'_>, conversation_id: String) -> AppResult<usize> {
+    let root = session_repo(&state, &conversation_id).await?;
+    Ok(crate::gitops::git(&root, &["stash", "list"]).await.map(|s| s.lines().count()).unwrap_or(0))
+}
+
 /// Switch to a local branch, or create it (`create`) from the current commit.
 /// Uncommitted changes come along when git can carry them.
 #[tauri::command]
