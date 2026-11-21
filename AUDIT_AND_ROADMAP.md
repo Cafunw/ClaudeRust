@@ -15,7 +15,7 @@ Architecture rules followed throughout:
 - UI stays dependency-free ES modules in `ui/js` (no build step). Third-party
   browser code, if any, is vendored under `ui/vendor/`.
 - Every change: `cargo check`, `cargo clippy`, `cargo test`, `node --check`
-  on the UI, then a commit on `ccr-ae1e84d3-7xu1u8`.
+  on the UI, then a commit on `main` (the overnight run used a working branch, merged into `main` afterwards).
 
 ---
 
