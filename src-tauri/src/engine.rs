@@ -1619,9 +1619,15 @@ async fn execute_tool(
                     });
                 }
                 Some("always") => {
-                    let mut s = st.settings.write();
-                    s.tool_policies.insert(key.clone(), json!("allow"));
-                    let _ = s.save(&st.db);
+                    {
+                        let mut s = st.settings.write();
+                        s.tool_policies.insert(key.clone(), json!("allow"));
+                        if let Err(e) = s.save(&st.db) {
+                            log::warn!("saving the tool policy failed: {e}");
+                        }
+                    }
+                    // the settings window shows (and saves) its own copy
+                    let _ = app.emit("settings-updated", ());
                 }
                 _ => return (denial(&reply), true),
             }

@@ -54,9 +54,12 @@ export function openSettings(tab = 'general') {
     body.scrollTop = 0;
     (RENDER[id] || RENDER.general)(body);
   }
-  const offSettings = on('settings-changed', () => { if (['account', 'appearance'].includes(active)) show(active); });
+  // redraw for changes made elsewhere, but not under the user's cursor: a
+  // field being typed in would lose its text
+  const typing = () => { const a = document.activeElement; return !!(a && body.contains(a) && a.matches('input, textarea, select')); };
+  const offSettings = on('settings-changed', () => { if (['account', 'appearance'].includes(active) && !typing()) show(active); });
   // Slow MCP servers finish starting in the background.
-  const offMcp = onBackend('mcp-changed', () => { if (active === 'developer') show(active); });
+  const offMcp = onBackend('mcp-changed', () => { if (active === 'developer' && !typing()) show(active); });
   const off = () => { offSettings(); offMcp.then((u) => u()); };
   current = { show };
   show(tab);
@@ -87,7 +90,14 @@ function textField(key, { multiline = false, placeholder = '', type = 'text' } =
     ? h(`<textarea class="textarea" rows="5" placeholder="${esc(placeholder)}"></textarea>`)
     : h(`<input class="input" type="${type}" placeholder="${esc(placeholder)}">`);
   el.value = store.settings[key] ?? '';
-  el.addEventListener('change', () => save({ [key]: type === 'number' ? Number(el.value) : el.value }));
+  el.addEventListener('change', () => {
+    if (type !== 'number') { save({ [key]: el.value }); return; }
+    // whole, non-negative numbers only (the settings are integers); an empty
+    // or invalid entry goes back to the current value instead of saving 0
+    const n = Number(el.value);
+    if (el.value.trim() === '' || !Number.isInteger(n) || n < 0) { el.value = store.settings[key] ?? ''; toast(t('invalid_number'), 'error'); return; }
+    save({ [key]: n });
+  });
   return el;
 }
 
@@ -447,7 +457,9 @@ function serverCard(s, redraw) {
         <div class="segmented">${['ask', 'allow', 'deny'].map((p) => `<button data-p="${p}" class="${p === pol ? 'on' : ''}">${t('policy_' + p)}</button>`).join('')}</div></div>`);
       r.querySelectorAll('button').forEach((b) => b.onclick = () => {
         r.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-        save({ tool_policies: { ...(store.settings.tool_policies || {}), [key]: b.dataset.p } });
+        // just this tool: the backend merges per tool, so an "always allow"
+        // given meanwhile from a prompt isn't overwritten by this copy
+        save({ tool_policies: { [key]: b.dataset.p } });
       });
       tl.appendChild(r);
     }

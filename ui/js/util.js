@@ -117,7 +117,8 @@ export function showMenu(anchor, items, opts = {}) {
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!it.keepOpen) closeMenu();
-      it.onClick && it.onClick(e);
+      // async actions report their failure instead of rejecting unseen
+      if (it.onClick) (async () => it.onClick(e))().catch(errorToast);
     });
     btns.push(b);
     el.appendChild(b);
@@ -186,7 +187,7 @@ export function modal({ title, body, footer, wide = false, onClose, cls = '' }) 
 
 export function button(label, cls, onClick) {
   const b = h(`<button class="btn ${cls || ''}">${esc(label)}</button>`);
-  if (onClick) b.addEventListener('click', onClick);
+  if (onClick) b.addEventListener('click', (e) => { (async () => onClick(e))().catch(errorToast); });
   return b;
 }
 

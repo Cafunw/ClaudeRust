@@ -159,6 +159,8 @@ impl Default for Settings {
 }
 
 const KEY_SETTINGS: &str = "app_settings";
+/// The last stored settings that couldn't be read as a whole.
+const KEY_SETTINGS_BACKUP: &str = "app_settings.unreadable";
 const KEY_API: &str = "api_key";
 /// Marks a settings backup file.
 const EXPORT_MARKER: &str = "clauderust_settings";
@@ -183,9 +185,33 @@ const KEYRING_SERVICE: &str = "dev.clauderust.desktop";
 impl Settings {
     pub fn load(db: &Db) -> Settings {
         match db.setting_get(KEY_SETTINGS) {
-            Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(Some(raw)) => match serde_json::from_str::<Settings>(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    // a value this version can't read (written by an older or
+                    // newer version): keep a copy of what was stored and take
+                    // every field that still fits, rather than starting over
+                    // (and then saving the defaults over the user's settings)
+                    log::warn!("settings didn't load as a whole ({e}); recovering them field by field");
+                    let _ = db.setting_set(KEY_SETTINGS_BACKUP, &raw);
+                    Settings::recovered(&raw)
+                }
+            },
             _ => Settings::default(),
         }
+    }
+
+    /// The fields of stored settings that still deserialize, on defaults.
+    fn recovered(raw: &str) -> Settings {
+        let mut s = Settings::default();
+        if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(raw) {
+            for (k, v) in o {
+                if let Ok(n) = s.patched(&json!({ k: v })) {
+                    s = n;
+                }
+            }
+        }
+        s
     }
 
     pub fn save(&self, db: &Db) -> AppResult<()> {
@@ -221,11 +247,21 @@ impl Settings {
         Ok(out)
     }
 
-    /// Apply a partial JSON patch coming from the UI.
+    /// Apply a partial JSON patch coming from the UI. Per-tool permission
+    /// policies are merged key by key (the UI sends its copy of the whole
+    /// map, which can be older than an "always allow" given meanwhile).
     pub fn patched(&self, patch: &Value) -> AppResult<Settings> {
         let mut v = serde_json::to_value(self)?;
         if let (Some(obj), Some(p)) = (v.as_object_mut(), patch.as_object()) {
             for (k, val) in p {
+                if k == "tool_policies" {
+                    if let (Some(cur), Some(add)) = (obj.get_mut(k).and_then(|c| c.as_object_mut()), val.as_object()) {
+                        for (tk, tv) in add {
+                            cur.insert(tk.clone(), tv.clone());
+                        }
+                        continue;
+                    }
+                }
                 obj.insert(k.clone(), val.clone());
             }
         }
@@ -347,6 +383,28 @@ mod tests {
         odd["theme"] = json!("dark");
         let r = here.imported(&odd).unwrap();
         assert_eq!((r.theme.as_str(), r.max_tokens), ("dark", here.max_tokens));
+    }
+
+    #[test]
+    fn unreadable_settings_keep_what_still_fits() {
+        let db = Db::open_in_memory().unwrap();
+        // e.g. written by another version: one field has a type this one can't read
+        let raw = r#"{"nickname":"Ada","theme":"dark","max_tokens":"lots","tool_policies":{"srv__t":"allow"}}"#;
+        db.setting_set(KEY_SETTINGS, raw).unwrap();
+        let s = Settings::load(&db);
+        assert_eq!((s.nickname.as_str(), s.theme.as_str()), ("Ada", "dark"), "not reset to defaults");
+        assert_eq!(s.tool_policies["srv__t"], "allow");
+        assert_eq!(s.max_tokens, Settings::default().max_tokens);
+        assert_eq!(db.setting_get(KEY_SETTINGS_BACKUP).unwrap().as_deref(), Some(raw), "the original is kept");
+    }
+
+    #[test]
+    fn tool_policies_merge_per_tool() {
+        let mut s = Settings::default();
+        s.tool_policies.insert("a__x".into(), json!("allow"));
+        // the UI's older copy of the map, changing another tool
+        let s = s.patched(&json!({"tool_policies": {"b__y": "deny"}})).unwrap();
+        assert_eq!((s.tool_policies["a__x"].as_str(), s.tool_policies["b__y"].as_str()), (Some("allow"), Some("deny")));
     }
 
     #[test]

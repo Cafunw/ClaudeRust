@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  invalid_number: "Enter a whole number.",
   oss_title: "Open-source licenses",
   oss_d: "ClaudeRust is MIT-licensed and includes open-source libraries under their own licenses.",
   oss_show: "Show",
@@ -593,6 +594,7 @@ const en = {
 };
 
 const tr = {
+  invalid_number: "Bir tam sayı girin.",
   oss_title: "Açık kaynak lisansları",
   oss_d: "ClaudeRust MIT lisanslıdır ve kendi lisanslarıyla açık kaynak kütüphaneler içerir.",
   oss_show: "Göster",

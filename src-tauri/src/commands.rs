@@ -86,24 +86,33 @@ pub async fn settings_import(app: AppHandle, state: St<'_>, path: String) -> App
         return Err(AppError::msg("That file is too large to be a settings file."));
     }
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|_| AppError::msg("That isn't a ClaudeRust settings file."))?;
-    let old = st.settings.read().clone();
-    let new = old.imported(&v)?;
-    new.save(&st.db)?;
-    *st.settings.write() = new.clone();
+    let (old, new) = {
+        let mut g = st.settings.write();
+        let new = g.imported(&v)?;
+        new.save(&st.db)?;
+        (std::mem::replace(&mut *g, new.clone()), new)
+    };
     apply_settings_change(&app, &st, &old, &new);
     Ok(())
+}
+
+/// The current settings (after the backend changed them, e.g. "always allow").
+#[tauri::command]
+pub fn get_settings(state: St<'_>) -> Value {
+    settings_json(&state)
 }
 
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppResult<Value> {
     let st = state.inner().clone();
+    // patched, stored and swapped under one write lock: a change made
+    // meanwhile elsewhere ("always allow", hook trust, zoom) isn't lost
     let (old, new) = {
-        let cur = st.settings.read().clone();
-        let new = cur.patched(&patch)?;
-        (cur, new)
+        let mut g = st.settings.write();
+        let new = g.patched(&patch)?;
+        new.save(&st.db)?;
+        (std::mem::replace(&mut *g, new.clone()), new)
     };
-    new.save(&st.db)?;
-    *st.settings.write() = new.clone();
     apply_settings_change(&app, &st, &old, &new);
     Ok(settings_json(&st))
 }

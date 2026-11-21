@@ -65,17 +65,7 @@ export async function openConversation(id, { focus = true } = {}) {
     initial: composerInitial(conv),
     draftKey: id,
     onSend: (text, atts) => sendInConversation(text, atts),
-    onStop: () => {
-      // stopping brings queued messages back into the box instead of sending them
-      const q = queues.get(id) || [];
-      if (q.length) {
-        const text = q.map((x) => x.text).join('\n\n');
-        queues.set(id, []);
-        showQueue(id);
-        if (cur && cur.id === id) cur.composer.setText(text);
-      }
-      call('stop_generation', { conversationId: id }).catch(errorToast);
-    },
+    onStop: () => stopTurn(id),
     onOptions: (patch) => persistOptions(patch),
     onEditLast: () => editLastUserMessage(),
     onQueue: (text, atts) => {
@@ -720,6 +710,23 @@ export function onTurnEvent({ conversation_id, turn }) {
 
 // Messages queued while Claude was responding, per conversation.
 const queues = new Map();
+
+/** Stop the turn in `id`. Queued messages come back into the box (text
+ *  and attachments) instead of being sent once the turn ends. */
+export function stopTurn(id) {
+  const q = queues.get(id) || [];
+  if (q.length) {
+    queues.set(id, []);
+    showQueue(id);
+    if (cur && cur.id === id) {
+      const draft = cur.composer.getText().trim();
+      const text = q.map((x) => x.text).join('\n\n');
+      cur.composer.setText(draft ? `${draft}\n\n${text}` : text);
+      for (const x of q) for (const a of x.atts || []) cur.composer.addStaged(a);
+    }
+  }
+  call('stop_generation', { conversationId: id }).catch(errorToast);
+}
 
 function showQueue(convId) {
   if (!cur || cur.id !== convId) return;

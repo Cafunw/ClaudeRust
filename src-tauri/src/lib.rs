@@ -298,6 +298,7 @@ pub fn run() {
             commands::third_party_licenses,
             commands::update_check,
             commands::update_install,
+            commands::get_settings,
             commands::save_settings,
             commands::set_api_key,
             commands::test_connection,

@@ -121,7 +121,8 @@ async function reloadSettings() {
   const boot = await call('bootstrap');
   store.settings = boot.settings;
   emit('settings-changed');
-  if (!store.settings.has_api_key) startOnboarding();
+  // same rule as at start: a Claude Code user may have no API key at all
+  if (!store.settings.has_api_key && !store.settings.onboarded) startOnboarding();
   else refreshModels();
 }
 
@@ -164,7 +165,8 @@ function bindShortcuts() {
     else if (mod && k === '0') { e.preventDefault(); setZoom(1); }
     else if (e.key === 'Escape' && !document.querySelector('.modal-scrim, .popover')) {
       const c = chat.current();
-      if (c && c.running) { e.preventDefault(); call('stop_generation', { conversationId: c.id }).catch(() => {}); }
+      // the composer's own stop: queued messages come back instead of being sent
+      if (c && c.running) { e.preventDefault(); chat.stopTurn(c.id); }
     }
   });
 }
@@ -197,6 +199,10 @@ function bindBackend() {
   onBackend('permission-resolved', (p) => chat.onPermissionResolved(p));
   onBackend('mcp-changed', () => refreshMcp());
   onBackend('menu-new-chat', () => navigate({ name: 'new' }));
+  // the backend changed a setting itself (e.g. "always allow" on a prompt)
+  onBackend('settings-updated', async () => {
+    try { store.settings = await call('get_settings'); emit('settings-changed'); } catch { /* keep the current copy */ }
+  });
   onBackend('quick-entry', async ({ text }) => {
     await navigate({ name: 'new', params: { text } });
     if (store.activeComposer && text.trim()) store.activeComposer.send();
