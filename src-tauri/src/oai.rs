@@ -19,12 +19,14 @@ pub const PREFIX: &str = "oai:";
 /// prompt before its first token.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The HTTP client, with `idle` as its read timeout. The app's own limit
+/// (`IDLE_TIMEOUT`) gets a client shared by the requests (see
+/// `anthropic::SharedHttp`); any other limit (tests) gets one of its own.
 fn client(idle: Duration) -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(idle)
-        .build()
-        .map_err(|e| AppError::msg(e.to_string()))
+    let build = || reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(idle).build();
+    static SHARED: crate::anthropic::SharedHttp = crate::anthropic::SharedHttp::new();
+    let c = if idle == IDLE_TIMEOUT { SHARED.get(build) } else { build() };
+    c.map_err(|e| AppError::msg(e.to_string()))
 }
 
 fn url(base: &str, path: &str) -> String {

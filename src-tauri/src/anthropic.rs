@@ -26,13 +26,59 @@ pub struct StreamOutcome {
     pub error: Option<AppError>,
 }
 
-impl Client {
-    pub fn new(base_url: &str, api_key: &str) -> AppResult<Client> {
-        let http = reqwest::Client::builder()
+/// An HTTP client shared by every request, so the system's root
+/// certificates aren't loaded again each time (slow on macOS and Windows)
+/// and connections are reused instead of a new TLS handshake per request.
+/// The proxy settings (the system's too) and the certificates are read when
+/// a client is built, so it is built again once it is `SHARED_FOR` old: a
+/// change to them still takes effect while the app runs.
+pub(crate) struct SharedHttp(parking_lot::Mutex<Option<(std::time::Instant, reqwest::Client)>>);
+
+/// How long a shared client is used (connections idle for 90 s are closed
+/// anyway).
+const SHARED_FOR: Duration = Duration::from_secs(60);
+
+impl SharedHttp {
+    pub(crate) const fn new() -> SharedHttp {
+        SharedHttp(parking_lot::const_mutex(None))
+    }
+
+    /// The client, built with `build` when there is none or it is too old.
+    pub(crate) fn get(&self, build: impl FnOnce() -> reqwest::Result<reqwest::Client>) -> reqwest::Result<reqwest::Client> {
+        self.get_for(SHARED_FOR, build)
+    }
+
+    fn get_for(&self, keep: Duration, build: impl FnOnce() -> reqwest::Result<reqwest::Client>) -> reqwest::Result<reqwest::Client> {
+        let mut slot = self.0.lock();
+        match slot.as_ref() {
+            Some((at, c)) if at.elapsed() < keep => Ok(c.clone()),
+            _ => {
+                let c = build()?;
+                *slot = Some((std::time::Instant::now(), c.clone()));
+                Ok(c)
+            }
+        }
+    }
+}
+
+/// The client for the Claude API. A `Client` is made for every step of a
+/// turn, title and model list; the key and endpoint are its own, nothing
+/// per key is kept in the shared one.
+fn shared_http() -> AppResult<reqwest::Client> {
+    static HTTP: SharedHttp = SharedHttp::new();
+    HTTP.get(|| {
+        reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(600))
             .user_agent(concat!("ClaudeRust/", env!("CARGO_PKG_VERSION")))
-            .build()?;
+            .build()
+    })
+    .map_err(AppError::from)
+}
+
+impl Client {
+    pub fn new(base_url: &str, api_key: &str) -> AppResult<Client> {
+        let http = shared_http()?;
         Ok(Client {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -631,5 +677,103 @@ mod tests {
         let e = api_error(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#);
         assert_eq!(e.kind(), "invalid_request_error");
         assert_eq!(e.to_string(), "bad");
+    }
+
+    /// A local HTTP/1.1 server answering every request on a connection
+    /// (keep-alive) with an empty model list; counts the connections.
+    async fn keep_alive_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        std::env::set_var("NO_PROXY", "127.0.0.1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = conns.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let Ok(n) = s.read(&mut chunk).await else { return };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            buf.drain(..end + 4);
+                            let body = r#"{"data":[],"has_more":false}"#;
+                            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+                            if s.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), conns)
+    }
+
+    #[tokio::test]
+    async fn clients_share_connections() {
+        let (base, conns) = keep_alive_server().await;
+        for _ in 0..3 {
+            // a new `Client` each time, as the app makes one per step of a turn
+            let c = Client::new(&base, "k").unwrap();
+            assert!(c.list_models().await.unwrap().is_empty());
+        }
+        assert_eq!(conns.load(std::sync::atomic::Ordering::SeqCst), 1, "one connection, reused");
+    }
+
+    #[test]
+    fn a_shared_client_is_built_again_once_old() {
+        let shared = SharedHttp::new();
+        let builds = std::cell::Cell::new(0);
+        let build = || {
+            builds.set(builds.get() + 1);
+            reqwest::Client::builder().build()
+        };
+        for _ in 0..3 {
+            shared.get_for(Duration::from_secs(60), build).unwrap();
+        }
+        assert_eq!(builds.get(), 1);
+        // too old (proxy settings or certificates may have changed): a new one
+        shared.get_for(Duration::ZERO, build).unwrap();
+        assert_eq!(builds.get(), 2);
+        shared.get_for(Duration::from_secs(60), build).unwrap();
+        assert_eq!(builds.get(), 2, "and that one is kept");
+    }
+
+    /// `cargo test --release -p clauderust --lib bench_client -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn bench_client() {
+        use std::time::Instant;
+        let n = 30u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(600))
+                .user_agent("x")
+                .build()
+                .unwrap();
+        }
+        println!("reqwest::Client::builder().build(): {:?} each", t.elapsed() / n);
+        let _ = Client::new("http://127.0.0.1:1", "k").unwrap();
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = Client::new("http://127.0.0.1:1", "k").unwrap();
+        }
+        println!("Client::new: {:?} each", t.elapsed() / n);
+        let (base, conns) = keep_alive_server().await;
+        let n = 200u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            Client::new(&base, "k").unwrap().list_models().await.unwrap();
+        }
+        println!("Client::new + GET /v1/models (local): {:?} each, {} connections for {n} requests", t.elapsed() / n, conns.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

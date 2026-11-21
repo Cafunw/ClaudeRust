@@ -266,8 +266,11 @@ pub async fn fetch_url_block(url: &str) -> Option<serde_json::Value> {
 /// A page as text, reading at most `PAGE_MAX_BYTES` of it (a page that
 /// never ends, or a huge download, stops there).
 async fn fetch_page(url: &str, timeout: std::time::Duration) -> Result<String, String> {
-    let client = reqwest::Client::builder().timeout(timeout).user_agent("ClaudeRust").build().map_err(|e| e.to_string())?;
-    let mut r = client.get(url).send().await.map_err(|e| if e.is_timeout() { format!("no answer within {} s", timeout.as_secs()) } else { e.to_string() })?;
+    // a client shared by the fetches (see `anthropic::SharedHttp`); the
+    // time limit is the request's own
+    static CLIENT: crate::anthropic::SharedHttp = crate::anthropic::SharedHttp::new();
+    let client = CLIENT.get(|| reqwest::Client::builder().user_agent("ClaudeRust").build()).map_err(|e| e.to_string())?;
+    let mut r = client.get(url).timeout(timeout).send().await.map_err(|e| if e.is_timeout() { format!("no answer within {} s", timeout.as_secs()) } else { e.to_string() })?;
     let status = r.status();
     let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let mut bytes: Vec<u8> = Vec::new();
