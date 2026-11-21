@@ -153,7 +153,8 @@ function bindShortcuts() {
   window.addEventListener('keydown', (e) => {
     const mod = isMac ? e.metaKey : e.ctrlKey;
     const k = e.key.toLowerCase();
-    if (keymap.matches(e, 'new_chat')) { e.preventDefault(); navigate({ name: 'new' }); }
+    // in Code mode the same keys start a new session
+    if (keymap.matches(e, 'new_chat')) { e.preventDefault(); navigate({ name: store.appMode === 'code' ? 'code' : 'new' }); }
     else if (keymap.matches(e, 'palette')) { e.preventDefault(); openSearch(); }
     else if (keymap.matches(e, 'sidebar')) { e.preventDefault(); toggleSidebar(); }
     else if (keymap.matches(e, 'settings')) { e.preventDefault(); openSettings('general'); }

@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  mode_chat: "Chat",
+  mode_code: "Code",
   sess_filter: "Filter sessions by title or folder…",
   sess_running: "Working",
   sess_waiting: "Needs you",
@@ -569,6 +571,8 @@ const en = {
 };
 
 const tr = {
+  mode_chat: "Sohbet",
+  mode_code: "Kod",
   sess_filter: "Oturumları başlık ya da klasöre göre süz…",
   sess_running: "Çalışıyor",
   sess_waiting: "Sizi bekliyor",

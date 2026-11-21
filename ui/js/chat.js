@@ -36,6 +36,7 @@ export async function openConversation(id, { focus = true } = {}) {
   const data = await call('get_conversation', { id });
   const conv = data.conversation;
   store.codeRoot = conv.kind === 'code' ? conv.cwd : null;
+  emit('conversation-opened', { id, kind: conv.kind });
   const v = viewEl();
   v.innerHTML = '';
   const top = h(`<div class="topbar"></div>`);

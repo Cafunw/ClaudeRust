@@ -169,7 +169,8 @@ export async function renderChats(view) {
     <div class="list"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => emit('navigate', { name: 'new' });
   const list = $('.list', view);
-  const all = await call('list_conversations', {}).catch(() => []);
+  // Chat mode's history: code sessions live in Code mode
+  const all = (await call('list_conversations', {}).catch(() => [])).filter((c) => c.kind !== 'code');
   let selecting = false;
   const selected = new Set();
   const delBtn = $('[data-act=delsel]', view);

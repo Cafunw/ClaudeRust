@@ -1,4 +1,5 @@
-// Left sidebar: navigation, starred and recent chats, account menu.
+// Left sidebar: Chat / Code modes, navigation, starred and recent
+// conversations of the mode, account menu.
 import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac } from './api.js';
@@ -8,37 +9,111 @@ import { conversationMenu } from './chat.js';
 
 const RECENT_LIMIT = 30;
 
+// Chat and Code are separate modes, as in Claude Desktop: each has its own
+// navigation and its own list of conversations.
+const CHAT_ROUTES = new Set(['new', 'chats', 'projects', 'project', 'artifacts']);
+
+function savedMode() {
+  try { return JSON.parse(localStorage.getItem('clauderust') || '{}').appMode === 'code' ? 'code' : 'chat'; } catch { return 'chat'; }
+}
+
+/** The mode a route belongs to (null when it can't be told yet). */
+function modeForRoute(r) {
+  if (!r) return null;
+  if (r.name === 'code') return 'code';
+  if (CHAT_ROUTES.has(r.name)) return 'chat';
+  if (r.name === 'chat') {
+    const c = (store.conversations || []).find((x) => x.id === (r.params && r.params.id));
+    return c ? (c.kind === 'code' ? 'code' : 'chat') : null;
+  }
+  return null;
+}
+
+/** Switch the sidebar to `mode` (and remember it). */
+export function setMode(mode) {
+  if (mode !== 'chat' && mode !== 'code') return;
+  if (store.appMode === mode) return;
+  store.appMode = mode;
+  saveLocal({ appMode: mode });
+  renderNav();
+  renderLists();
+}
+
+/** Go to a mode: back to where you were in it, or its start page. */
+function enterMode(mode) {
+  const last = (JSON.parse(localStorage.getItem('clauderust') || '{}').lastByMode || {})[mode];
+  setMode(mode);
+  if (last && last.name === 'chat' && (store.conversations || []).some((c) => c.id === last.id)) emit('navigate', { name: 'chat', params: { id: last.id } });
+  else if (last && last.name && last.name !== 'chat') emit('navigate', { name: last.name });
+  else emit('navigate', { name: mode === 'code' ? 'code' : 'new' });
+}
+
+function rememberRoute() {
+  const r = store.route;
+  const mode = modeForRoute(r);
+  if (!mode) return;
+  setMode(mode);
+  try {
+    const all = JSON.parse(localStorage.getItem('clauderust') || '{}');
+    const lastByMode = { ...(all.lastByMode || {}) };
+    lastByMode[mode] = r.name === 'chat' ? { name: 'chat', id: r.params && r.params.id } : (r.name === 'project' ? { name: 'projects' } : { name: r.name });
+    saveLocal({ lastByMode });
+  } catch { /* storage unavailable */ }
+}
+
 export function mountSidebar() {
   const el = $('#sidebar');
-  const mod = isMac ? '⌘' : 'Ctrl+';
+  store.appMode = store.appMode || savedMode();
   el.innerHTML = `
     <div class="sidebar-top">
       <button class="icon-btn" data-act="toggle" title="${t('collapse')}" aria-label="${t('collapse')}">${icon('sidebar', 18)}</button>
       <span class="brand">ClaudeRust</span>
     </div>
-    <nav class="nav">
-      <button class="nav-item new-chat" data-nav="new"><span class="plus-circle">${icon('plus', 15)}</span><span class="label">${t('new_chat')}</span><span class="kbd">${mod}⇧O</span></button>
-      <button class="nav-item" data-nav="chats">${icon('chat', 18)}<span class="label">${t('chats')}</span></button>
-      <button class="nav-item" data-nav="projects">${icon('folder', 18)}<span class="label">${t('projects')}</span></button>
-      <button class="nav-item" data-nav="artifacts">${icon('layers', 18)}<span class="label">${t('artifacts')}</span></button>
-      <button class="nav-item" data-nav="code">${icon('code', 18)}<span class="label">${t('code')}</span></button>
-    </nav>
+    <div class="mode-switch" role="tablist">
+      <button role="tab" data-mode="chat" title="${t('mode_chat')}">${icon('chat', 15)}<span class="label">${t('mode_chat')}</span></button>
+      <button role="tab" data-mode="code" title="${t('mode_code')}">${icon('code', 15)}<span class="label">${t('mode_code')}</span></button>
+    </div>
+    <nav class="nav"></nav>
     <div class="sidebar-scroll"></div>
     <div class="sidebar-bottom"><button class="user-card"></button></div>`;
   el.classList.toggle('collapsed', store.sidebarCollapsed);
   el.addEventListener('click', (e) => {
+    const m = e.target.closest('[data-mode]');
+    if (m) { if (m.dataset.mode !== store.appMode) enterMode(m.dataset.mode); return; }
     const n = e.target.closest('[data-nav]');
-    if (n) { emit('navigate', { name: n.dataset.nav }); return; }
+    if (n) {
+      if (n.dataset.nav === 'routines') { import('./routines.js').then((r) => r.openRoutines()); return; }
+      emit('navigate', { name: n.dataset.nav });
+      return;
+    }
     if (e.target.closest('[data-act=toggle]')) toggleSidebar();
   });
   $('.user-card', el).addEventListener('click', (e) => accountMenu(e.currentTarget));
   on('conversations-changed', refreshSidebar);
   on('running-changed', renderLists);
-  on('route-changed', highlight);
+  on('route-changed', () => { rememberRoute(); highlight(); });
+  // a conversation's kind is only known once it's loaded
+  on('conversation-opened', ({ kind }) => { setMode(kind === 'code' ? 'code' : 'chat'); rememberRoute(); highlight(); });
   on('settings-changed', renderUserCard);
   on('collapse-sidebar', () => { if (!store.sidebarCollapsed) toggleSidebar(); });
+  renderNav();
   renderUserCard();
   refreshSidebar();
+}
+
+function renderNav() {
+  const nav = $('#sidebar .nav');
+  if (!nav) return;
+  const mod = isMac ? '⌘' : 'Ctrl+';
+  document.querySelectorAll('#sidebar [data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === store.appMode));
+  nav.innerHTML = store.appMode === 'code'
+    ? `<button class="nav-item new-chat" data-nav="code"><span class="plus-circle">${icon('plus', 15)}</span><span class="label">${t('new_session')}</span><span class="kbd">${mod}⇧O</span></button>
+       <button class="nav-item" data-nav="routines">${icon('clock', 18)}<span class="label">${t('rt_title')}</span></button>`
+    : `<button class="nav-item new-chat" data-nav="new"><span class="plus-circle">${icon('plus', 15)}</span><span class="label">${t('new_chat')}</span><span class="kbd">${mod}⇧O</span></button>
+       <button class="nav-item" data-nav="chats">${icon('chat', 18)}<span class="label">${t('chats')}</span></button>
+       <button class="nav-item" data-nav="projects">${icon('folder', 18)}<span class="label">${t('projects')}</span></button>
+       <button class="nav-item" data-nav="artifacts">${icon('layers', 18)}<span class="label">${t('artifacts')}</span></button>`;
+  highlight();
 }
 
 export function toggleSidebar() {
@@ -83,9 +158,9 @@ export async function refreshSidebar() {
 function chatLink(c) {
   const running = store.running.has(c.id) || c.running && store.running.has(c.id);
   const waiting = [...store.permissions.values()].some((p) => p.conversation_id === c.id);
-  const a = h(`<button class="chat-link" data-id="${esc(c.id)}">
-    ${c.kind === 'code' ? `<span class="code-badge">${icon('terminal', 14)}</span>` : ''}
-    <span class="title">${esc(c.title || t('new_chat'))}</span>
+  const folder = c.kind === 'code' && c.cwd ? c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd : '';
+  const a = h(`<button class="chat-link ${folder ? 'two' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
+    <span class="txt"><span class="title">${esc(c.title || (c.kind === 'code' ? t('untitled') : t('new_chat')))}</span>${folder ? `<span class="sub">${esc(folder)}</span>` : ''}</span>
     ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : ''}
     <span class="icon-btn sm more" role="button" aria-label="more">${icon('more', 16)}</span></button>`);
   a.addEventListener('click', (e) => {
@@ -103,7 +178,9 @@ function renderLists() {
   const box = $('#sidebar .sidebar-scroll');
   if (!box) return;
   box.innerHTML = '';
-  const convs = store.conversations || [];
+  const code = store.appMode === 'code';
+  // only this mode's conversations
+  const convs = (store.conversations || []).filter((c) => (c.kind === 'code') === code);
   const starred = convs.filter((c) => c.starred);
   if (starred.length) {
     box.appendChild(h(`<div class="section-title">${t('starred')}</div>`));
@@ -111,13 +188,15 @@ function renderLists() {
   }
   const recents = convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT);
   if (recents.length) {
-    box.appendChild(h(`<div class="section-title">${t('recents')}</div>`));
+    box.appendChild(h(`<div class="section-title">${code ? t('sessions') : t('recents')}</div>`));
     recents.forEach((c) => box.appendChild(chatLink(c)));
     if (convs.length - starred.length > RECENT_LIMIT) {
       const all = h(`<button class="view-all">${t('view_all')} ${icon('chevRight', 12)}</button>`);
-      all.onclick = () => emit('navigate', { name: 'chats' });
+      all.onclick = () => emit('navigate', { name: code ? 'code' : 'chats' });
       box.appendChild(all);
     }
+  } else if (!starred.length) {
+    box.appendChild(h(`<div class="sidebar-empty muted small">${esc(code ? t('no_sessions') : t('no_chats'))}</div>`));
   }
   highlight();
 }
@@ -126,7 +205,7 @@ function highlight() {
   const r = store.route;
   document.querySelectorAll('#sidebar [data-nav]').forEach((b) => {
     const n = b.dataset.nav;
-    b.classList.toggle('active', n !== 'new' && (r.name === n || (n === 'projects' && r.name === 'project')));
+    b.classList.toggle('active', n !== 'new' && n !== 'code' && (r.name === n || (n === 'projects' && r.name === 'project')));
   });
   document.querySelectorAll('#sidebar .chat-link').forEach((b) => b.classList.toggle('active', r.name === 'chat' && r.params && r.params.id === b.dataset.id));
   void currentLanguage;
