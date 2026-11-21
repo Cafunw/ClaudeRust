@@ -381,7 +381,7 @@ mod tests {
         // a broken file isn't silently skipped
         std::fs::write(dir.join(".claude/settings.local.json"), "{\"hooks\": {").unwrap();
         let cfg = load(&dir, &trusted);
-        let local = dir.join(".claude/settings.local.json").display().to_string();
+        let local = dir.join(".claude").join("settings.local.json").display().to_string();
         assert!(cfg.problems.iter().any(|p| p.contains(&local) && p.contains("isn't valid JSON")), "{:?}", cfg.problems);
         let _ = std::fs::remove_dir_all(dir);
     }

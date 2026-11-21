@@ -28,6 +28,9 @@ pub struct Term {
     /// program in it isn't reading, so it never happens on a command thread.
     input: SyncSender<Vec<u8>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// To hang up the shell's whole job on Unix; on Windows closing the
+    /// pseudo console ends the programs attached to it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pid: Option<u32>,
 }
 
