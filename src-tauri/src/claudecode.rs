@@ -77,19 +77,39 @@ pub async fn cli_info(override_path: &str) -> Value {
 
 /// Open a terminal running `claude` so the user can sign in with /login.
 pub fn open_login_terminal(cli: &std::path::Path) -> AppResult<()> {
-    let cli = cli.display().to_string();
+    open_in_terminal(None, cli, &[])
+}
+
+/// Open the system terminal running `program args…`, in `cwd` when given.
+/// The folder and arguments are passed as separate words (never pasted into
+/// a shell line), so spaces and quotes in them are safe.
+pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path, args: &[String]) -> AppResult<()> {
+    let prog = program.display().to_string();
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", "cmd", "/K", &cli])
-            .spawn()?;
+        // separate arguments: Rust quotes a path with spaces, and `cmd /K`
+        // keeps a single quoted program name as it is
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        if let Some(d) = cwd {
+            c.arg("/D").arg(d);
+        }
+        c.args(["cmd", "/K"]).arg(&prog).args(args);
+        c.spawn()?;
         return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
+        // a POSIX-quoted shell line for Terminal's `do script`
+        let sq = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let mut line = String::new();
+        if let Some(d) = cwd {
+            line.push_str(&format!("cd {} && ", sq(&d.display().to_string())));
+        }
+        line.push_str(&std::iter::once(sq(&prog)).chain(args.iter().map(|a| sq(a))).collect::<Vec<_>>().join(" "));
         let script = format!(
             "tell application \"Terminal\" to do script \"{}\"\ntell application \"Terminal\" to activate",
-            cli.replace('\\', "\\\\").replace('"', "\\\"")
+            line.replace('\\', "\\\\").replace('"', "\\\"")
         );
         std::process::Command::new("osascript").args(["-e", &script]).spawn()?;
         return Ok(());
@@ -104,20 +124,36 @@ pub fn open_login_terminal(cli: &std::path::Path) -> AppResult<()> {
             ("kitty", &[]),
             ("xterm", &["-e"]),
         ];
+        // sh -c 'cd "$0" && exec "$@"' <dir> <program> <args…>
+        let dir = cwd.map(|d| d.display().to_string()).unwrap_or_else(|| ".".into());
         let path = crate::shellenv::path();
         for (t, pre) in terms {
             if let Ok(bin) = which::which_in(t, Some(&path), "/") {
                 let mut c = std::process::Command::new(bin);
-                c.args(pre).arg(&cli);
+                c.args(pre).args(["sh", "-c", "cd \"$0\" && exec \"$@\"", &dir, &prog]).args(args);
+                if let Some(d) = cwd {
+                    c.current_dir(d);
+                }
                 if c.spawn().is_ok() {
                     return Ok(());
                 }
             }
         }
+        let mut cmd = prog.clone();
+        for a in args {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
         Err(AppError::msg(format!(
-            "No terminal app found. Open a terminal and run: {cli}"
+            "No terminal app found. Open a terminal{} and run: {cmd}",
+            cwd.map(|d| format!(" in {}", d.display())).unwrap_or_default()
         )))
     }
+}
+
+/// The Claude Code session a conversation's latest answer belongs to.
+pub fn latest_session(path: &[Message]) -> Option<String> {
+    path.iter().rev().find_map(|m| m.meta["cc_session"].as_str().map(str::to_string))
 }
 
 fn is_reminder(b: &Value) -> bool {
@@ -941,6 +977,10 @@ mod tests {
             {"type": "setMode", "mode": "acceptEdits", "destination": "session"}
         ]);
         assert_eq!(allowed_rules(&sugg), vec!["Bash(npm test:*)".to_string(), "WebFetch".to_string()]);
+        let msg = |meta: Value| Message { id: "x".into(), conversation_id: "c".into(), parent_id: None, role: "assistant".into(), content: json!([]), meta, created_at: 0 };
+        assert_eq!(latest_session(&[msg(json!({"cc_session": "s1"})), msg(json!({})), msg(json!({"cc_session": "s2"}))]).as_deref(), Some("s2"));
+        assert_eq!(latest_session(&[msg(json!({"cc_session": "s1"})), msg(json!({"error": {}}))]).as_deref(), Some("s1"));
+        assert_eq!(latest_session(&[]), None);
         assert!(is_resume_lost("Error: No conversation found with session ID: abc"));
         assert!(is_resume_lost("No message found with message.uuid of: x"));
         assert!(!is_resume_lost("rate limited"));

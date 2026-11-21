@@ -172,6 +172,9 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
       } })), { width: 240 });
     } });
   }
+  if (c.kind === 'code' && (c.options || {}).engine === 'claude-code') {
+    items.push({ label: t('cc_open_terminal'), icon: 'terminal', onClick: () => call('cc_open_in_terminal', { conversationId: c.id }).catch(errorToast) });
+  }
   items.push(
     { sep: true },
     { label: t('export_md'), icon: 'download', onClick: () => exportConv(c, 'md') },

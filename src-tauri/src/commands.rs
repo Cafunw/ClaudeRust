@@ -1212,6 +1212,21 @@ pub async fn prompt_history(state: St<'_>, query: String) -> AppResult<Value> {
     Ok(json!(rows.into_iter().map(|(text, at, title)| json!({"text": text, "at": at, "title": title})).collect::<Vec<_>>()))
 }
 
+/// Continue a Claude Code session in the system terminal (`claude --resume`).
+#[tauri::command]
+pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    let st = state.inner().clone();
+    let conv = st.db.conv_get(&conversation_id)?;
+    let cwd = conv.cwd.clone().ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    let path = match &conv.current_leaf {
+        Some(l) => st.db.path_to(l)?,
+        None => vec![],
+    };
+    let sid = crate::claudecode::latest_session(&path).ok_or_else(|| AppError::msg("This conversation has no Claude Code session yet: send a message first."))?;
+    let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::msg("Claude Code isn't installed."))?;
+    crate::claudecode::open_in_terminal(Some(std::path::Path::new(&cwd)), &cli, &["--resume".to_string(), sid])
+}
+
 /// TODO / FIXME / HACK / XXX / BUG comments in the session's project.
 #[tauri::command]
 pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Value> {
