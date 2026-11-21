@@ -69,6 +69,15 @@ fn base(id: &str, name: &str, desc: &str) -> ModelInfo {
 
 /// Known models, in the order they appear in the model picker.
 pub fn catalog() -> Vec<ModelInfo> {
+    CATALOG.clone()
+}
+
+/// Built once: `info` looks a model up for every assistant message of a
+/// turn being rendered and every row of the usage overview, and building
+/// the list each time made each lookup cost some fifty allocations.
+static CATALOG: std::sync::LazyLock<Vec<ModelInfo>> = std::sync::LazyLock::new(build_catalog);
+
+fn build_catalog() -> Vec<ModelInfo> {
     let mut v = vec![];
 
     let mut m = base("claude-opus-5-5", "Opus 5.5", "Most capable for complex work");
@@ -171,8 +180,8 @@ pub fn catalog() -> Vec<ModelInfo> {
 
 /// Look up a model, falling back to family heuristics for ids we don't know yet.
 pub fn info(id: &str) -> ModelInfo {
-    if let Some(m) = catalog().into_iter().find(|m| m.id == id) {
-        return m;
+    if let Some(m) = CATALOG.iter().find(|m| m.id == id) {
+        return m.clone();
     }
     let lower = id.to_ascii_lowercase();
     let pretty = pretty_name(id);
@@ -378,5 +387,19 @@ mod tests {
 
         let o48 = info("claude-opus-4-8");
         assert!(thinking_params(&o48, false, None, 1000).thinking.is_none());
+    }
+
+    /// Time a model lookup (once per assistant message of a rendered turn,
+    /// per row of the usage overview).
+    #[test]
+    #[ignore]
+    fn bench_info() {
+        let n = 100_000;
+        let t0 = std::time::Instant::now();
+        let mut p = 0.0;
+        for i in 0..n {
+            p += info(if i % 2 == 0 { "claude-opus-5-5" } else { "claude-opus-4-5" }).price.0;
+        }
+        eprintln!("info: {:.0} ns per lookup ({p})", t0.elapsed().as_nanos() as f64 / n as f64);
     }
 }

@@ -2236,7 +2236,8 @@ mod tests {
     /// Time (and, under DHAT, count the allocations of) the streaming
     /// updates of a reply at the end of a long agentic turn: 40 tool calls
     /// before it, then thinking, a long text with code blocks and a Write
-    /// call whose input streams. `BENCH_TICKS=0` runs the setup only.
+    /// call whose input streams. `BENCH_TICKS=0` runs the setup only;
+    /// `BENCH_NO_EMIT=1` leaves out what emit_turn does with the turn.
     #[test]
     #[ignore]
     fn bench_live_ticks() {
@@ -2245,6 +2246,7 @@ mod tests {
         let conv_id = "c";
         let rounds: usize = std::env::var("BENCH_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
         let max_ticks: usize = std::env::var("BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let no_emit = std::env::var("BENCH_NO_EMIT").is_ok();
         let prefix = fixture::turn_prefix(rounds);
         let mut mcp_names = HashMap::new();
         mcp_names.insert("mcp__github__get_issue".to_string(), ("github".to_string(), "get_issue".to_string()));
@@ -2275,6 +2277,9 @@ mod tests {
                 let (mut emit_ns, mut len) = (0u128, 0usize);
                 let t0 = Instant::now();
                 live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, |turn| {
+                    if no_emit {
+                        return;
+                    }
                     // what emit_turn does with it (to_value, then the event's JSON)
                     let e0 = Instant::now();
                     let payload = json!({"conversation_id": conv_id, "turn": turn});

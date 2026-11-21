@@ -187,16 +187,24 @@ fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, art
         return None;
     }
     let mut html = String::new();
+    // the first piece is taken as it is (most texts are one piece)
+    let mut add = |piece: String| {
+        if html.is_empty() {
+            html = piece;
+        } else {
+            html.push_str(&piece);
+        }
+    };
     let opts = Opts { math: ctx.math, breaks: true };
     let segments = artifacts::split(&acc.raw);
     let last = segments.len().saturating_sub(1);
     for (i, seg) in segments.into_iter().enumerate() {
         match seg {
-            Segment::Markdown(md) if live && i == last => html.push_str(&markdown::render_live(&md, opts)),
-            Segment::Markdown(md) => html.push_str(&markdown::render(&md, opts)),
+            Segment::Markdown(md) if live && i == last => add(markdown::render_live(&md, opts)),
+            Segment::Markdown(md) => add(markdown::render(&md, opts)),
             Segment::Artifact(a) => {
                 let v = tracker.next(&a.identifier);
-                html.push_str(&artifact_card(&a, v));
+                add(artifact_card(&a, v));
                 artifacts_out.push(json!({
                     "identifier": a.identifier,
                     "version": v,
@@ -236,7 +244,14 @@ fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, art
         .iter()
         .map(|(u, t)| json!({"url": u, "title": t, "domain": domain_of(u)}))
         .collect();
-    Some(json!({"kind": "text", "html": html, "sources": sources, "raw": acc.raw.replace(['\u{E000}', '\u{E001}'], "")}))
+    let markers = ['\u{E000}', '\u{E001}'];
+    let raw = if acc.raw.contains(markers) { acc.raw.replace(markers, "") } else { acc.raw };
+    // moved in: `json!` would copy them, and they are most of a text part
+    let mut part = json!({"kind": "text"});
+    part["html"] = Value::String(html);
+    part["sources"] = Value::Array(sources);
+    part["raw"] = Value::String(raw);
+    Some(part)
 }
 
 fn tool_result_view(block: &Value) -> Value {
@@ -608,17 +623,18 @@ impl TurnBuilder {
                     };
                     if let Some(prev) = self.parts.last_mut().filter(|p| p["kind"] == "thinking") {
                         let raw = format!("{}\n\n{}", prev["raw"].as_str().unwrap_or(""), t);
-                        prev["html"] = json!(md(raw.trim()));
-                        prev["raw"] = json!(raw);
+                        prev["html"] = Value::String(md(raw.trim()));
+                        prev["raw"] = Value::String(raw);
                         prev["streaming"] = json!(live);
                     } else {
-                        self.parts.push(json!({
+                        let mut part = json!({
                             "kind": "thinking",
-                            "html": md(t),
                             "raw": t,
                             "redacted": redacted,
                             "streaming": live,
-                        }));
+                        });
+                        part["html"] = Value::String(md(t));
+                        self.parts.push(part);
                     }
                 }
                 "tool_use" => {
