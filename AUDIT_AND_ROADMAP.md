@@ -284,3 +284,42 @@ An audit of the whole history (98 commits) found no secrets or personal data, so
 | Housekeeping | `SECURITY.md` (private vulnerability reports), Dependabot for GitHub Actions, `.gitignore` entries for keys and `.env` files |
 
 Left as they are by the owner's choice: the name and the accent colour (the logo is original).
+
+## Bug hunt (risk map, four hunter agents, two fixer agents) — 70 findings, 66 fixed
+
+Four read-only hunter agents audited the code at a386bb7: crashes and memory, concurrency, the UI ↔ backend contract, and files, network and edge cases. Their findings were deduplicated and fixed with a test that shows the bug wherever one could be written (178 unit tests now, up from 119), then checked with `cargo clippy --all-targets -- -D warnings` and `cargo test` on Linux, macOS and Windows (CI), ESLint, and in the app for UI changes. Line numbers are those of a386bb7.
+
+**Critical (crash / hang)**
+
+| Where | Finding | Fix |
+|---|---|---|
+| terminal.rs:125, `term_write` | Pasting into a terminal whose program isn't reading blocked runtime threads on a PTY write under a lock: after a few keystrokes the whole app froze | Writer thread per terminal with a bounded queue; `term_write` never blocks |
+| lib.rs:229 | An unusable database panicked in setup on every start (nothing shown on Windows) | Dialog, the file moved aside, a fresh database; the dialog runs off the main thread (rfd deadlocked GTK there) |
+| mcp.rs:724–760, claudecode.rs:529 | One non-UTF-8 byte ended an MCP server's stdio readers: its stderr pipe filled, the server stalled, calls waited 600 s while it showed "connected" | Lossy line reader that always drains, lines capped |
+| attachments.rs:136, extensions.rs:14, import.rs:462 | Zip bombs (.docx, .mcpb manifest, claude.ai export) inflated without limit and aborted the app | `util::read_capped` (declared size checked, reads through `take`), 2 GB cap on unpacking |
+
+**High (data loss / corruption)**
+
+| Where | Finding | Fix |
+|---|---|---|
+| worktree.rs:87–111, commands.rs:580 | Deleting a session removed its worktree although the safety commit had failed (unreadable file, `index.lock`, missing drive), after a fixed 300 ms while the run still wrote files | The worktree is kept unless everything was committed; deletion waits for the run to end |
+| codetools.rs:51, gitops.rs:408 | Revert deleted files over 20 MB or unreadable ones in folders without git (taken for "new") | Originals are `Missing` / `Content` / `Unknown`; `Unknown` is never reverted |
+| oai.rs:146 | The OpenAI-compatible stream split multibyte characters at chunk boundaries (saved as U+FFFD) and could wait forever | Byte buffer, 600 s idle timeout, status checked first |
+| commands.rs:82–108, settings.rs:225 | Settings saves were read-patch-write without a lock and replaced whole maps: "Always allow" was lost, a revoked hook trust came back | Patch, save and swap under one write lock; `tool_policies` merged per key; `settings-updated` event |
+| settings.js `editConfig`, mcp.rs | An MCP config that didn't parse opened as an empty one and Save overwrote it | `read_config_for_update`; Settings shows the problem and the file's own text |
+| memory.rs | A "# note" on a CLAUDE.md that isn't UTF-8 replaced the file | Other encodings refused (UTF-16 kept as such); /memory shows them read-only |
+| settings.rs, routines.rs | One unreadable value reset all settings / routines, and the reset was saved | Field-by-field recovery, the unreadable row kept aside; unknown routines kept as they are |
+| extensions.rs | Upgrading an extension deleted the working install before the new one was checked | Staged install, dry-run registration, the old one restored on failure |
+| commands.rs:364 | Staged attachments were taken before steps that can fail, so a retry sent the message without its files | Validated first, taken only once the message is stored |
+
+**Medium (logic / IPC)** — all fixed: atomic run reservation (`RunSlot`) for send, regenerate, branch switch, rewind and /compact (engine.rs, commands.rs:361); overlapping watch starts orphaning a watcher (watch.rs:163); MCP servers behind `npx`/`uvx` surviving shutdown (own process group, stdin closed first; mcp.rs:292); Claude Code cleanup skipped by an early `?` (claudecode.rs:586); exit not cancelling runs or killing process groups (lib.rs:455); terminal output flooding the UI (16 ms / 64 KB batches; terminal.rs:98); an exited shell left in the map so a later close signalled a reused PID (terminal.rs:168), and its ConPTY leak on Windows; Stop ignored during checkpoint and auto-compaction (engine.rs:836); shadow checkpoint repositories used without a lock (checkpoints.rs:94); sub-agent cost lost after "clear finished", bypassing the turn budget (engine.rs:1132); hook timeouts not killing the hook's children (hooks.rs:204); daily routines stopping for good in a DST gap (routines.rs:110); diffs and Grep without time bounds (codetools.rs:1238, gitops.rs:100); `restart_app` skipping the exit cleanup (commands.rs:49); colliding MCP tool names failing every request (mcp.rs:79); CRLF SSE from MCP HTTP servers; updates cut off after 30 s; every git command killed after 60 s (push, commit hooks); the `.git` / `.claude` guard bypassed by case, short names or streams; project memory followed through links outside the project; a bare PATH on macOS after a slow login shell; worktree creation with no time limit on a runtime thread and non-canonical "parallel" detection; UI double submits, a lost routine form, the conversation-open race, `/review 42` on the Code start page, Esc auto-sending the queue, Stop dropping queued attachments, a new conversation kept after a refused send.
+
+**Low (edge cases)** — all fixed: Grep `multiline` quadratic and uncancellable; `@https://` read whole before the 3 MB cut; `@/dev/zero` and FIFOs; unbounded block indexes from a non-conforming endpoint; recursive extension list settings; render caches bounded by count, not bytes; lost updates on conversation options and routines; a sub-agent stuck "running"; no `notifications/cancelled` to MCP on Stop; a stale model list after changing the endpoint; OpenAI-compatible replies blank when revisited mid-stream; two imports at once; in-place writes truncating files on a crash (now atomic, hard links and other owners' files written in place); console windows and garbled PowerShell output on Windows; UTF-16 text attachments; expired MCP HTTP sessions; pasted files read whole before the size check; numeric settings; compaction toasts for other conversations; review comments cleared when sending failed; leaked listeners (Map, Import); unhandled promise rejections; background events overwriting form input; onboarding for Claude Code users without a key; running state not seeded; sub-agent "allow for this session". Problems in hook settings files and the MCP config now also show in /hooks, Settings and /doctor.
+
+**Deferred**
+
+- `prompt_history` and `conversations_editing` (db.rs:424–505) scan and parse every message under the one database lock; on a very large imported database Ctrl+R can stall other database calls. Needs a separate read-only connection or a full-text index.
+- Commands the UI doesn't use (`code_info`, `delete_artifact`, `term_list`, `worktree_commit`); terminals orphaned by a WebView reload (only possible through devtools in a release build).
+- No `user_version` check: a database written by a newer version isn't refused by an older one.
+- Files ignored by git that a session created in its worktree (an `.env`) aren't saved when the worktree is removed.
+- Windows-only paths (ConPTY exit, `taskkill`, PowerShell encoding) are compiled, linted and unit-tested on CI, not tried on a Windows machine.
