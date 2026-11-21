@@ -50,6 +50,18 @@ pub fn restart_app(app: AppHandle) {
     app.restart();
 }
 
+/// Is a newer version available? (Settings → About)
+#[tauri::command]
+pub async fn update_check(app: AppHandle) -> AppResult<Value> {
+    crate::updates::check(&app).await
+}
+
+/// Download and install the available update (progress: `update-progress`).
+#[tauri::command]
+pub async fn update_install(app: AppHandle) -> AppResult<()> {
+    crate::updates::install(&app).await
+}
+
 // ---------------------------------------------------------------- settings
 
 /// Settings as a backup file (no secrets or machine-specific paths).

@@ -65,13 +65,13 @@ export function fmtTokens(n) {
 }
 
 // ------------------------------------------------------------------ toasts
-export function toast(msg, kind = '', { action, onAction } = {}) {
+export function toast(msg, kind = '', { action, onAction, duration } = {}) {
   let root = $('.toast-root');
   if (!root) { root = h('<div class="toast-root"></div>'); document.body.appendChild(root); }
   const el = h(`<div class="toast ${kind}">${esc(msg)}${action ? ` <button class="toast-action">${esc(action)}</button>` : ''}</div>`);
   if (action) el.querySelector('.toast-action').onclick = () => { el.remove(); onAction && onAction(); };
   root.appendChild(el);
-  const ms = kind === 'error' ? 4500 : action ? 8000 : 2200;
+  const ms = duration || (kind === 'error' ? 4500 : action ? 8000 : 2200);
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, ms);
   setTimeout(() => el.remove(), ms + 400);
 }

@@ -6,6 +6,7 @@ import { call, isMac } from './api.js';
 import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
 import { $, esc, h, showMenu, initials, errorToast } from './util.js';
 import { conversationMenu } from './chat.js';
+import { pendingUpdate, showUpdates } from './updates.js';
 
 const RECENT_LIMIT = 30;
 
@@ -143,6 +144,7 @@ function renderUserCard() {
 function accountMenu(anchor) {
   showMenu(anchor, [
     { header: store.settings.full_name || displayName() || 'ClaudeRust' },
+    ...(pendingUpdate() ? [{ label: t('upd_menu', { v: pendingUpdate().version }), icon: 'download', onClick: showUpdates }, { sep: true }] : []),
     { label: t('settings'), icon: 'settings', right: isMac ? '⌘,' : 'Ctrl+,', onClick: () => emit('open-settings', 'general') },
     { label: t('language'), icon: 'lang', keepOpen: true, onClick: () => showMenu(anchor, LANGUAGES.map((l) => ({
       label: l.name, checked: (store.settings.language || 'auto') === l.id,

@@ -20,6 +20,7 @@ import './watch_ui.js';
 import './usage_ui.js';
 import './shortcuts.js';
 import './findbar.js';
+import './updates.js';
 import './quote.js';
 import './todos_ui.js';
 import './panes/changes.js';

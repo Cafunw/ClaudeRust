@@ -23,7 +23,9 @@
     ],
     "security": {
       "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: asset: http://asset.localhost https:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src artifact: http://artifact.localhost https://artifact.localhost http://localhost:* http://127.0.0.1:* http://[::1]:* https://localhost:*; media-src 'self' data: blob:; object-src 'none'; base-uri 'self'",
-      "dangerousDisableAssetCspModification": ["style-src"]
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
     }
   },
   "bundle": {
@@ -40,13 +42,29 @@
       "icons/icon.ico"
     ],
     "linux": {
-      "deb": { "depends": [] }
+      "deb": {
+        "depends": []
+      }
     },
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" }
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwODJFRThBNzRFN0M0RkMKUldUOHhPZDBpdTZDa0ZDMGhzWkRwMEZ3bElWc2RLRWhIcVJwZVc4Z1VtMkNGTm5JaStGRU4rcGIK",
+      "endpoints": [
+        "https://github.com/Cafunw/ClaudeRust/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

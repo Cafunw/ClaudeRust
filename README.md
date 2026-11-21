@@ -71,7 +71,14 @@ Her push'ta GitHub Actions üç platform için kurulum paketi üretir: depo → 
 - **macOS** (Apple Silicon + Intel, universal): `.dmg`. İmzasız olduğu için ilk açılışta sağ tık → Aç, ya da `xattr -cr /Applications/ClaudeRust.app`.
 - **Linux**: `.deb`, `.rpm`, `.AppImage`.
 
-`v0.1.0` gibi bir etiket gönderilirse **Release** iş akışı, paketleri taslak bir GitHub Release'e ekler.
+`v0.1.0` gibi bir etiket gönderilirse **Release** iş akışı, paketleri ve imzalı güncelleme bildirimini (`latest.json`) taslak bir GitHub Release'e ekler.
+
+**Yeni sürüm yayınlama (otomatik güncelleme için):**
+1. Sürüm numarasını `src-tauri/tauri.conf.json` ve `src-tauri/Cargo.toml` içinde yükseltin (ör. `0.2.0`), commit'leyin.
+2. `v0.2.0` etiketini gönderin: `git tag v0.2.0 && git push origin v0.2.0`.
+3. İş akışı bitince GitHub'daki taslak sürümü **yayınlayın** (Publish). Kurulu uygulamalar yalnızca yayınlanmış en son sürümü görür.
+
+Release iş akışı iki depo sırrı ister (Settings → Secrets and variables → Actions): `TAURI_SIGNING_PRIVATE_KEY` (güncelleme imzalama anahtarı) ve `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Açık anahtar `tauri.conf.json` içindedir. Özel anahtarı kaybederseniz kurulu uygulamalar yeni sürümleri kabul etmez; güvenli bir yerde yedekleyin. Depo özel (private) olduğu sürece sürüm dosyaları giriş gerektirdiğinden kurulu uygulamalar güncellemeyi indiremez; depo herkese açık olunca çalışır.
 
 ### Kaynaktan derleme
 Gereksinimler: Rust (stable), Node.js 18+ (yalnızca Tauri CLI için), Linux'ta `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`.
@@ -79,7 +86,7 @@ Gereksinimler: Rust (stable), Node.js 18+ (yalnızca Tauri CLI için), Linux'ta 
 ```bash
 npm install          # Tauri CLI
 npx tauri dev        # geliştirme modunda çalıştır
-npx tauri build      # kurulum paketi üret (target/release/bundle)
+npx tauri build --config src-tauri/tauri.no-updater.conf.json   # kurulum paketi üret (target/release/bundle)
 cargo test -p clauderust --lib   # birim testleri
 cargo clippy -p clauderust --lib -- -D warnings
 npm run lint         # arayüz için ESLint
@@ -149,6 +156,7 @@ Arayüz dosyaları (`ui/`) ikili dosyaya gömülür: arayüzde değişiklik yapt
 - **Büyük loglar ve çökme dökümleri**: bağlama sığmayacak kadar büyük metin ekleri (log, crash raporu, yapıştırılan çıktı; 40 MB'a kadar) özetlenerek gönderilir: genel bakış, sayılarıyla gruplanmış farklı hatalar/uyarılar, ilk geçtikleri yerlerin çevresi ve yığın izleri, dosyanın başı ve sonu.
 - **Yerel ve diğer modeller**: Ayarlar → Hesap → *Yerel ve diğer modeller*: Ollama, LM Studio, llama.cpp, vLLM, OpenRouter gibi OpenAI uyumlu bir uç nokta; modelleri model menüsünde `oai:` önekiyle görünür (sohbetlerde).
 - **Sohbet / Kod ayrımı**: Claude Desktop'taki gibi kenar çubuğunun üstünde *Sohbet* / *Kod* geçişi; Sohbet'te yeni sohbet, sohbetler, projeler, artifact'ler ve yalnızca sohbetler; Kod'da yeni oturum, rutinler ve klasör adıyla yalnızca kod oturumları.
+- **Otomatik güncelleme**: uygulama açıldıktan kısa süre sonra ve sonra birkaç saatte bir GitHub'daki son sürümü denetler; yeni sürüm varsa bildirim ve hesap menüsünde *… sürümüne güncelle* görünür. Ayarlar → Hakkında → *Güncellemeler*: elle denetleme, sürüm notları, *İndir ve kur* (ilerleme çubuğuyla), ardından *Şimdi yeniden başlat*. İndirilen dosyanın imzası kurulmadan önce doğrulanır; imzası tutmayan güncelleme kurulmaz. Otomatik denetim aynı yerden kapatılabilir.
 - **Ayar yedeği**: Ayarlar → Hakkında → *Dosyaya kaydet* / *Geri yükle*: tercihler, stiller ve kısayollar bir JSON dosyasına yazılır. API anahtarları, sunucu adresleri, düzenleyici komutu, izin ayarları ve bu makineye özgü yollar dosyaya girmez ve geri yüklemede değişmez.
 - **Koyu mod**: Ayarlar → Görünüm → Açık / Koyu / Sistemle eşleş. Tüm sayfalar, paneller ve iletişim kutuları (diff renkleri, terminal, onay kutuları dahil) tema renklerini kullanır.
 - **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama ve komut paleti `Ctrl/⌘+K` (`>` komutlar, `@` dosyalar), sohbette bul `Ctrl/⌘+F`, gönderilen mesajlar `Ctrl/⌘+R`, son sohbetler arasında `Ctrl+Tab`, mesajlarınız arasında `Alt+↑/↓` (üst çubukta ana hat), panel sekmeleri `Alt+1…8`, çalışma alanı/terminal ``Ctrl/⌘+` ``, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`, tüm liste `Ctrl/⌘+/`. Kısayolların çoğu Ayarlar → Kısayollar'dan değiştirilebilir.
@@ -177,11 +185,13 @@ ClaudeRust recreates the Claude desktop experience — chats, projects, artifact
 
 **Since then:** *Improve my message* (composer tools menu, with Undo), *Instructions for this conversation* (conversation menu), save a code block as a file, drafts that survive a restart, `/tour [area]` (a read-only guided tour of the codebase), `@folder/` mentions that include the folder's layout, History search (message, author, or code added/removed), a Code page filter with sessions grouped by folder and live *Working* / *Needs you* status, and a settings backup (Settings → About; API keys, server addresses, the editor command, permission settings and machine-specific paths are neither saved nor overwritten). Every page, pane and dialog uses the theme's colours in dark mode (Settings → Appearance).
 
+**Updates:** the app checks the latest GitHub release a little after start and every few hours (Settings → About → *Updates*, where you can also check by hand, read the notes, *Download and install* with a progress bar and restart). Downloads are verified against the public key in `tauri.conf.json` before installing. To publish one: raise the version in `tauri.conf.json` and `Cargo.toml`, push a `vX.Y.Z` tag, then publish the draft release the Release workflow creates (it needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets). While the repository is private, installed apps can't download release files, so updates start working once it's public.
+
 **Testing:** `cargo test -p clauderust --lib`, `cargo clippy -p clauderust --lib -- -D warnings` and `npm run lint` (ESLint). The UI is embedded in the binary, so UI changes need a `cargo build`. Debug builds can run scripts inside the window (`CLAUDERUST_EVAL_DIR`); the end-to-end checks drive the app that way under Xvfb against a mock API.
 
 **Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs.
 
-**Install:** download the installer for your platform from the latest *Build installers* workflow run (Actions → Artifacts), or from a GitHub Release. macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npx tauri build`.
+**Install:** download the installer for your platform from the latest *Build installers* workflow run (Actions → Artifacts), or from a GitHub Release. macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npx tauri build --config src-tauri/tauri.no-updater.conf.json` (without that file, the build also makes signed update files and needs the signing key).
 
 ### Architecture
 

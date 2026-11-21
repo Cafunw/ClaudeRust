@@ -1238,3 +1238,14 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 /* the space under the last terminal row: the pane's colour, not xterm's default black */
 .term-host { background: var(--bg-1); }
 .term-host .xterm-viewport { background-color: transparent !important; }
+
+/* updates (Settings → About) */
+.upd { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 14px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.upd-line { display: flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--text-1); flex-wrap: wrap; }
+.upd-line b { color: var(--text-0); font-weight: 600; }
+.upd-err { color: var(--danger); }
+.upd-notes { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; font: 12.5px/1.5 var(--font-ui); color: var(--text-1); background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.upd-bar { height: 6px; border-radius: 6px; background: var(--bg-3); overflow: hidden; }
+.upd-bar span { display: block; height: 100%; background: var(--accent); border-radius: 6px; transition: width .2s; }
+.upd-bar.indeterminate span { animation: upd-slide 1.2s ease-in-out infinite; }
+@keyframes upd-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }

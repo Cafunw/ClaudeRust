@@ -61,6 +61,8 @@ pub struct Settings {
     /// auto | on | off; read before the window opens (see display.rs)
     pub hardware_acceleration: String,
     pub launch_at_login: bool,
+    /// Look for a newer version now and then (Settings → About).
+    pub auto_update: bool,
 
     // Code
     pub code_permission_mode: String, // default | acceptEdits | plan | bypassPermissions
@@ -133,6 +135,7 @@ impl Default for Settings {
             keep_in_tray: true,
             hardware_acceleration: "auto".into(),
             launch_at_login: false,
+            auto_update: true,
             code_permission_mode: "default".into(),
             code_model: DEFAULT_MODEL.into(),
             bash_timeout_secs: 120,

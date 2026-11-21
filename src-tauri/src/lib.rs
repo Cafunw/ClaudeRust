@@ -42,6 +42,7 @@ pub mod subagent;
 pub mod symbols;
 pub mod terminal;
 pub mod todos;
+pub mod updates;
 pub mod util;
 pub mod view;
 pub mod watch;
@@ -208,6 +209,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -237,6 +239,7 @@ pub fn run() {
             st.shells.set_app(app.handle().clone());
             devtools::start(app.handle());
             commands::start_routine_scheduler(app.handle().clone(), st.clone());
+            updates::start_background_checks(app.handle().clone(), st.clone());
             app.manage(st.clone());
 
             // Resolve the login-shell PATH, then start MCP servers.
@@ -292,6 +295,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::restart_app,
+            commands::update_check,
+            commands::update_install,
             commands::save_settings,
             commands::set_api_key,
             commands::test_connection,

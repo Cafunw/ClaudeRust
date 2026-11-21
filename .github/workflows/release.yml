@@ -1,6 +1,13 @@
 name: Release
 
-# Push a tag like v0.1.0 to publish a draft GitHub release with installers.
+# Push a tag like v0.2.0 (after raising the version in tauri.conf.json and
+# Cargo.toml) to make a draft GitHub release with the installers and the
+# signed update manifest (latest.json). Publishing the draft makes it the
+# "latest" release, which installed apps then offer as an update.
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           the updater signing key (file contents)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
 on:
   push:
     tags: ["v*"]
@@ -24,6 +31,15 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check the signing key is set
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::Set the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secrets (see the top of release.yml)."
+            exit 1
+          fi
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -40,6 +56,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "ClaudeRust ${{ github.ref_name }}"
@@ -48,3 +66,6 @@ jobs:
           prerelease: false
           tauriScript: npx tauri
           args: ${{ matrix.args }}
+          # latest.json for the in-app updater (Windows updates use the NSIS installer)
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

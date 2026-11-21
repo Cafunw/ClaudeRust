@@ -44,8 +44,10 @@ jobs:
           key: ${{ matrix.name }}
       - name: Install Tauri CLI
         run: npm install
+      # test installers: no update manifests or signatures (those need the
+      # signing key and are made by the Release workflow)
       - name: Build
-        run: npx tauri build ${{ matrix.args }}
+        run: npx tauri build ${{ matrix.args }} --config src-tauri/tauri.no-updater.conf.json
       - uses: actions/upload-artifact@v4
         with:
           name: ClaudeRust-${{ matrix.name }}

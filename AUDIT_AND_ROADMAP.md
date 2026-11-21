@@ -223,6 +223,15 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 | 18 | Backend | Files' "sessions that edited this file" looked at only 400 rows before filtering | Filter in SQL, 2000 rows |
 | 19 | Backend | Improve my message replaced a long draft with a cut-off rewrite; a fully staged hunk stayed staged after revert; one-string Linux terminals got split arguments | Error on `max_tokens`; the index is reverted too when the file was staged as is; quoted line for lxterminal / `x-terminal-emulator` |
 
+## U2 — Automatic updates (user request after the freeze) — ✅ Tam
+
+- Tauri updater plugin; manifest at `https://github.com/Cafunw/ClaudeRust/releases/latest/download/latest.json`; downloads verified against the minisign public key in `tauri.conf.json` (`bundle.createUpdaterArtifacts`); Windows installs with the NSIS installer in passive mode, Linux AppImage / .deb / .rpm, macOS .app.
+- `updates.rs`: `update_check` / `update_install` (progress as `update-progress` events, one install at a time) and a background check 20 s after start, then every 6 h, when *Check for updates automatically* is on (new `auto_update` setting, default on); the UI is told once per new version (`update-available`).
+- UI (`updates.js`): Settings → About → Updates (check, notes, download with progress bar, restart, errors with a link to the release page), a 30 s notice and an *Update to X* item in the account menu.
+- Release workflow: signs with the `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` secrets (fails early with a clear message when they're missing) and uploads `latest.json` (NSIS preferred on Windows). The per-push installer workflow builds without updater artifacts (`tauri.no-updater.conf.json`).
+- Tests: manifest/config checks (`https` endpoint, key present, same repository as the release link). End to end in the app against a local manifest: background notice, account menu item, Settings section, download + signature check + install (the test binary was replaced by the signed payload), a payload with a broken signature refused without touching the binary, "up to date" state. Debug builds can point at a test manifest with `CLAUDERUST_UPDATE_ENDPOINT`.
+- Needs from the owner: the two repository secrets (this session can't write secrets), publishing the draft release, and a public repository (release files of a private repository need sign-in, so installed apps can't fetch them).
+
 ## End-to-end test pass in dark mode (after the feature freeze)
 
 Every feature added in Phases 1–3 and U1 was exercised in the running app (debug

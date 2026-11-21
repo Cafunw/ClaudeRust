@@ -6,6 +6,7 @@ import { store, emit, on } from './store.js';
 import { $, esc, h, modal, button, toast, errorToast, promptDialog, confirmDialog } from './util.js';
 import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
+import { updatesSection } from './updates.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -389,6 +390,8 @@ const RENDER = {
     body.appendChild(h(`<h3>ClaudeRust</h3>`));
     body.appendChild(h(`<p class="muted">${t('about_desc')}</p>`));
     body.appendChild(row(t('version_label'), '', h(`<span class="mono">${esc(store.version)}</span>`)));
+    body.appendChild(row(t('upd_title'), t('upd_auto_d'), toggle('auto_update')));
+    body.appendChild(updatesSection());
     const dl = h(`<button class="btn sm">${t('reveal')}</button>`);
     dl.onclick = () => call('open_path', { path: store.dataDir }).catch(errorToast);
     body.appendChild(row(t('data_location'), store.dataDir, dl));
