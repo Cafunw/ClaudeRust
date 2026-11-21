@@ -121,7 +121,7 @@ function draw(el, ctx) {
       load(el, ctx);
     };
     list.appendChild(row);
-    if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx));
+    if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx, d.repo && f.status !== '?' && f.status !== 'A' ? () => load(el, ctx) : null));
   }
   el.appendChild(list);
 }
@@ -144,15 +144,30 @@ async function branchMenu(anchor, el, ctx) {
   ], { placement: 'bottom-start', width: 300 });
 }
 
-function diffView(text, path, ctx) {
+/** `onHunkReverted`: per-hunk revert is offered (tracked files in git). */
+function diffView(text, path, ctx, onHunkReverted) {
   const box = h('<div class="diff-view"></div>');
   if (text == null) { box.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>'; return box; }
   const rows = parseUnified(text);
   if (!rows.length) { box.innerHTML = `<div class="muted" style="padding:10px">${t('no_textual_changes')}</div>`; return box; }
   const tbl = h('<table class="dv"><tbody></tbody></table>');
   const tb = tbl.querySelector('tbody');
+  let hunk = -1;
   for (const r of rows) {
-    if (r.type === 'hunk') { tb.appendChild(h(`<tr class="dv-hunk"><td colspan="3">${esc(r.text)}</td></tr>`)); continue; }
+    if (r.type === 'hunk') {
+      hunk += 1;
+      const tr = h(`<tr class="dv-hunk"><td colspan="3"><span class="dv-hunk-text">${esc(r.text)}</span>${onHunkReverted ? `<button class="btn sm ghost dv-hunk-revert" title="${esc(t('hunk_revert_tip'))}">${icon('retry', 12)} ${esc(t('revert'))}</button>` : ''}</td></tr>`);
+      const b = tr.querySelector('.dv-hunk-revert');
+      if (b) {
+        const index = hunk;
+        b.onclick = async (e) => {
+          e.stopPropagation();
+          try { await call('change_revert_hunk', { conversationId: ctx.convId, path, index, header: r.text }); onHunkReverted(); } catch (err) { errorToast(err); }
+        };
+      }
+      tb.appendChild(tr);
+      continue;
+    }
     const tr = h(`<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`);
     for (const fn of lineHooks) fn(tr, { path, ...r }, ctx);
     tb.appendChild(tr);

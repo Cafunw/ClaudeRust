@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  hunk_revert_tip: "Undo just this part of the change",
   outline_title: "Your messages in this conversation",
   outline_empty: "No messages yet.",
   sc_outline: "Previous / next of your messages",
@@ -534,6 +535,7 @@ const en = {
 };
 
 const tr = {
+  hunk_revert_tip: "Değişikliğin yalnızca bu kısmını geri al",
   outline_title: "Bu sohbetteki mesajlarınız",
   outline_empty: "Henüz mesaj yok.",
   sc_outline: "Önceki / sonraki mesajınız",

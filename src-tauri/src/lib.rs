@@ -385,6 +385,7 @@ pub fn run() {
             commands::open_system_terminal,
             commands::file_sessions,
             commands::secret_scan,
+            commands::change_revert_hunk,
             commands::git_branches,
             commands::git_switch,
             commands::project_scripts,

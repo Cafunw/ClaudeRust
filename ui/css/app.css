@@ -1173,3 +1173,6 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .branch-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; margin-left: -6px; border-radius: 6px; background: none; cursor: pointer; }
 .branch-btn:hover { background: var(--bg-3); }
 .turn.user.flash .user-bubble { box-shadow: 0 0 0 2px var(--accent); transition: box-shadow .3s; }
+.dv-hunk td { position: relative; }
+.dv-hunk-revert { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); height: 20px; padding: 0 6px; font-size: 11px; visibility: hidden; }
+.dv-hunk:hover .dv-hunk-revert { visibility: visible; }

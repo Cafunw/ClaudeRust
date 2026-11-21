@@ -1177,6 +1177,16 @@ pub async fn change_diff(state: St<'_>, conversation_id: String, path: String) -
     crate::gitops::file_diff(&s, &path).await
 }
 
+/// Undo one hunk of a file's uncommitted changes (`header` is the hunk's
+/// `@@` line as shown, so a stale view can't revert the wrong lines).
+#[tauri::command]
+pub async fn change_revert_hunk(app: AppHandle, state: St<'_>, conversation_id: String, path: String, index: usize, header: String) -> AppResult<()> {
+    let s = session_for(&state, &conversation_id)?;
+    crate::gitops::revert_hunk(&s, &path, index, &header).await?;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn change_revert(app: AppHandle, state: St<'_>, conversation_id: String, paths: Vec<String>) -> AppResult<()> {
     let s = session_for(&state, &conversation_id)?;

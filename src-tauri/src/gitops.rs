@@ -205,6 +205,40 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
     Ok(unified(path, &old, &new))
 }
 
+/// The patch for hunk `index` of a unified diff (the file header plus that
+/// hunk), when its `@@` line is still `expect` (the hunk the user saw).
+pub fn hunk_patch(diff: &str, index: usize, expect: &str) -> Option<String> {
+    let lines: Vec<&str> = diff.lines().collect();
+    let first = lines.iter().position(|l| l.starts_with("@@"))?;
+    let starts: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.starts_with("@@")).map(|(i, _)| i).collect();
+    let start = *starts.get(index)?;
+    if lines[start].trim() != expect.trim() {
+        return None;
+    }
+    let end = starts.get(index + 1).copied().unwrap_or(lines.len());
+    let mut out = lines[..first].join("\n");
+    out.push('\n');
+    out.push_str(&lines[start..end].join("\n"));
+    out.push('\n');
+    Some(out)
+}
+
+/// Undo one hunk of a tracked file's uncommitted changes (`git apply -R`).
+pub async fn revert_hunk(session: &CodeSession, path: &str, index: usize, expect: &str) -> AppResult<()> {
+    let top = repo_root(&session.root).await.ok_or_else(|| AppError::msg("Reverting part of a file needs a git repository."))?;
+    let tracked = git_raw(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).await.map(|o| o.status.success()).unwrap_or(false);
+    if !tracked {
+        return Err(AppError::msg("This is a new file: revert it as a whole."));
+    }
+    let diff = git(&top, &["--literal-pathspecs", "diff", "HEAD", "--no-color", "--no-ext-diff", "--", path]).await?;
+    let patch = hunk_patch(&diff, index, expect).ok_or_else(|| AppError::msg("The file changed since the diff was shown. Refresh and try again."))?;
+    let tmp = std::env::temp_dir().join(format!("clauderust-hunk-{}.patch", crate::util::new_id()));
+    std::fs::write(&tmp, patch)?;
+    let r = git(&top, &["apply", "-R", "--whitespace=nowarn", &tmp.to_string_lossy()]).await;
+    let _ = std::fs::remove_file(&tmp);
+    r.map(|_| ())
+}
+
 /// Put one file back to the baseline (deleting it if it didn't exist).
 pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
     if let Some(top) = repo_root(&session.root).await {
@@ -280,6 +314,37 @@ pub fn parse_blame(out: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hunk_patches() {
+        let diff = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n@@ -9,2 +9,2 @@ fn x\n y\n-z\n+Z\n";
+        let p = hunk_patch(diff, 1, "@@ -9,2 +9,2 @@ fn x").unwrap();
+        assert_eq!(p, "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -9,2 +9,2 @@ fn x\n y\n-z\n+Z\n");
+        assert!(hunk_patch(diff, 1, "@@ -9,3 +9,3 @@").is_none(), "stale header");
+        assert!(hunk_patch(diff, 2, "").is_none());
+    }
+
+    #[tokio::test]
+    async fn revert_one_hunk() {
+        let d = std::env::temp_dir().join(format!("cr-hunk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&d).output().unwrap().status.success());
+        run(&["init", "-q"]);
+        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(d.join("f.txt"), &body).unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+        std::fs::write(d.join("f.txt"), body.replace("line 2\n", "LINE TWO\n").replace("line 28\n", "LINE 28\n")).unwrap();
+        let s = CodeSession::new(d.clone());
+        let diff = file_diff(&s, "f.txt").await.unwrap();
+        let second = diff.lines().filter(|l| l.starts_with("@@")).nth(1).unwrap().to_string();
+        revert_hunk(&s, "f.txt", 1, &second).await.unwrap();
+        let now = std::fs::read_to_string(d.join("f.txt")).unwrap();
+        assert!(now.contains("LINE TWO") && now.contains("line 28\n") && !now.contains("LINE 28"), "{now}");
+        assert!(revert_hunk(&s, "f.txt", 1, &second).await.is_err(), "that hunk is gone");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn blame_porcelain() {
