@@ -379,6 +379,7 @@ pub fn run() {
             commands::project_dir,
             commands::project_file,
             commands::scan_todos,
+            commands::prompt_history,
             commands::pr_info,
             commands::pr_suggest,
             commands::pr_create,

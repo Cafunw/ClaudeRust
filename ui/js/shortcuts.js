@@ -65,6 +65,7 @@ export function openShortcuts() {
     [t('sc_zoom'), `${MOD} + / − / 0`],
     [t('sc_quick'), isMac ? '⌥Space' : 'Ctrl+Alt+Space'],
     [t('sc_find'), `${MOD}+F`],
+    [t('sc_history'), `${MOD}+R`],
     [t('sc_sheet'), `${MOD}+/`],
   ];
   modal({

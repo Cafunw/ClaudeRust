@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  ph_placeholder: "Search messages you've sent…",
+  ph_empty: "Messages you send show up here.",
+  sc_history: "Search sent messages",
   turn_files: "Edited {n} files",
   turn_files_one: "Edited 1 file",
   turn_files_review: "Review changes",
@@ -478,6 +481,9 @@ const en = {
 };
 
 const tr = {
+  ph_placeholder: "Gönderdiğiniz mesajlarda arayın…",
+  ph_empty: "Gönderdiğiniz mesajlar burada görünür.",
+  sc_history: "Gönderilen mesajlarda ara",
   turn_files: "{n} dosya düzenlendi",
   turn_files_one: "1 dosya düzenlendi",
   turn_files_review: "Değişiklikleri incele",

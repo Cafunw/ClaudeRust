@@ -418,6 +418,45 @@ impl Db {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// Messages the user typed, newest first, without repeats: `(text,
+    /// created_at, conversation title)`, filtered by `query` (case-insensitive,
+    /// all words must appear).
+    pub fn prompt_history(&self, query: &str, limit: usize) -> AppResult<Vec<(String, i64, String)>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare(
+            "SELECT m.content, m.created_at, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.role = 'user' AND json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL
+             ORDER BY m.created_at DESC LIMIT 5000",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
+        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (content, at, title) in rows.flatten() {
+            let Ok(v) = serde_json::from_str::<Value>(&content) else { continue };
+            let typed = match &v {
+                Value::String(s) => Some(s.clone()),
+                Value::Array(a) => a
+                    .iter()
+                    .filter(|b| b["type"] == "text")
+                    .filter_map(|b| b["text"].as_str())
+                    .find(|t| !t.starts_with("<system-reminder") && !t.starts_with("<earlier_conversation") && !t.starts_with("This session is being continued"))
+                    .map(str::to_string),
+                _ => None,
+            };
+            let Some(text) = typed.map(|t| t.trim().to_string()).filter(|t| t.len() >= 3) else { continue };
+            let lower = text.to_lowercase();
+            if !words.iter().all(|w| lower.contains(w.as_str())) || !seen.insert(lower) {
+                continue;
+            }
+            out.push((text, at, title));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Remove conversations whose import was cut off (app closed mid-import).
     pub fn delete_unfinished_imports(&self) -> AppResult<usize> {
         let c = self.conn.lock();
@@ -861,6 +900,31 @@ impl Db {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn prompt_history_dedupes_and_filters() {
+        let db = Db::open_in_memory().unwrap();
+        let conv = db.conv_create("code", "m", None, None, &json!({})).unwrap();
+        let mk = |id: &str, content: Value, meta: Value, t: i64| Message {
+            id: id.into(),
+            conversation_id: conv.id.clone(),
+            parent_id: None,
+            role: "user".into(),
+            content,
+            meta,
+            created_at: t,
+        };
+        db.msg_insert(&mk("1", json!([{"type":"text","text":"Run the tests and fix failures"}]), json!({}), 1)).unwrap();
+        db.msg_insert(&mk("2", json!([{"type":"tool_result","tool_use_id":"x","content":"ok"}]), json!({"tool_results": true}), 2)).unwrap();
+        db.msg_insert(&mk("3", json!([{"type":"text","text":"review the diff"},{"type":"text","text":"<system-reminder>file</system-reminder>"}]), json!({}), 3)).unwrap();
+        db.msg_insert(&mk("4", json!([{"type":"text","text":"run the tests and fix failures"}]), json!({}), 4)).unwrap();
+        db.msg_insert(&mk("5", json!([{"type":"document","source":{}},{"type":"text","text":"summarize this log"}]), json!({}), 5)).unwrap();
+        let all: Vec<String> = db.prompt_history("", 10).unwrap().into_iter().map(|r| r.0).collect();
+        assert_eq!(all, vec!["summarize this log", "run the tests and fix failures", "review the diff"]);
+        let hits: Vec<String> = db.prompt_history("TESTS fix", 10).unwrap().into_iter().map(|r| r.0).collect();
+        assert_eq!(hits, vec!["run the tests and fix failures"]);
+        assert_eq!(db.prompt_history("", 1).unwrap().len(), 1);
+    }
 
     #[test]
     fn copy_path_forks_a_branch() {
