@@ -69,7 +69,7 @@ pub fn write_mode(mode: &str) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(p, json!({"hardware_acceleration": mode}).to_string())
+    crate::util::write_atomic(&p, json!({"hardware_acceleration": mode}).to_string().as_bytes())
 }
 
 #[cfg(windows)]

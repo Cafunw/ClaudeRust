@@ -6,7 +6,7 @@
 //! original content the built-in agent recorded before its first edit of
 //! each file (`CodeSession::originals`).
 
-use crate::codetools::CodeSession;
+use crate::codetools::{CodeSession, Original};
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -27,20 +27,98 @@ pub async fn git_raw(cwd: &Path, args: &[&str]) -> AppResult<std::process::Outpu
 
 /// `git_raw` with extra environment variables (e.g. `GIT_INDEX_FILE`).
 async fn git_raw_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> AppResult<std::process::Output> {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let mut cmd = crate::shellenv::command("git", &args);
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let mut cmd = crate::shellenv::command("git", &owned);
     cmd.current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
+        .stdin(std::process::Stdio::null());
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let fut = cmd.output();
-    match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
-        Ok(r) => r.map_err(|e| AppError::msg(format!("Could not run git: {e}"))),
-        Err(_) => Err(AppError::msg("git took too long and was stopped.")),
+    let limit = git_timeout(args);
+    match output_within(cmd, limit).await {
+        Ok(Some(out)) => Ok(out),
+        Ok(None) => Err(AppError::msg(format!(
+            "git {} took longer than {} and was stopped.",
+            subcommand(args).unwrap_or(""),
+            if limit.as_secs() >= 120 { format!("{} minutes", limit.as_secs() / 60) } else { format!("{} seconds", limit.as_secs()) }
+        ))),
+        Err(e) => Err(AppError::msg(format!("Could not run git: {e}"))),
+    }
+}
+
+/// git's subcommand in `args`: the first argument that isn't a global option.
+fn subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => {
+                it.next();
+            }
+            a if a.starts_with('-') => {}
+            a => return Some(a),
+        }
+    }
+    None
+}
+
+/// Subcommands that can legitimately run for a long time: hooks (a
+/// pre-commit hook running the tests), the network, large trees.
+const SLOW_SUBCOMMANDS: &[&str] = &[
+    "commit", "push", "pull", "fetch", "add", "stash", "merge", "rebase", "apply", "worktree", "clone", "checkout", "switch",
+    "restore", "reset", "cherry-pick", "revert", "submodule", "gc", "lfs",
+];
+
+fn git_timeout(args: &[&str]) -> std::time::Duration {
+    if subcommand(args).map(|s| SLOW_SUBCOMMANDS.contains(&s)).unwrap_or(false) {
+        std::time::Duration::from_secs(15 * 60)
+    } else {
+        std::time::Duration::from_secs(60)
+    }
+}
+
+/// Run `cmd` and collect its output, or stop it and everything it started
+/// (hooks, ssh, credential helpers) once `limit` has passed: `Ok(None)`.
+/// On Unix it's asked to stop first (SIGTERM, so git can remove its lock
+/// files) and killed two seconds later.
+async fn output_within(mut cmd: tokio::process::Command, limit: std::time::Duration) -> std::io::Result<Option<std::process::Output>> {
+    use tokio::io::AsyncReadExt;
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let read = |r: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>| async move {
+        let mut buf = Vec::new();
+        if let Some(mut r) = r {
+            let _ = r.read_to_end(&mut buf).await;
+        }
+        buf
+    };
+    let out = child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>);
+    let err = child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>);
+    let finished = {
+        let run = async { tokio::join!(read(out), read(err), child.wait()) };
+        tokio::time::timeout(limit, run).await
+    };
+    match finished {
+        Ok((stdout, stderr, status)) => Ok(Some(std::process::Output { status: status?, stdout, stderr })),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                crate::codetools::signal_process_group(pid, libc::SIGTERM);
+                // not reaped yet, so the group can still be told apart
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                crate::codetools::kill_process_group(pid);
+            }
+            #[cfg(windows)]
+            if let Some(pid) = pid {
+                crate::codetools::kill_process_tree(pid);
+            }
+            let _ = child.kill().await;
+            Ok(None)
+        }
     }
 }
 
@@ -95,9 +173,19 @@ fn count_lines(s: &str) -> usize {
     s.lines().count()
 }
 
+/// How long a line diff may search for the smallest set of changes.
+const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Line diff of two texts. Large, very different texts can take the exact
+/// algorithm minutes, so after `DIFF_TIMEOUT` it settles for a diff that is
+/// still correct but may not be the smallest.
+pub fn line_diff<'a>(old: &'a str, new: &'a str) -> similar::TextDiff<'a, 'a, 'a, str> {
+    similar::TextDiff::configure().timeout(DIFF_TIMEOUT).diff_lines(old, new)
+}
+
 /// +/- line counts between two texts.
 pub fn line_stats(old: &str, new: &str) -> (usize, usize) {
-    let diff = similar::TextDiff::from_lines(old, new);
+    let diff = line_diff(old, new);
     let (mut a, mut d) = (0, 0);
     for c in diff.iter_all_changes() {
         match c.tag() {
@@ -110,7 +198,7 @@ pub fn line_stats(old: &str, new: &str) -> (usize, usize) {
 }
 
 fn unified(path: &str, old: &str, new: &str) -> String {
-    similar::TextDiff::from_lines(old, new)
+    line_diff(old, new)
         .unified_diff()
         .context_radius(3)
         .header(&format!("a/{path}"), &format!("b/{path}"))
@@ -165,9 +253,19 @@ pub async fn changes(session: &CodeSession) -> AppResult<Value> {
     let mut paths: Vec<&PathBuf> = originals.keys().collect();
     paths.sort();
     for p in paths {
-        let orig = &originals[p];
+        let rel = p.strip_prefix(&root).map(|r| r.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
+        let orig = match &originals[p] {
+            Original::Unknown => {
+                // changed, presumably; its earlier content wasn't kept
+                let status = if p.exists() { "M" } else { "D" };
+                list.push(json!({"path": rel, "status": status, "added": 0, "removed": 0, "unknown_original": true}));
+                continue;
+            }
+            Original::Missing => None,
+            Original::Content(b) => Some(b),
+        };
         let now = std::fs::read(p).ok();
-        if now.as_ref() == orig.as_ref() {
+        if now.as_ref() == orig {
             continue;
         }
         let status = match (orig, &now) {
@@ -175,10 +273,9 @@ pub async fn changes(session: &CodeSession) -> AppResult<Value> {
             (Some(_), None) => "D",
             _ => "M",
         };
-        let old = orig.as_ref().map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
+        let old = orig.map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
         let new = now.as_ref().map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
         let (a, d) = line_stats(&old, &new);
-        let rel = p.strip_prefix(&root).map(|r| r.to_string_lossy().to_string()).unwrap_or_else(|_| p.to_string_lossy().to_string());
         list.push(json!({"path": rel, "status": status, "added": a, "removed": d}));
     }
     Ok(json!({"repo": false, "root": root, "branch": null, "files": list}))
@@ -209,8 +306,12 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
         return Ok(unified(path, "", &new));
     }
     let full = abs_in(&session.root, path)?;
-    let orig = session.originals.lock().get(&full).cloned().flatten();
-    let old = orig.map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+    let orig = session.originals.lock().get(&full).cloned();
+    let old = match orig {
+        Some(Original::Content(b)) => String::from_utf8_lossy(&b).to_string(),
+        Some(Original::Unknown) => return Err(AppError::msg(UNKNOWN_ORIGINAL)),
+        Some(Original::Missing) | None => String::new(),
+    };
     let new = read_text(&full).unwrap_or_default();
     Ok(unified(path, &old, &new))
 }
@@ -410,17 +511,20 @@ pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
     let full = abs_in(&session.root, path)?;
     let orig = session.originals.lock().get(&full).cloned();
     match orig {
-        Some(Some(bytes)) => std::fs::write(&full, bytes)?,
-        Some(None) => {
-            if full.exists() {
+        Some(Original::Content(bytes)) => crate::util::write_atomic(&full, &bytes)?,
+        Some(Original::Missing) => {
+            if full.is_file() {
                 std::fs::remove_file(&full)?;
             }
         }
+        Some(Original::Unknown) => return Err(AppError::msg(format!("{UNKNOWN_ORIGINAL} It was left as it is."))),
         None => return Err(AppError::msg("No earlier version of this file is known.")),
     }
     session.originals.lock().remove(&full);
     Ok(())
 }
+
+const UNKNOWN_ORIGINAL: &str = "The version of this file from before the session wasn't kept (it was larger than 20 MB or couldn't be read), so it can't be compared or reverted.";
 
 /// `git blame --porcelain` output as `{commits: [{sha, author, time,
 /// summary}], lines: [index into commits, one per line]}`. Lines not
@@ -700,6 +804,90 @@ mod tests {
         revert_file(&s, "new.txt").await.unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old\n");
         assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slow_subcommands_get_a_longer_timeout() {
+        let long = std::time::Duration::from_secs(15 * 60);
+        assert_eq!(git_timeout(&["commit", "-q", "-m", "x"]), long);
+        assert_eq!(git_timeout(&["-c", "user.name=x", "push", "origin"]), long);
+        assert_eq!(git_timeout(&["-C", "dir", "--literal-pathspecs", "add", "-A"]), long);
+        assert_eq!(git_timeout(&["--literal-pathspecs", "status"]), std::time::Duration::from_secs(60));
+        assert_eq!(git_timeout(&["-c", "commit.gpgsign=false", "log"]), std::time::Duration::from_secs(60));
+        assert_eq!(subcommand(&["--git-dir=x", "stash", "list"]), Some("stash"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_past_its_time_is_stopped_with_what_it_started() {
+        let pidfile = std::env::temp_dir().join(format!("cr-tree-{}", crate::util::new_id()));
+        let mut cmd = tokio::process::Command::new("sh");
+        // a hook-like child that would outlive git
+        cmd.arg("-c").arg("sleep 30 & echo $! > \"$PIDFILE\"; wait").env("PIDFILE", &pidfile);
+        let t = std::time::Instant::now();
+        let r = output_within(cmd, std::time::Duration::from_millis(300)).await.unwrap();
+        assert!(r.is_none(), "timed out");
+        assert!(t.elapsed() < std::time::Duration::from_secs(10));
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            // SAFETY: signal 0 only checks that the process exists
+            let alive = unsafe { libc::kill(pid, 0) } == 0 && !std::fs::read_to_string(format!("/proc/{pid}/stat")).map(|s| s.contains(") Z ")).unwrap_or(false);
+            if !alive {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(gone, "the background child was killed too");
+        let _ = std::fs::remove_file(&pidfile);
+        // quick commands are unaffected
+        let mut ok = tokio::process::Command::new("sh");
+        ok.arg("-c").arg("echo hi; echo err >&2");
+        let out = output_within(ok, std::time::Duration::from_secs(10)).await.unwrap().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+    }
+
+    #[test]
+    fn diffs_of_large_different_texts_are_bounded_in_time() {
+        // no line in common: the exact diff is quadratic in the line count
+        let old: String = (0..30_000).map(|i| format!("old line {i}\n")).collect();
+        let new: String = (0..30_000).map(|i| format!("new line {}\n", i * 7)).collect();
+        let t = std::time::Instant::now();
+        let (a, d) = line_stats(&old, &new);
+        assert_eq!((a, d), (30_000, 30_000));
+        let u = unified("f", &old, &new);
+        assert!(u.contains("-old line 0") && u.contains("+new line 0"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(10), "took {:?}", t.elapsed());
+        // small diffs are still exact
+        assert_eq!(line_stats("a\nb\nc\n", "a\nB\nc\n"), (1, 1));
+    }
+    #[tokio::test]
+    async fn large_original_is_not_taken_for_a_new_file() {
+        let dir = std::env::temp_dir().join(format!("cr-bigorig-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        if repo_root(&dir).await.is_some() {
+            let _ = std::fs::remove_dir_all(dir);
+            return; // temp dir inside a repository; nothing to check
+        }
+        let f = dir.join("data.csv");
+        {
+            // sparse: larger than what is kept in memory, cheap to create
+            let file = std::fs::File::create(&f).unwrap();
+            file.set_len(crate::codetools::MAX_ORIGINAL_BYTES + 1).unwrap();
+        }
+        let s = CodeSession::new(dir.clone());
+        s.remember_original(&f);
+        assert_eq!(s.originals.lock().get(&f), Some(&Original::Unknown));
+        std::fs::write(&f, "edited by the agent\n").unwrap();
+        let c = changes(&s).await.unwrap();
+        assert_eq!(c["files"][0]["status"], "M", "{c}");
+        let err = revert_file(&s, "data.csv").await.unwrap_err().to_string();
+        assert!(err.contains("can't be compared or reverted"), "{err}");
+        assert!(f.exists(), "the file must not be deleted");
+        assert!(file_diff(&s, "data.csv").await.is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

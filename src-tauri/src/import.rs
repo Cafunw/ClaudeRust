@@ -87,6 +87,29 @@ fn text_of(content: &[Value]) -> String {
         .join("\n\n")
 }
 
+/// Set while a conversation import runs. Two at once (Settings reopened
+/// during a long import) would each start from the same "already imported"
+/// set and both import everything.
+static IMPORT_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Held for the length of one import; the next can start once it's dropped.
+struct ImportGuard(());
+
+impl ImportGuard {
+    fn acquire() -> AppResult<ImportGuard> {
+        if IMPORT_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Err(AppError::msg("An import is already running. Wait for it to finish, then try again."));
+        }
+        Ok(ImportGuard(()))
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        IMPORT_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 fn progress(app: &AppHandle, done: usize, total: usize) {
     let _ = app.emit("import-progress", json!({"done": done, "total": total}));
 }
@@ -459,19 +482,26 @@ fn import_cc_session(st: &AppState, path: &Path, done: &mut HashSet<String>) -> 
 
 // ------------------------------------------------------------ claude.ai export
 
+/// The largest file read from an export zip (it's compressed: a small zip
+/// can claim or expand to far more than fits in memory).
+const MAX_EXPORT_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
+
 fn read_zip_json(zip: &mut zip::ZipArchive<std::fs::File>, suffix: &str) -> AppResult<Option<Value>> {
-    let name = (0..zip.len()).find_map(|i| {
-        let f = zip.by_index(i).ok()?;
-        let n = f.name().to_string();
+    read_zip_json_limited(zip, suffix, MAX_EXPORT_ENTRY_BYTES)
+}
+
+fn read_zip_json_limited(zip: &mut zip::ZipArchive<std::fs::File>, suffix: &str, limit: u64) -> AppResult<Option<Value>> {
+    let name = zip.file_names().find(|n| {
         let base = n.rsplit('/').next().unwrap_or("");
-        (base == suffix && !n.contains("__MACOSX")).then_some(n)
+        base == suffix && !n.contains("__MACOSX")
     });
-    let Some(name) = name else { return Ok(None) };
-    let mut s = String::new();
-    zip.by_name(&name)
+    let Some(name) = name.map(str::to_string) else { return Ok(None) };
+    let entry = zip.by_name(&name).map_err(|e| AppError::msg(format!("Could not read {name}: {e}")))?;
+    let declared = entry.size();
+    let bytes = crate::util::read_capped(entry, declared, limit)
         .map_err(|e| AppError::msg(format!("Could not read {name}: {e}")))?
-        .read_to_string(&mut s)?;
-    Ok(Some(serde_json::from_str(&s).map_err(|e| AppError::msg(format!("{name} is not valid JSON: {e}")))?))
+        .ok_or_else(|| AppError::msg(format!("{name} in this zip is too large to import (over {}).", crate::util::human_size(limit))))?;
+    Ok(Some(serde_json::from_slice(&bytes).map_err(|e| AppError::msg(format!("{name} is not valid JSON: {e}")))?))
 }
 
 fn as_list(v: Option<Value>, key: &str) -> Vec<Value> {
@@ -1017,8 +1047,11 @@ pub async fn import_claude_code_sessions(app: AppHandle, state: St<'_>, paths: V
         .map(|d| d.join("projects"))
         .and_then(|d| d.canonicalize().ok())
         .ok_or_else(|| AppError::msg("Claude Code's data folder was not found."))?;
+    let guard = ImportGuard::acquire()?;
     tokio::task::spawn_blocking(move || {
-        let mut done = st.db.imported_keys().unwrap_or_default();
+        let _guard = guard; // until the blocking work is done
+        // what's already here; an import that can't tell would duplicate it all
+        let mut done = st.db.imported_keys()?;
         let (mut imported, mut skipped) = (0, 0);
         let mut errors = vec![];
         let total = paths.len();
@@ -1048,13 +1081,16 @@ pub async fn import_claude_code_sessions(app: AppHandle, state: St<'_>, paths: V
 #[tauri::command]
 pub async fn import_claude_export(app: AppHandle, state: St<'_>, path: String) -> AppResult<Value> {
     let st = state.inner().clone();
+    let guard = ImportGuard::acquire()?;
     tokio::task::spawn_blocking(move || {
+        let _guard = guard; // until the blocking work is done
         let (convs, projects) = load_export(Path::new(&path))?;
         if convs.is_empty() && projects.is_empty() {
             return Err(AppError::msg("No conversations or projects were found in this file."));
         }
+        // what's already here; an import that can't tell would duplicate it all
+        let mut done = st.db.imported_keys()?;
         let (map, projects_created) = import_ai_projects(&st, &projects)?;
-        let mut done = st.db.imported_keys().unwrap_or_default();
         let (mut imported, mut skipped) = (0, 0);
         let mut errors = vec![];
         let total = convs.len();
@@ -1196,5 +1232,37 @@ mod tests {
         assert_eq!(meta["attachments"].as_array().unwrap().len(), 2);
         assert_eq!(ts_ms(&json!("2025-03-01T10:00:00.123456Z")), Some(1740823200123));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oversized_export_entries_are_refused() {
+        let dir = std::env::temp_dir().join(format!("aibomb-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zpath = dir.join("export.zip");
+        {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(std::fs::File::create(&zpath).unwrap());
+            z.start_file("conversations.json", zip::write::SimpleFileOptions::default()).unwrap();
+            // a few kB compressed
+            z.write_all(b"[").unwrap();
+            z.write_all(&vec![b' '; 1024 * 1024]).unwrap();
+            z.write_all(b"]").unwrap();
+            z.finish().unwrap();
+        }
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&zpath).unwrap()).unwrap();
+        let err = read_zip_json_limited(&mut zip, "conversations.json", 64 * 1024).unwrap_err().to_string();
+        assert!(err.contains("too large"), "{err}");
+        assert_eq!(read_zip_json_limited(&mut zip, "conversations.json", 2 * 1024 * 1024).unwrap(), Some(json!([])));
+        assert_eq!(read_zip_json_limited(&mut zip, "projects.json", 1024).unwrap(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_one_import_runs_at_a_time() {
+        let first = ImportGuard::acquire().unwrap();
+        let err = ImportGuard::acquire().err().expect("a second import is refused").to_string();
+        assert!(err.contains("already running"), "{err}");
+        drop(first);
+        drop(ImportGuard::acquire().unwrap());
     }
 }

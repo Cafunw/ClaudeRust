@@ -137,7 +137,7 @@ pub fn save(project: Option<&Path>, scope: &str, name: &str, description: &str, 
     }
     let desc = description.trim().replace('\n', " ");
     let text = if desc.is_empty() { format!("{}\n", body.trim()) } else { format!("---\ndescription: {desc}\n---\n{}\n", body.trim()) };
-    std::fs::write(&path, text)?;
+    crate::util::write_atomic(&path, text.as_bytes())?;
     Ok(path)
 }
 

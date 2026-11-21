@@ -8,14 +8,23 @@ use serde_json::{json, Map, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// manifest.json is small; a larger one is refused rather than inflated.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+/// The most an extension may unpack to (a small zip can expand to fill the disk).
+const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 fn read_manifest(zip_path: &Path) -> AppResult<Value> {
     let file = std::fs::File::open(zip_path)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::msg(format!("Not a valid extension file: {e}")))?;
-    let mut text = String::new();
-    zip.by_name("manifest.json")
-        .map_err(|_| AppError::msg("The extension has no manifest.json."))?
-        .read_to_string(&mut text)?;
-    let v: Value = serde_json::from_str(&text).map_err(|e| AppError::msg(format!("Invalid manifest.json: {e}")))?;
+    let entry = zip.by_name("manifest.json").map_err(|_| AppError::msg("The extension has no manifest.json."))?;
+    let declared = entry.size();
+    let bytes = crate::util::read_capped(entry, declared, MAX_MANIFEST_BYTES)?
+        .ok_or_else(|| AppError::msg("The extension's manifest.json is too large (over 1 MB)."))?;
+    parse_manifest(&bytes)
+}
+
+fn parse_manifest(bytes: &[u8]) -> AppResult<Value> {
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| AppError::msg(format!("Invalid manifest.json: {e}")))?;
     if !v["server"].is_object() || v["name"].as_str().unwrap_or("").is_empty() {
         return Err(AppError::msg("manifest.json must define \"name\" and \"server\"."));
     }
@@ -70,26 +79,35 @@ fn base_vars(dir: &Path) -> Map<String, Value> {
     m
 }
 
+fn lookup(key: &str, vars: &Map<String, Value>, user: &Map<String, Value>) -> Option<Value> {
+    if let Some(k) = key.strip_prefix("user_config.") {
+        user.get(k).cloned()
+    } else {
+        vars.get(key).cloned()
+    }
+}
+
 /// Substitute `${var}` / `${user_config.key}` in one string. Returns several
 /// strings when the whole value is a multi-valued user setting.
 fn substitute(s: &str, vars: &Map<String, Value>, user: &Map<String, Value>) -> Vec<String> {
-    let lookup = |key: &str| -> Option<Value> {
-        if let Some(k) = key.strip_prefix("user_config.") {
-            user.get(k).cloned()
-        } else {
-            vars.get(key).cloned()
-        }
-    };
-    // whole-value multi expansion
+    // whole-value multi expansion: each item is substituted once more, but
+    // never expanded again (an item that is itself `${user_config.items}`
+    // would otherwise recurse until the stack overflows)
     if let Some(inner) = s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
-        if let Some(Value::Array(items)) = lookup(inner) {
+        if let Some(Value::Array(items)) = lookup(inner, vars, user) {
             return items
                 .iter()
                 .map(|v| v.as_str().map(|x| x.to_string()).unwrap_or_else(|| v.to_string()))
-                .flat_map(|x| substitute(&x, vars, user))
+                .map(|x| substitute_inline(&x, vars, user))
                 .collect();
         }
     }
+    vec![substitute_inline(s, vars, user)]
+}
+
+/// Substitute the `${...}` references inside `s` (a list joined with commas).
+fn substitute_inline(s: &str, vars: &Map<String, Value>, user: &Map<String, Value>) -> String {
+    let lookup = |key: &str| lookup(key, vars, user);
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find("${") {
@@ -114,12 +132,18 @@ fn substitute(s: &str, vars: &Map<String, Value>, user: &Map<String, Value>) -> 
         }
     }
     out.push_str(rest);
-    vec![out]
+    out
 }
 
 fn unzip(zip_path: &Path, dest: &Path) -> AppResult<()> {
+    unzip_limited(zip_path, dest, MAX_UNPACKED_BYTES)
+}
+
+fn unzip_limited(zip_path: &Path, dest: &Path, limit: u64) -> AppResult<()> {
     let file = std::fs::File::open(zip_path)?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::msg(e.to_string()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::msg(format!("Not a valid extension file: {e}")))?;
+    let too_large = || AppError::msg(format!("The extension unpacks to more than {}; it was not installed.", crate::util::human_size(limit)));
+    let mut total: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| AppError::msg(e.to_string()))?;
         // enclosed_name rejects absolute paths and `..` (zip-slip)
@@ -132,8 +156,17 @@ fn unzip(zip_path: &Path, dest: &Path) -> AppResult<()> {
         if let Some(p) = out.parent() {
             std::fs::create_dir_all(p)?;
         }
+        if total.saturating_add(entry.size()) > limit {
+            return Err(too_large());
+        }
         let mut f = std::fs::File::create(&out)?;
-        std::io::copy(&mut entry, &mut f)?;
+        // the header's size can lie: count what is really written
+        let room = limit - total;
+        let n = std::io::copy(&mut (&mut entry).take(room + 1), &mut f)?;
+        if n > room {
+            return Err(too_large());
+        }
+        total += n;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
@@ -144,46 +177,126 @@ fn unzip(zip_path: &Path, dest: &Path) -> AppResult<()> {
 }
 
 /// Install an extension and add it to the MCP config. Returns the server name.
+/// An installed version is replaced only once the new one has been unpacked
+/// and its settings checked; until then it's left untouched.
 pub fn install(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value) -> AppResult<String> {
     let manifest = read_manifest(zip_path)?;
     let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
-    let dir = extensions_dir.join(&name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    let tmp = staging_dir(extensions_dir, &name)?;
+    let checked = unzip(zip_path, &tmp).and_then(|_| dry_run(&tmp, &name, &manifest, extensions_dir, user_values));
+    if let Err(e) = checked {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
     }
-    std::fs::create_dir_all(&dir)?;
-    unzip(zip_path, &dir)?;
-    register(&dir, &name, &manifest, config_path, user_values)
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values))
 }
 
 /// Install an extension that is already unpacked in a folder (for example one
 /// installed by the Claude desktop app): copy it and register it.
 pub fn install_from_dir(src: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value) -> AppResult<String> {
-    let text = std::fs::read_to_string(src.join("manifest.json"))
-        .map_err(|_| AppError::msg("The extension has no manifest.json."))?;
-    let manifest: Value = serde_json::from_str(&text).map_err(|e| AppError::msg(format!("Invalid manifest.json: {e}")))?;
-    if !manifest["server"].is_object() || manifest["name"].as_str().unwrap_or("").is_empty() {
-        return Err(AppError::msg("manifest.json must define \"name\" and \"server\"."));
+    let mf = src.join("manifest.json");
+    let size = std::fs::metadata(&mf).map_err(|_| AppError::msg("The extension has no manifest.json."))?.len();
+    if size > MAX_MANIFEST_BYTES {
+        return Err(AppError::msg("The extension's manifest.json is too large (over 1 MB)."));
     }
+    let manifest = parse_manifest(&std::fs::read(&mf)?)?;
     let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
-    let dir = extensions_dir.join(&name);
-    let tmp = extensions_dir.join(format!(".{name}.importing"));
-    if tmp.exists() {
-        std::fs::remove_dir_all(&tmp)?;
-    }
-    copy_dir(src, &tmp)?;
+    let tmp = staging_dir(extensions_dir, &name)?;
     // Validate the user config before replacing an existing install.
-    let res = register(&tmp, &name, &manifest, &extensions_dir.join(".dry-run.json"), user_values);
-    let _ = std::fs::remove_file(extensions_dir.join(".dry-run.json"));
-    if let Err(e) = res {
+    let checked = copy_dir(src, &tmp).and_then(|_| dry_run(&tmp, &name, &manifest, extensions_dir, user_values));
+    if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values))
+}
+
+/// A fresh, empty folder next to the install to unpack into; leftovers of
+/// earlier attempts are cleared first.
+fn staging_dir(extensions_dir: &Path, name: &str) -> AppResult<PathBuf> {
+    std::fs::create_dir_all(extensions_dir)?;
+    if let Ok(rd) = std::fs::read_dir(extensions_dir) {
+        let mut prefixes = vec![format!(".{name}.installing")];
+        // a moved-aside version only goes once a version is installed again
+        if extensions_dir.join(name).is_dir() {
+            prefixes.push(format!(".{name}.old-"));
+        }
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if prefixes.iter().any(|p| n.starts_with(p.as_str())) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
     }
-    std::fs::rename(&tmp, &dir)?;
-    register(&dir, &name, &manifest, config_path, user_values)
+    let tmp = extensions_dir.join(format!(".{name}.installing-{}", &crate::util::new_id()[..8]));
+    std::fs::create_dir_all(&tmp)?;
+    Ok(tmp)
+}
+
+/// Check that `dir` would register (required settings given, a command to
+/// run), writing to a throwaway config rather than the real one.
+fn dry_run(dir: &Path, name: &str, manifest: &Value, extensions_dir: &Path, user_values: &Value) -> AppResult<()> {
+    let scratch = extensions_dir.join(format!(".dry-run-{}.json", &crate::util::new_id()[..8]));
+    let r = register(dir, name, manifest, &scratch, user_values);
+    let _ = std::fs::remove_file(&scratch);
+    r.map(|_| ())
+}
+
+/// Put the unpacked, checked `new` folder in place of `dir`. A version
+/// already there is moved aside first and deleted only once `finish`
+/// (registering the server) has succeeded; on any failure it's put back.
+fn swap_in(new: &Path, dir: &Path, finish: impl FnOnce(&Path) -> AppResult<String>) -> AppResult<String> {
+    let aside = |tag: &str| {
+        let n = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        dir.with_file_name(format!(".{n}.old-{tag}{}", &crate::util::new_id()[..8]))
+    };
+    let old = if std::fs::symlink_metadata(dir).is_ok() {
+        let a = aside("");
+        if let Err(e) = std::fs::rename(dir, &a) {
+            let _ = std::fs::remove_dir_all(new);
+            return Err(AppError::msg(format!(
+                "The installed version in {} couldn't be replaced ({e}); it was left as it is. If its server is running, stop it and try again.",
+                dir.display()
+            )));
+        }
+        Some(a)
+    } else {
+        None
+    };
+    let put_back = |old: &Option<PathBuf>| {
+        if let Some(a) = old {
+            if let Err(e) = std::fs::rename(a, dir) {
+                log::warn!("could not restore the earlier install from {}: {e}", a.display());
+            }
+        }
+    };
+    if let Err(e) = std::fs::rename(new, dir) {
+        put_back(&old);
+        let _ = std::fs::remove_dir_all(new);
+        return Err(e.into());
+    }
+    match finish(dir) {
+        Ok(v) => {
+            if let Some(a) = old {
+                if let Err(e) = std::fs::remove_dir_all(&a) {
+                    log::warn!("could not remove the earlier install at {}: {e}", a.display());
+                }
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            if old.is_some() {
+                let failed = aside("failed-");
+                if std::fs::rename(dir, &failed).is_ok() {
+                    put_back(&old);
+                    let _ = std::fs::remove_dir_all(&failed);
+                }
+            } else {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            Err(e)
+        }
+    }
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> AppResult<()> {
@@ -347,6 +460,102 @@ mod tests {
         assert_eq!(srv["env"]["KEY"], "secret");
         assert!(tmp.join("ext/hello-world/server/index.js").exists());
         assert!(!tmp.join("ext/evil.txt").exists() && !tmp.join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    fn bundle(path: &Path, manifest: &Value, files: &[(&str, &[u8])]) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("manifest.json", o).unwrap();
+        z.write_all(manifest.to_string().as_bytes()).unwrap();
+        for (name, data) in files {
+            z.start_file(*name, o).unwrap();
+            z.write_all(data).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    fn manifest(version: &str, required: bool) -> Value {
+        json!({"name": "up", "version": version,
+            "server": {"type": "node", "entry_point": "index.js", "mcp_config": {"command": "node", "args": ["${__dirname}/index.js"], "env": {"K": "${user_config.key}"}}},
+            "user_config": {"key": {"type": "string", "title": "Key", "required": required}}})
+    }
+
+    #[test]
+    fn a_failed_upgrade_keeps_the_working_install() {
+        let tmp = std::env::temp_dir().join(format!("ext-up-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ext, cfg) = (tmp.join("ext"), tmp.join("config.json"));
+        let v1 = tmp.join("v1.mcpb");
+        bundle(&v1, &manifest("1.0.0", false), &[("index.js", b"v1")]);
+        install(&v1, &ext, &cfg, &json!({})).unwrap();
+        let installed = ext.join("up/index.js");
+        assert_eq!(std::fs::read(&installed).unwrap(), b"v1");
+        // v2 needs a setting that isn't given: refused before anything is replaced
+        let v2 = tmp.join("v2.mcpb");
+        bundle(&v2, &manifest("2.0.0", true), &[("index.js", b"v2")]);
+        assert!(install(&v2, &ext, &cfg, &json!({})).unwrap_err().to_string().contains("required"));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"v1");
+        // a bundle whose files are damaged after the manifest: same
+        let bad = tmp.join("bad.mcpb");
+        bundle(&bad, &manifest("3.0.0", false), &[("index.js", &vec![b'x'; 64 * 1024])]);
+        let (at, len) = {
+            let mut z = zip::ZipArchive::new(std::fs::File::open(&bad).unwrap()).unwrap();
+            let e = z.by_name("index.js").unwrap();
+            (e.data_start() as usize, e.compressed_size() as usize)
+        };
+        let mut bytes = std::fs::read(&bad).unwrap();
+        for b in &mut bytes[at..at + len] {
+            *b ^= 0x5a;
+        }
+        std::fs::write(&bad, bytes).unwrap();
+        assert!(install(&bad, &ext, &cfg, &json!({})).is_err());
+        assert_eq!(std::fs::read(&installed).unwrap(), b"v1");
+        assert_eq!(mcp::read_config(&cfg)["mcpServers"]["up"]["extension"]["version"], "1.0.0");
+        // a good upgrade replaces it and leaves nothing behind
+        install(&v2, &ext, &cfg, &json!({"key": "k"})).unwrap();
+        assert_eq!(std::fs::read(&installed).unwrap(), b"v2");
+        let left: Vec<String> = std::fs::read_dir(&ext).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(left, ["up"], "{left:?}");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn self_referencing_list_settings_do_not_recurse() {
+        let tmp = std::env::temp_dir().join(format!("ext-rec-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let b = tmp.join("rec.mcpb");
+        // `$${x}{…}` becomes `${user_config.items}` once `${x}` is substituted
+        bundle(&b, &json!({"name": "rec", "server": {"type": "node", "mcp_config": {"command": "node", "args": ["${user_config.items}"]}},
+            "user_config": {"items": {"type": "string", "multiple": true, "default": ["$${x}{user_config.items}"]}}}), &[]);
+        let cfg = tmp.join("config.json");
+        install(&b, &tmp.join("ext"), &cfg, &json!({})).unwrap();
+        // expanded once, not again
+        assert_eq!(mcp::read_config(&cfg)["mcpServers"]["rec"]["args"], json!(["${user_config.items}"]));
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn oversized_manifests_and_contents_are_refused() {
+        let tmp = std::env::temp_dir().join(format!("ext-bomb-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let b = tmp.join("bomb.mcpb");
+        {
+            let f = std::fs::File::create(&b).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            z.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+            // compresses to a few kB
+            z.write_all(&vec![b' '; 2 * 1024 * 1024]).unwrap();
+            z.finish().unwrap();
+        }
+        assert!(std::fs::metadata(&b).unwrap().len() < 100_000);
+        assert!(inspect(&b).unwrap_err().to_string().contains("too large"));
+        let ok = tmp.join("ok.mcpb");
+        bundle(&ok, &manifest("1.0.0", false), &[("big.bin", &vec![0u8; 8192])]);
+        let dest = tmp.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        assert!(unzip_limited(&ok, &dest, 4096).unwrap_err().to_string().contains("more than"));
         let _ = std::fs::remove_dir_all(tmp);
     }
 }

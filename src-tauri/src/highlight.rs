@@ -3,15 +3,18 @@
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use syntect::html::{css_for_theme_with_class_style, ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::util::{escape_html, hash64};
+use crate::util::{escape_html, hash64, ByteCache};
 
 static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(two_face::syntax::extra_newlines);
-static CACHE: Lazy<Mutex<HashMap<u64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+/// Bounded by size, not count: a code block re-highlighted as it streams in
+/// leaves many large, near-identical entries. Very large results aren't kept.
+static CACHE: Lazy<Mutex<ByteCache>> = Lazy::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
+const CACHE_BYTES: usize = 24 * 1024 * 1024;
+const CACHE_ENTRY_BYTES: usize = 1024 * 1024;
 const STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "hl-" };
 const MAX_HIGHLIGHT_BYTES: usize = 300_000;
 
@@ -64,7 +67,7 @@ pub fn highlight(code: &str, lang: &str) -> String {
         return escape_html(code);
     };
     let key = hash64(&format!("{lang}\u{0}{code}"));
-    if let Some(h) = CACHE.lock().get(&key) {
+    if let Some(h) = CACHE.lock().get(key) {
         return h.clone();
     }
     let mut gen = ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAXES, STYLE);
@@ -74,11 +77,7 @@ pub fn highlight(code: &str, lang: &str) -> String {
         }
     }
     let html = gen.finalize();
-    let mut cache = CACHE.lock();
-    if cache.len() > 2000 {
-        cache.clear();
-    }
-    cache.insert(key, html.clone());
+    CACHE.lock().insert(key, html.clone());
     html
 }
 

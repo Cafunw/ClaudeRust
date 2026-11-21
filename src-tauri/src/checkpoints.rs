@@ -9,8 +9,10 @@
 
 use crate::error::{AppError, AppResult};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 const EXCLUDES: &str = ".git/\nnode_modules/\ntarget/\ndist/\nbuild/\n.next/\n.venv/\nvenv/\n__pycache__/\n*.pyc\n.DS_Store\n*.log\n.cache/\n";
 
@@ -19,6 +21,12 @@ pub struct Shadow {
     work: PathBuf,
 }
 
+/// One lock per shadow repository: sessions in the same folder (and the
+/// rewind menu during a snapshot) share it, and git commands running at the
+/// same time collide on its index.lock.
+static LOCKS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<PathBuf, Arc<parking_lot::Mutex<()>>>>> =
+    once_cell::sync::Lazy::new(Default::default);
+
 impl Shadow {
     pub fn new(data_dir: &Path, work: &Path) -> Shadow {
         let work = std::fs::canonicalize(work).unwrap_or_else(|_| work.to_path_buf());
@@ -26,7 +34,17 @@ impl Shadow {
         Shadow { git_dir: data_dir.join("checkpoints").join(h), work }
     }
 
+    /// This shadow repository's lock (one per folder, kept for the app's life).
+    fn lock(&self) -> Arc<parking_lot::Mutex<()>> {
+        LOCKS.lock().entry(self.git_dir.clone()).or_default().clone()
+    }
+
     fn git(&self, args: &[&str]) -> AppResult<String> {
+        self.git_env(args, None)
+    }
+
+    /// `git`, with `index` as the index file instead of the repository's own.
+    fn git_env(&self, args: &[&str], index: Option<&Path>) -> AppResult<String> {
         let mut c = Command::new("git");
         c.arg(format!("--git-dir={}", self.git_dir.display()))
             .arg(format!("--work-tree={}", self.work.display()))
@@ -39,6 +57,9 @@ impl Shadow {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE");
+        if let Some(i) = index {
+            c.env("GIT_INDEX_FILE", i);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -92,6 +113,12 @@ impl Shadow {
 
     /// Record the current state of the files; returns the snapshot id.
     pub fn snapshot(&self, label: &str) -> AppResult<String> {
+        let lock = self.lock();
+        let _held = lock.lock();
+        self.snapshot_locked(label)
+    }
+
+    fn snapshot_locked(&self, label: &str) -> AppResult<String> {
         self.ensure()?;
         self.git(&["add", "-A", "--ignore-errors", "."])
             .or_else(|_| self.git(&["add", "-A", "."]))?;
@@ -103,22 +130,35 @@ impl Shadow {
     /// Takes a snapshot of the current state first and returns its id, so
     /// the rewind itself can be undone.
     pub fn restore(&self, id: &str) -> AppResult<String> {
+        let lock = self.lock();
+        let _held = lock.lock();
         self.ensure()?;
         self.git(&["cat-file", "-e", &format!("{id}^{{commit}}")])
             .map_err(|_| AppError::msg("This checkpoint is no longer available."))?;
-        let before = self.snapshot("before rewind")?;
+        let before = self.snapshot_locked("before rewind")?;
         self.git(&["read-tree", "-u", "--reset", id])?;
         // make the index match the restored tree for the next snapshot
         self.git(&["reset", "-q", "--soft", &before])?;
         Ok(before)
     }
 
-    /// Files that differ between a snapshot and the current files.
+    /// Files that differ between a snapshot and the current files. Uses a
+    /// copy of the index, so the shadow repository's own is left alone.
     pub fn changed_since(&self, id: &str) -> AppResult<Vec<String>> {
+        let lock = self.lock();
+        let _held = lock.lock();
         self.ensure()?;
-        self.git(&["add", "-A", "."])?;
-        let out = self.git(&["diff", "--cached", "--name-only", id])?;
-        Ok(out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        let index = self.git_dir.join(format!("index-changed-{}", &crate::util::new_id()[..8]));
+        let real = self.git_dir.join("index");
+        if real.is_file() {
+            std::fs::copy(&real, &index)?;
+        }
+        let out = self
+            .git_env(&["add", "-A", "--ignore-errors", "."], Some(&index))
+            .or_else(|_| self.git_env(&["add", "-A", "."], Some(&index)))
+            .and_then(|_| self.git_env(&["diff", "--cached", "--name-only", id], Some(&index)));
+        let _ = std::fs::remove_file(&index);
+        Ok(out?.lines().filter(|l| !l.is_empty()).map(String::from).collect())
     }
 }
 
@@ -156,6 +196,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(work.join("src/a.rs")).unwrap(), "v2\n");
         assert!(work.join("src/new.rs").exists());
         assert!(s.restore("0123456789abcdef0123456789abcdef01234567").is_err());
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn sessions_in_one_folder_can_snapshot_at_the_same_time() {
+        if which::which("git").is_err() {
+            return;
+        }
+        let work = std::env::temp_dir().join(format!("cr-cpc-{}", crate::util::new_id()));
+        let data = std::env::temp_dir().join(format!("cr-cpcdata-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&work).unwrap();
+        for i in 0..50 {
+            std::fs::write(work.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+        }
+        let first = Shadow::new(&data, &work).snapshot("start").unwrap();
+        // several sessions (each with its own Shadow) and the rewind menu
+        let threads: Vec<_> = (0..6)
+            .map(|t| {
+                let (work, data, first) = (work.clone(), data.clone(), first.clone());
+                std::thread::spawn(move || {
+                    let s = Shadow::new(&data, &work);
+                    let mut errors = vec![];
+                    for i in 0..4 {
+                        let r = if t % 2 == 0 { s.snapshot(&format!("t{t} {i}")).map(|_| ()) } else { s.changed_since(&first).map(|_| ()) };
+                        if let Err(e) = r {
+                            errors.push(e.to_string());
+                        }
+                    }
+                    errors
+                })
+            })
+            .collect();
+        let errors: Vec<String> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        // changed_since leaves the shadow index alone
+        std::fs::write(work.join("f0.txt"), "changed\n").unwrap();
+        let s = Shadow::new(&data, &work);
+        assert_eq!(s.changed_since(&first).unwrap(), ["f0.txt"]);
+        assert!(s.git(&["diff", "--cached", "--name-only"]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&data);
     }

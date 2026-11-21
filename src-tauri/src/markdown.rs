@@ -3,15 +3,19 @@
 //! math is emitted as placeholders that the UI renders with KaTeX.
 
 use crate::highlight;
-use crate::util::{escape_html, hash64};
+use crate::util::{escape_html, hash64, ByteCache};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
-use std::collections::HashMap;
 
 static URL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"https?://[^\s<>"'`\]\[]+"#).unwrap());
-static CACHE: Lazy<Mutex<HashMap<u64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+/// Bounded by size, not count: re-rendering a long answer while it streams
+/// produces many near-identical large entries. Very large ones (a page with
+/// a huge code block) aren't kept at all.
+static CACHE: Lazy<Mutex<ByteCache>> = Lazy::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
+const CACHE_BYTES: usize = 32 * 1024 * 1024;
+const CACHE_ENTRY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub struct Opts {
@@ -135,15 +139,11 @@ fn linkify(text: &str) -> Vec<Event<'static>> {
 /// Render markdown to HTML (cached by content hash).
 pub fn render(md: &str, opts: Opts) -> String {
     let key = hash64(md) ^ (opts.math as u64) ^ ((opts.breaks as u64) << 1);
-    if let Some(h) = CACHE.lock().get(&key) {
+    if let Some(h) = CACHE.lock().get(key) {
         return h.clone();
     }
     let html = render_uncached(md, opts);
-    let mut c = CACHE.lock();
-    if c.len() > 1500 {
-        c.clear();
-    }
-    c.insert(key, html.clone());
+    CACHE.lock().insert(key, html.clone());
     html
 }
 
@@ -351,5 +351,25 @@ mod tests {
     fn tables() {
         let h = render("|a|b|\n|-|-|\n|1|2|\n", O);
         assert!(h.contains("table-wrap") && h.contains("<table>"));
+    }
+
+    #[test]
+    fn render_cache_is_bounded_by_size_while_streaming() {
+        // an answer with a large code block, re-rendered as it streams in
+        let code: String = (0..20_000).map(|i| format!("row {i:06} <value>\n")).collect();
+        let mut md = format!("Here it is:\n\n```text\n{code}");
+        for i in 0..80 {
+            md.push_str(&format!("more {i}\n"));
+            let h = render(&md, O);
+            assert!(h.contains("more 0"));
+        }
+        let c = CACHE.lock();
+        assert!(c.bytes() <= CACHE_BYTES, "{} bytes cached", c.bytes());
+        drop(c);
+        // a page too large to keep isn't cached at all (but still rendered)
+        let huge = format!("```text\n{}\n```\n", "y".repeat(CACHE_ENTRY_BYTES + 10));
+        assert!(render(&huge, O).len() > CACHE_ENTRY_BYTES);
+        let key = hash64(&huge) ^ (O.math as u64) ^ ((O.breaks as u64) << 1);
+        assert!(CACHE.lock().get(key).is_none());
     }
 }

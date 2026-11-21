@@ -76,32 +76,59 @@ pub fn create(cwd: &Path, data_dir: &Path, id: &str) -> AppResult<(PathBuf, Valu
     Ok((session_cwd, info))
 }
 
+/// Commit everything uncommitted in the worktree at `wt` on its branch.
+/// Returns whether a commit was made; an error when changes remain that
+/// could not be saved (or the state can't be read), so the caller keeps the
+/// worktree.
+fn save_uncommitted(wt: &Path) -> AppResult<bool> {
+    let kept = |why: String| AppError::msg(format!("The worktree at {} was kept: {why}", wt.display()));
+    let status = git(wt, &["status", "--porcelain"]).map_err(|e| kept(format!("its changes could not be checked ({e}).")))?;
+    if status.is_empty() {
+        return Ok(false);
+    }
+    // --ignore-errors: an unreadable file doesn't stop the others from
+    // being saved; whatever is left over is caught by the check below
+    let added = git(wt, &["add", "-A", "--ignore-errors"]);
+    let committed = git(
+        wt,
+        &["-c", "user.name=ClaudeRust", "-c", "user.email=noreply@clauderust.local", "-c", "commit.gpgsign=false",
+          "commit", "-q", "--no-verify", "-m", "Uncommitted work from a ClaudeRust session (saved when the session was deleted)"],
+    );
+    match git(wt, &["status", "--porcelain"]) {
+        Ok(s) if s.is_empty() => Ok(committed.is_ok()),
+        Ok(s) => {
+            let reason = committed.err().or(added.err()).map(|e| e.to_string()).unwrap_or_else(|| "some files could not be committed".into());
+            let first: Vec<&str> = s.lines().take(5).collect();
+            Err(kept(format!("not all of its uncommitted changes could be saved ({reason}). Still uncommitted: {}", first.join(", "))))
+        }
+        Err(e) => Err(kept(format!("its changes could not be checked after saving them ({e})."))),
+    }
+}
+
 /// Remove a session's worktree; delete its branch unless it has commits
 /// that aren't on the base. Returns a note when the branch was kept.
+///
+/// Uncommitted work is never thrown away: it's committed to the session's
+/// branch first (which is then kept). When that isn't possible, or the
+/// repository can't be found (a disconnected drive), the worktree stays
+/// where it is and the error says where.
 pub fn remove(info: &Value) -> AppResult<Option<String>> {
     let (Some(path), Some(root), Some(branch)) = (info["path"].as_str(), info["repo_root"].as_str(), info["branch"].as_str()) else {
         return Ok(None);
     };
     let root = Path::new(root);
+    let wt = Path::new(path);
     if !root.is_dir() {
-        let _ = std::fs::remove_dir_all(path);
+        if std::fs::symlink_metadata(wt).is_ok() {
+            return Err(AppError::msg(format!(
+                "The repository {} can't be found (is its drive connected?), so the session's worktree at {} was kept.",
+                root.display(),
+                wt.display()
+            )));
+        }
         return Ok(None);
     }
-    // Never throw work away: uncommitted changes are committed to the
-    // session's branch first (the branch is then kept).
-    let mut saved = false;
-    if Path::new(path).is_dir() {
-        let dirty = git(Path::new(path), &["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
-        if dirty {
-            let _ = git(Path::new(path), &["add", "-A"]);
-            saved = git(
-                Path::new(path),
-                &["-c", "user.name=ClaudeRust", "-c", "user.email=noreply@clauderust.local", "-c", "commit.gpgsign=false",
-                  "commit", "-q", "--no-verify", "-m", "Uncommitted work from a ClaudeRust session (saved when the session was deleted)"],
-            )
-            .is_ok();
-        }
-    }
+    let saved = if wt.is_dir() { save_uncommitted(wt)? } else { false };
     if Path::new(path).exists() {
         if git(root, &["worktree", "remove", "--force", path]).is_err() {
             let _ = std::fs::remove_dir_all(path);
@@ -110,17 +137,22 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
     } else {
         let _ = git(root, &["worktree", "prune"]);
     }
-    let base = info["base"].as_str().unwrap_or("HEAD");
-    let own = git(root, &["rev-list", "--count", &format!("{base}..{branch}")]).ok().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-    if own > 0 {
-        return Ok(Some(if saved {
-            format!("Saved the session's uncommitted changes on branch {branch}.")
-        } else {
-            format!("Kept branch {branch}: it has {own} commit(s) of its own.")
-        }));
+    if saved {
+        return Ok(Some(format!("Saved the session's uncommitted changes on branch {branch}.")));
     }
-    let _ = git(root, &["branch", "-D", branch]);
-    Ok(None)
+    if git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
+        return Ok(None); // already gone
+    }
+    let base = info["base"].as_str().unwrap_or("HEAD");
+    match git(root, &["rev-list", "--count", &format!("{base}..{branch}")]).ok().and_then(|n| n.parse::<u64>().ok()) {
+        Some(0) => {
+            let _ = git(root, &["branch", "-D", branch]);
+            Ok(None)
+        }
+        Some(own) => Ok(Some(format!("Kept branch {branch}: it has {own} commit(s) of its own."))),
+        // the branch may hold work: keep it when that can't be checked
+        None => Ok(Some(format!("Kept branch {branch}: whether it has commits of its own couldn't be checked."))),
+    }
 }
 
 /// Apply the worktree's changes (committed and uncommitted, new files
@@ -217,6 +249,56 @@ mod tests {
         assert!(is_disposable(&info2));
         assert_eq!(remove(&info2).unwrap(), None);
         assert!(git(&repo, &["rev-parse", "--verify", info2["branch"].as_str().unwrap()]).is_err());
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn work_that_cannot_be_saved_keeps_the_worktree() {
+        if which::which("git").is_err() {
+            return;
+        }
+        let repo = init_repo();
+        let data = std::env::temp_dir().join(format!("cr-wtdata-{}", crate::util::new_id()));
+        let (_, info) = create(&repo, &data, "abab1212").unwrap();
+        let wt = PathBuf::from(info["path"].as_str().unwrap());
+        std::fs::write(wt.join("work.txt"), "unsaved work\n").unwrap();
+        // a stale index.lock: `git add` and `git commit` both fail
+        let gitdir = PathBuf::from(git(&wt, &["rev-parse", "--absolute-git-dir"]).unwrap());
+        std::fs::write(gitdir.join("index.lock"), "").unwrap();
+        let err = remove(&info).unwrap_err().to_string();
+        assert!(err.contains("was kept") && err.contains(&wt.display().to_string()), "{err}");
+        assert_eq!(std::fs::read_to_string(wt.join("work.txt")).unwrap(), "unsaved work\n");
+        // once the lock is gone, the work is saved and the worktree removed
+        std::fs::remove_file(gitdir.join("index.lock")).unwrap();
+        assert!(remove(&info).unwrap().unwrap().contains("Saved"));
+        assert!(!wt.exists());
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn unreadable_state_or_missing_repository_keeps_the_worktree() {
+        if which::which("git").is_err() {
+            return;
+        }
+        let repo = init_repo();
+        let data = std::env::temp_dir().join(format!("cr-wtdata-{}", crate::util::new_id()));
+        let (_, info) = create(&repo, &data, "cdcd3434").unwrap();
+        let wt = PathBuf::from(info["path"].as_str().unwrap());
+        std::fs::write(wt.join("work.txt"), "unsaved\n").unwrap();
+        // the repository's drive is gone
+        let mut gone = info.clone();
+        gone["repo_root"] = json!(repo.join("not-here").to_string_lossy());
+        assert!(remove(&gone).unwrap_err().to_string().contains("can't be found"));
+        assert!(wt.join("work.txt").exists());
+        // `git status` fails in the worktree: not taken for "clean"
+        let dotgit = std::fs::read_to_string(wt.join(".git")).unwrap();
+        std::fs::write(wt.join(".git"), "garbage\n").unwrap();
+        assert!(remove(&info).unwrap_err().to_string().contains("was kept"));
+        assert!(wt.join("work.txt").exists());
+        std::fs::write(wt.join(".git"), dotgit).unwrap();
+        assert!(remove(&info).unwrap().unwrap().contains("Saved"));
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);
     }

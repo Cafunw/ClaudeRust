@@ -30,10 +30,25 @@ pub struct CodeSession {
     pub conv_id: String,
     /// Registry for background commands (absent in previews and tests).
     pub shells: Option<Arc<crate::shells::Shells>>,
-    /// Content of each file before this session first changed it (`None`:
-    /// the file didn't exist). The baseline for diffs outside git.
-    pub originals: Arc<Mutex<std::collections::HashMap<PathBuf, Option<Vec<u8>>>>>,
+    /// What each file was before this session first changed it. The
+    /// baseline for diffs and reverts outside git.
+    pub originals: Arc<Mutex<std::collections::HashMap<PathBuf, Original>>>,
 }
+
+/// A file as it was before a session first changed it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Original {
+    /// It didn't exist.
+    Missing,
+    /// Its content.
+    Content(Vec<u8>),
+    /// It existed, but its content wasn't kept (too large, or it couldn't be
+    /// read): it can't be diffed or reverted.
+    Unknown,
+}
+
+/// Larger files' original content isn't kept in memory.
+pub const MAX_ORIGINAL_BYTES: u64 = 20 * 1024 * 1024;
 
 impl CodeSession {
     pub fn new(root: PathBuf) -> Self {
@@ -53,11 +68,17 @@ impl CodeSession {
         if m.contains_key(p) {
             return;
         }
-        let content = match std::fs::metadata(p) {
-            Ok(md) if md.is_file() && md.len() <= 20 * 1024 * 1024 => std::fs::read(p).ok(),
-            _ => None,
+        let original = match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Original::Missing,
+            // (a dangling link is Unknown too: deleting the file to revert
+            // would delete the link)
+            Err(_) => Original::Unknown,
+            Ok(_) => match std::fs::metadata(p) {
+                Ok(md) if md.is_file() && md.len() <= MAX_ORIGINAL_BYTES => std::fs::read(p).map(Original::Content).unwrap_or(Original::Unknown),
+                _ => Original::Unknown,
+            },
         };
-        m.insert(p.to_path_buf(), content);
+        m.insert(p.to_path_buf(), original);
     }
 
     /// A separate session for a sub-agent: its own working directory and
@@ -400,13 +421,40 @@ fn git_auto_ok(args: &[String]) -> bool {
     }
 }
 
+/// A path's names as the file system may treat them: lower-cased (names
+/// are case-insensitive on Windows and macOS), split at both `/` and `\`
+/// (on Windows a model-given `.claude/settings.json` joins the project
+/// folder as `C:\proj\.claude/settings.json`), and without what Windows
+/// ignores in a name: trailing dots and spaces (`.git.`) and a stream suffix
+/// (`.git::$INDEX_ALLOCATION`).
+fn normalized_names(p: &Path) -> Vec<String> {
+    p.to_string_lossy()
+        .split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            let c = match c.find(':') {
+                Some(i) if i > 0 => &c[..i],
+                _ => c.as_str(),
+            };
+            c.trim_end_matches(['.', ' ']).to_string()
+        })
+        .collect()
+}
+
+/// Is `p` a `.git` or `.claude` folder or inside one (git internals, hooks,
+/// settings: writing them can make commands run)? Also through a symlink,
+/// and by the Windows short names `GIT~1` / `CLAUDE~1`.
+fn in_protected_dir(p: &Path) -> bool {
+    let short = |c: &str, base: &str| c.strip_prefix(base).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let hit = |p: &Path| normalized_names(p).iter().any(|c| c == ".git" || c == ".claude" || short(c, "git~") || short(c, "claude~"));
+    hit(p) || hit(&canonical_or_self(p))
+}
+
 /// Files Auto mode should still ask about even inside the project.
 fn sensitive_path(p: &Path) -> bool {
-    // separators normalised: on Windows a model-given `.claude/settings.json`
-    // joins the project folder as `C:\proj\.claude/settings.json`
-    let s = p.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
-    let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    s.contains("/.git/") || s.contains("/.claude/") || name == ".env" || name.starts_with(".env.") || name.ends_with(".pem") || name.ends_with(".key")
+    let name = normalized_names(p).pop().unwrap_or_default();
+    in_protected_dir(p) || name == ".env" || name.starts_with(".env.") || name.ends_with(".pem") || name.ends_with(".key")
         || name == "id_rsa" || name == "id_ed25519" || name == ".npmrc" || name == ".pypirc" || name == "credentials" || name == "credentials.json"
 }
 
@@ -630,8 +678,7 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String],
             }
             // hooks, settings and git internals always ask before an edit
             if let Some(sess) = s {
-                let p = input_path(sess, input, key).to_string_lossy().replace('\\', "/");
-                if p.contains("/.claude/") || p.contains("/.git/") {
+                if in_protected_dir(&input_path(sess, input, key)) {
                     return Perm::Ask;
                 }
             }
@@ -854,8 +901,9 @@ pub(crate) fn shell_command(cwd: &Path, command: &str) -> (tokio::process::Comma
     };
     #[cfg(windows)]
     let (mut cmd, pwd_file): (tokio::process::Command, Option<PathBuf>) = {
+        let script = powershell_script(command);
         let mut c = tokio::process::Command::new("powershell");
-        c.args(["-NoProfile", "-NonInteractive", "-Command", command])
+        c.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
             .current_dir(cwd)
             .env("PATH", crate::shellenv::path())
             .env("PYTHONUNBUFFERED", "1");
@@ -864,6 +912,14 @@ pub(crate) fn shell_command(cwd: &Path, command: &str) -> (tokio::process::Comma
     };
     crate::display::scrub_child_env(&mut cmd);
     (cmd, pwd_file)
+}
+
+/// The script Windows PowerShell 5.1 runs for `command`: its output (and
+/// what it reads from programs it runs) as UTF-8 rather than the console's
+/// code page, which turns non-ASCII text into `?` or mojibake.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn powershell_script(command: &str) -> String {
+    format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;\n{command}")
 }
 
 fn bash_output(s: &CodeSession, input: &Value) -> ToolOutput {
@@ -1133,7 +1189,7 @@ fn write(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
         std::fs::create_dir_all(parent)?;
     }
     s.remember_original(&path);
-    std::fs::write(&path, content)?;
+    crate::util::write_atomic(&path, content.as_bytes())?;
     s.read_files.lock().insert(path.clone());
     Ok(ToolOutput::text(if existed {
         format!("The file {} has been updated.", path.display())
@@ -1154,7 +1210,7 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
                 std::fs::create_dir_all(parent)?;
             }
             s.remember_original(&path);
-            std::fs::write(&path, new)?;
+            crate::util::write_atomic(&path, new.as_bytes())?;
             s.read_files.lock().insert(path.clone());
             return Ok(ToolOutput::text(format!("File created successfully at: {}", path.display())));
         }
@@ -1182,7 +1238,7 @@ fn edit(s: &CodeSession, input: &Value) -> AppResult<ToolOutput> {
     let pos = text.find(old).unwrap_or(0);
     let updated = if all { text.replace(old, new) } else { text.replacen(old, new, 1) };
     s.remember_original(&path);
-    std::fs::write(&path, &updated)?;
+    crate::util::write_atomic(&path, updated.as_bytes())?;
     // snippet around the first change
     let start_line = text[..pos].matches('\n').count();
     let new_lines = new.matches('\n').count() + 1;
@@ -1235,7 +1291,8 @@ pub fn preview_diff(s: Option<&CodeSession>, name: &str, input: &Value) -> Optio
         }
         _ => return None,
     };
-    let diff = similar::TextDiff::from_lines(&old_text, &new_text);
+    // bounded in time: this runs while a permission prompt waits for it
+    let diff = crate::gitops::line_diff(&old_text, &new_text);
     let out = diff
         .unified_diff()
         .context_radius(3)
@@ -1334,6 +1391,9 @@ fn type_exts(t: &str) -> Vec<&'static str> {
     }
 }
 
+/// Grep's content mode stops after this many output lines.
+const MAX_GREP_LINES: usize = 5000;
+
 fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult<ToolOutput> {
     let pattern = input["pattern"].as_str().unwrap_or("");
     if pattern.is_empty() {
@@ -1393,7 +1453,9 @@ fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult
     let mut file_hits: Vec<(SystemTime, PathBuf, usize)> = vec![];
     let mut lines_out: Vec<String> = vec![];
     let mut scanned: u64 = 0;
-    for f in files {
+    // how often long loops look at `cancel`
+    const CHECK_EVERY: usize = 1024;
+    'files: for f in files {
         if cancel.is_cancelled() || scanned > 2_000_000_000 {
             break;
         }
@@ -1409,41 +1471,55 @@ fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult
         let text = String::from_utf8_lossy(&bytes);
         if mode == "content" {
             let lines: Vec<&str> = text.lines().collect();
+            // matching lines, ascending, at most what can still be shown
+            let budget = MAX_GREP_LINES.saturating_sub(lines_out.len()) + 1;
             let mut matched_lines: Vec<usize> = vec![];
             if multiline {
-                for m in re.find_iter(&text) {
-                    let l = text[..m.start()].matches('\n').count();
-                    if !matched_lines.contains(&l) {
+                // line of a byte offset: binary search in the newline offsets
+                let newlines: Vec<usize> = text.match_indices('\n').map(|(i, _)| i).collect();
+                for (k, m) in re.find_iter(&text).enumerate() {
+                    if k % CHECK_EVERY == 0 && cancel.is_cancelled() {
+                        break 'files;
+                    }
+                    let l = newlines.partition_point(|&i| i < m.start());
+                    if matched_lines.last() != Some(&l) {
                         matched_lines.push(l);
+                        if matched_lines.len() >= budget {
+                            break;
+                        }
                     }
                 }
             } else {
                 for (i, l) in lines.iter().enumerate() {
+                    if i % CHECK_EVERY == 0 && cancel.is_cancelled() {
+                        break 'files;
+                    }
                     if re.is_match(l) {
                         matched_lines.push(i);
+                        if matched_lines.len() >= budget {
+                            break;
+                        }
                     }
                 }
             }
             if matched_lines.is_empty() {
                 continue;
             }
+            // matches with their context, merged in order
+            let last = lines.len().saturating_sub(1);
             let mut shown: Vec<usize> = vec![];
             for &m in &matched_lines {
-                let from = m.saturating_sub(before);
-                let to = m.saturating_add(after).min(lines.len().saturating_sub(1));
-                for i in from..=to {
-                    if !shown.contains(&i) {
-                        shown.push(i);
-                    }
-                }
+                let from = m.saturating_sub(before).max(shown.last().map(|&p| p + 1).unwrap_or(0));
+                let to = m.saturating_add(after).min(last);
+                shown.extend(from..=to);
             }
-            shown.sort_unstable();
+            let matched: HashSet<usize> = matched_lines.into_iter().collect();
             let mut prev: Option<usize> = None;
             for i in shown {
                 if (before > 0 || after > 0) && prev.map(|p| i > p + 1).unwrap_or(false) {
                     lines_out.push("--".into());
                 }
-                let sep = if matched_lines.contains(&i) { ':' } else { '-' };
+                let sep = if matched.contains(&i) { ':' } else { '-' };
                 let line = lines.get(i).copied().unwrap_or("");
                 let line = if line.chars().count() > 500 {
                     format!("{}…", line.chars().take(500).collect::<String>())
@@ -1456,15 +1532,23 @@ fn grep(s: &CodeSession, input: &Value, cancel: &CancellationToken) -> AppResult
                     lines_out.push(format!("{}{sep}{line}", f.display()));
                 }
                 prev = Some(i);
+                if lines_out.len() > MAX_GREP_LINES {
+                    break 'files;
+                }
             }
-            if lines_out.len() > 5000 {
-                break;
+        } else if mode == "count" {
+            let mut n = 0;
+            for (k, _) in re.find_iter(&text).enumerate() {
+                if k % CHECK_EVERY == 0 && cancel.is_cancelled() {
+                    break 'files;
+                }
+                n += 1;
             }
-        } else {
-            let n = re.find_iter(&text).count();
             if n > 0 {
                 file_hits.push((mtime(&f), f.clone(), n));
             }
+        } else if re.is_match(&text) {
+            file_hits.push((mtime(&f), f.clone(), 1));
         }
     }
     let mut out: Vec<String> = match mode {
@@ -1517,13 +1601,20 @@ pub fn env_snapshot(cwd: &Path, model: &str) -> String {
     );
     if is_git {
         let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
+            let mut c = std::process::Command::new("git");
+            // the login-shell PATH (GUI launches don't inherit it), no
+            // prompts, and no console window flashing up on Windows
+            c.args(args)
                 .current_dir(cwd)
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default()
+                .env("PATH", crate::shellenv::path())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            c.output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
         };
         let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]);
         let status = run(&["status", "--short"]);
@@ -1762,4 +1853,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn multiline_grep_with_many_matches_is_fast() {
+        let d = tmp();
+        // many matches in one file: each used to rescan the file up to it
+        let text: String = (0..150_000).map(|i| format!("item {i}\n")).collect();
+        std::fs::write(d.join("big.txt"), &text).unwrap();
+        let s = Arc::new(CodeSession::new(d.clone()));
+        let c = CancellationToken::new();
+        let t = std::time::Instant::now();
+        let g = execute(s.clone(), "Grep", &json!({"pattern": "item \\d+\\n", "multiline": true, "output_mode": "content", "-C": 1, "head_limit": 5}), &c, Duration::from_secs(60), None).await;
+        assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+        let out = g.content[0]["text"].as_str().unwrap();
+        assert!(out.contains("big.txt:1:item 0") && out.contains("big.txt:2:item 1"), "{out}");
+        assert!(out.contains("(Showing 5 of"), "{out}");
+        // context lines are merged in order, each shown once
+        std::fs::write(d.join("big.txt"), "a\nhit\nb\nhit\nc\n").unwrap();
+        let g = execute(s.clone(), "Grep", &json!({"pattern": "hit", "multiline": true, "output_mode": "content", "-C": 1}), &c, Duration::from_secs(60), None).await;
+        let out = g.content[0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = out.lines().map(|l| l.rsplit(['/', '\\']).next().unwrap()).collect();
+        assert_eq!(lines, ["big.txt-1-a", "big.txt:2:hit", "big.txt-3-b", "big.txt:4:hit", "big.txt-5-c"], "{out}");
+        let g = execute(s.clone(), "Grep", &json!({"pattern": "hit", "output_mode": "count"}), &c, Duration::from_secs(60), None).await;
+        assert!(g.content[0]["text"].as_str().unwrap().ends_with("big.txt:2"));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn powershell_output_is_utf8() {
+        let s = powershell_script("Get-Content 'é.txt'; exit 3");
+        assert!(s.starts_with("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"), "{s}");
+        assert!(s.ends_with("\nGet-Content 'é.txt'; exit 3"), "{s}");
+    }
+
+    #[test]
+    fn permission_preview_of_a_large_rewrite_is_bounded_in_time() {
+        let d = tmp();
+        let f = d.join("data.txt");
+        std::fs::write(&f, (0..30_000).map(|i| format!("row {i}\n")).collect::<String>()).unwrap();
+        let s = CodeSession::new(d.clone());
+        let content: String = (0..30_000).map(|i| format!("other {}\n", i * 3)).collect();
+        let t = std::time::Instant::now();
+        let diff = preview_diff(Some(&s), "Write", &json!({"file_path": f.to_string_lossy(), "content": content})).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+        assert!(diff.contains("-row 0") && diff.contains("+other 89997"), "{}", &diff[..200]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn git_and_claude_folders_ask_in_any_spelling() {
+        let dir = std::env::temp_dir().join(format!("cr-prot-{}", crate::util::new_id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = CodeSession::new(dir.clone());
+        let accept = |p: &str| check_permission("acceptEdits", "Write", &json!({"file_path": p, "content": "x"}), &[], Some(&s));
+        // case-insensitive file systems, Windows trailing dots/spaces, streams and short names
+        for p in [".GIT/config", ".Git/hooks/pre-commit", ".git./config", ".git /hooks/x", ".CLAUDE/settings.json", ".claude./hooks/x.sh",
+                  ".git::$INDEX_ALLOCATION/config", "GIT~1/config", ".git", "src\\..\\.Git\\config"] {
+            assert_eq!(accept(p), Perm::Ask, "{p}");
+            assert_eq!(check_permission("auto", "Edit", &json!({"file_path": p, "old_string": "a", "new_string": "b"}), &[], Some(&s)), Perm::Ask, "{p}");
+        }
+        assert_eq!(accept("src/gitignore.rs"), Perm::Allow);
+        assert_eq!(accept("src/my.git.notes"), Perm::Allow);
+        // a symlink into .git is the same folder
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            std::os::unix::fs::symlink(dir.join(".git"), dir.join("innocent")).unwrap();
+            assert_eq!(accept("innocent/config"), Perm::Ask);
+        }
+        assert!(sensitive_path(Path::new("/p/.ENV")) && sensitive_path(Path::new("C:\\p\\id_rsa.")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

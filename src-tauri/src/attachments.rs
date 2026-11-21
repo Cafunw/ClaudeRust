@@ -6,7 +6,6 @@ use crate::util::new_id;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Read;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const MAX_IMAGE_SIDE: u32 = 2000;
@@ -132,13 +131,23 @@ fn thumbnail(bytes: &[u8]) -> Option<String> {
     Some(format!("data:image/jpeg;base64,{}", B64.encode(out.into_inner())))
 }
 
+/// The most of word/document.xml read from a .docx (it's compressed: a small
+/// file can claim or expand to gigabytes).
+const MAX_DOCX_XML_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Extract plain text from a .docx (word/document.xml).
 fn docx_text(bytes: &[u8]) -> AppResult<String> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| AppError::msg(e.to_string()))?;
-    let mut xml = String::new();
-    zip.by_name("word/document.xml")
-        .map_err(|e| AppError::msg(e.to_string()))?
-        .read_to_string(&mut xml)?;
+    docx_text_limited(bytes, MAX_DOCX_XML_BYTES)
+}
+
+fn docx_text_limited(bytes: &[u8], limit: u64) -> AppResult<String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| AppError::msg(format!("Not a valid Word document: {e}")))?;
+    let entry = zip.by_name("word/document.xml").map_err(|e| AppError::msg(format!("Not a valid Word document: {e}")))?;
+    let declared = entry.size();
+    let xml = crate::util::read_capped(entry, declared, limit)?.ok_or_else(|| {
+        AppError::msg(format!("This Word document's text is too large to attach (over {} uncompressed).", crate::util::human_size(limit)))
+    })?;
+    let xml = String::from_utf8(xml).map_err(|_| AppError::msg("This Word document's text isn't valid UTF-8."))?;
     let mut out = String::new();
     let mut i = 0;
     let b = xml.as_bytes();
@@ -214,16 +223,42 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
     if bytes.len() > MAX_TEXT_BYTES {
         return Err(AppError::msg("This file is too large to attach (40 MB maximum)."));
     }
-    let (text, mime) = match std::str::from_utf8(bytes) {
-        Ok(s) => (s.to_string(), mime_guess::from_path(name).first_or_text_plain().essence_str().to_string()),
-        Err(_) if TEXT_EXTS.contains(&ext.as_str()) => (String::from_utf8_lossy(bytes).to_string(), "text/plain".to_string()),
-        Err(_) => {
+    let text_ext = TEXT_EXTS.contains(&ext.as_str());
+    let (text, mime) = match decode_text_file(bytes, text_ext) {
+        Some((text, _)) => (text, mime_guess::from_path(name).first_or_text_plain().essence_str().to_string()),
+        None if text_ext => (String::from_utf8_lossy(bytes).to_string(), "text/plain".to_string()),
+        None => {
             return Err(AppError::msg(format!(
                 "“{name}” isn't a supported file type. You can attach images, PDFs, Word documents and text files."
             )))
         }
     };
     Ok(text_attachment(name, mime, size, text, path))
+}
+
+/// The text of a file: UTF-8 (a byte-order mark is dropped), or UTF-16 with
+/// a byte-order mark as Windows tools write it (PowerShell's `>`, Notepad's
+/// "Unicode") — that one only for text file types, where an invalid
+/// character is replaced rather than the file refused. `None` otherwise.
+fn decode_text_file(bytes: &[u8], text_ext: bool) -> Option<(String, crate::util::TextEncoding)> {
+    use crate::util::TextEncoding;
+    let utf16 = bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]);
+    if utf16 && !text_ext {
+        return None;
+    }
+    if let Some(d) = crate::util::decode_text(bytes) {
+        return Some(d);
+    }
+    if !utf16 {
+        return None;
+    }
+    // damaged UTF-16 (odd length, unpaired surrogates): still UTF-16
+    let be = bytes[0] == 0xFE;
+    let units: Vec<u16> = bytes[2..].chunks(2).map(|c| {
+        let pair = [c[0], *c.get(1).unwrap_or(&0)];
+        if be { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) }
+    }).collect();
+    Some((String::from_utf16_lossy(&units), if be { TextEncoding::Utf16Be } else { TextEncoding::Utf16Le }))
 }
 
 /// A text attachment; text too large for the context window becomes a
@@ -324,5 +359,53 @@ mod tests {
         let a = from_bytes("big.png", png.get_ref()).unwrap();
         assert_eq!(a.kind, "image");
         assert!(a.preview.is_some());
+    }
+
+    #[test]
+    fn utf16_text_files_are_decoded() {
+        let text = "name,city\nAyşe,İzmir\n";
+        let le = crate::util::encode_text(text, crate::util::TextEncoding::Utf16Le);
+        let a = from_bytes("data.csv", &le).unwrap();
+        assert_eq!(a.data, text, "not NUL-interleaved");
+        let be = crate::util::encode_text(text, crate::util::TextEncoding::Utf16Be);
+        assert_eq!(from_bytes("notes.txt", &be).unwrap().data, text);
+        // a UTF-8 byte-order mark is dropped
+        assert_eq!(from_bytes("a.log", b"\xEF\xBB\xBFhello").unwrap().data, "hello");
+        // damaged UTF-16 is still read as UTF-16
+        let mut odd = le.clone();
+        odd.push(b'x');
+        assert!(from_bytes("data.csv", &odd).unwrap().data.starts_with("name,city"));
+    }
+
+    fn docx(xml: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        z.start_file("word/document.xml", zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(xml).unwrap();
+        z.finish().unwrap().into_inner()
+    }
+
+    /// Make every size field of a one-entry zip claim `size` bytes.
+    fn lie_about_size(mut zip: Vec<u8>, size: u32) -> Vec<u8> {
+        let patch = |z: &mut Vec<u8>, sig: [u8; 4], off: usize| {
+            let at = z.windows(4).position(|w| w == sig).unwrap();
+            z[at + off..at + off + 4].copy_from_slice(&size.to_le_bytes());
+        };
+        patch(&mut zip, [0x50, 0x4b, 0x03, 0x04], 22); // local header
+        patch(&mut zip, [0x50, 0x4b, 0x01, 0x02], 24); // central directory
+        zip
+    }
+
+    #[test]
+    fn docx_bombs_are_refused() {
+        let ok = docx(b"<w:document><w:body><w:p><w:r><w:t>Hello &amp; bye</w:t></w:r></w:p></w:body></w:document>");
+        assert_eq!(from_bytes("a.docx", &ok).unwrap().data, "Hello & bye\n");
+        // expands past the limit: refused, with a clear message
+        let big = docx(&vec![b' '; 4096]);
+        let err = docx_text_limited(&big, 1024).unwrap_err().to_string();
+        assert!(err.contains("too large"), "{err}");
+        // a header that understates the size doesn't get past the limit
+        let liar = lie_about_size(big, 10);
+        assert!(docx_text_limited(&liar, 1024).is_err());
     }
 }
