@@ -2,7 +2,7 @@
 //! building the sandboxed documents served on the `artifact://` protocol.
 
 use crate::util::escape_html;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
@@ -26,7 +26,7 @@ pub enum Segment {
     Artifact(ArtifactSpec),
 }
 
-static ATTR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"([A-Za-z_][\w-]*)\s*=\s*"([^"]*)""#).unwrap());
+static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"([A-Za-z_][\w-]*)\s*=\s*"([^"]*)""#).unwrap());
 
 fn unescape_attr(s: &str) -> String {
     s.replace("&quot;", "\"")

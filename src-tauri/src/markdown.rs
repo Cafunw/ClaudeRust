@@ -4,16 +4,16 @@
 
 use crate::highlight;
 use crate::util::{escape_html, hash64, ByteCache};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use parking_lot::Mutex;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 
-static URL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"https?://[^\s<>"'`\]\[]+"#).unwrap());
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"'`\]\[]+"#).unwrap());
 /// Bounded by size, not count: re-rendering a long answer while it streams
 /// produces many near-identical large entries. Very large ones (a page with
 /// a huge code block) aren't kept at all.
-static CACHE: Lazy<Mutex<ByteCache>> = Lazy::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
+static CACHE: LazyLock<Mutex<ByteCache>> = LazyLock::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_ENTRY_BYTES: usize = 1024 * 1024;
 
@@ -191,7 +191,7 @@ fn cache_key(md: &str, opts: Opts) -> u64 {
 /// The last `render_live` result (key and HTML). Only one: the text of a
 /// streaming reply is new on every update, but its last version is often
 /// rendered once more (the final update, then as a finished message).
-static LIVE: Lazy<Mutex<Option<(u64, String)>>> = Lazy::new(|| Mutex::new(None));
+static LIVE: LazyLock<Mutex<Option<(u64, String)>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Render markdown to HTML (cached by content hash).
 pub fn render(md: &str, opts: Opts) -> String {

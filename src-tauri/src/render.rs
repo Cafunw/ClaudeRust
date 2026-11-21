@@ -4,7 +4,7 @@ use crate::artifacts::{self, Segment};
 use crate::db::Message;
 use crate::markdown::{self, Opts};
 use crate::util::{escape_html, truncate_middle};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -129,7 +129,7 @@ fn try_close(s: &str) -> Option<Value> {
     serde_json::from_str::<Value>(&out).ok()
 }
 
-static CITE_RE: Lazy<Regex> = Lazy::new(|| Regex::new("\u{E000}(\\d+)\u{E001}").unwrap());
+static CITE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("\u{E000}(\\d+)\u{E001}").unwrap());
 
 fn domain_of(url: &str) -> String {
     url::Url::parse(url)

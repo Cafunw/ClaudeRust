@@ -4,7 +4,7 @@
 //! with counts and line numbers), the lines around the first occurrences
 //! (including stack traces), and the beginning and end of the file.
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -19,20 +19,20 @@ const MAX_LINE: usize = 400;
 /// Bytes of a line examined for its level.
 const SCAN: usize = 2000;
 
-static LEVEL_RE: Lazy<Regex> = Lazy::new(|| {
+static LEVEL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(TRACE|DEBUG|DBG|INFO|INF|NOTICE|WARN|WARNING|WRN|ERROR|ERR|ERRO|EROR|FATAL|FTL|CRITICAL|CRIT|SEVERE|PANIC)\b|(?i:\blevel)[=:]\s*\x22?([A-Za-z]+)").unwrap()
 });
-static ERROR_RE: Lazy<Regex> = Lazy::new(|| {
+static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:fatal|critical|error|err|severe|panic|panicked|traceback|segmentation fault|segfault|core dumped|uncaught|unhandled|exception)\b|\b[A-Z][A-Za-z]*(?:Exception|Error)\b").unwrap()
 });
-static WARN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(?:warn|warning|deprecated)\b").unwrap());
-static TS_RE: Lazy<Regex> = Lazy::new(|| {
+static WARN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:warn|warning|deprecated)\b").unwrap());
+static TS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\b[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}\b").unwrap()
 });
-static UUID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap());
-static HEX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b0x[0-9a-f]+\b|\b[0-9a-f]{12,}\b").unwrap());
-static NUM_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+").unwrap());
-static CONT_RE: Lazy<Regex> = Lazy::new(|| {
+static UUID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap());
+static HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b0x[0-9a-f]+\b|\b[0-9a-f]{12,}\b").unwrap());
+static NUM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").unwrap());
+static CONT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:\s+(?:at |File |from |\.\.\.|#\d|\d+: |\|)|\s{2,}\S|\t|Caused by:|Stack backtrace:|stack backtrace:|During handling of|The above exception)").unwrap()
 });
 

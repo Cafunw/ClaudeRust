@@ -604,7 +604,6 @@ dependencies = [
 name = "clauderust"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64 0.23.1",
  "chrono",
  "dirs 7.0.0",
@@ -619,7 +618,6 @@ dependencies = [
  "log",
  "mime_guess",
  "notify",
- "once_cell",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",

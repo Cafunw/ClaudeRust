@@ -1,15 +1,15 @@
 //! TODO / FIXME / HACK / XXX / BUG comments in a project, for the `/todos`
 //! list (gitignore-aware, via the cached file list).
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 use std::path::Path;
 
 /// A marker as a whole uppercase word, then optional `(who)` and `:`.
-static MARK_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(TODO|FIXME|HACK|XXX|BUG)\b(?:\([^)]{0,40}\))?:?\s*(.*)").unwrap());
+static MARK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(TODO|FIXME|HACK|XXX|BUG)\b(?:\([^)]{0,40}\))?:?\s*(.*)").unwrap());
 /// Something that starts a comment before the marker.
-static COMMENT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(//|#|/\*|\*|<!--|--|;|%|\{-|\(\*|\bREM\b)").unwrap());
+static COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(//|#|/\*|\*|<!--|--|;|%|\{-|\(\*|\bREM\b)").unwrap());
 
 const MAX_FILE: u64 = 1024 * 1024;
 const MAX_ITEMS: usize = 2000;

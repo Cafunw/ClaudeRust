@@ -1,7 +1,7 @@
 //! Syntax highlighting with syntect (pure-Rust regex engine), emitting CSS
 //! classes so light/dark themes are pure CSS.
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use parking_lot::Mutex;
 use syntect::html::{css_for_theme_with_class_style, line_tokens_to_classed_spans, ClassStyle};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
@@ -9,10 +9,10 @@ use syntect::util::LinesWithEndings;
 
 use crate::util::{escape_html, ByteCache};
 
-static SYNTAXES: Lazy<SyntaxSet> = Lazy::new(two_face::syntax::extra_newlines);
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 /// Bounded by size, not count: a code block re-highlighted as it streams in
 /// leaves many large, near-identical entries. Very large results aren't kept.
-static CACHE: Lazy<Mutex<ByteCache>> = Lazy::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
+static CACHE: LazyLock<Mutex<ByteCache>> = LazyLock::new(|| Mutex::new(ByteCache::new(CACHE_BYTES, CACHE_ENTRY_BYTES)));
 const CACHE_BYTES: usize = 24 * 1024 * 1024;
 const CACHE_ENTRY_BYTES: usize = 1024 * 1024;
 const STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "hl-" };
@@ -85,7 +85,7 @@ struct Progress {
 /// Code blocks still streaming in, most recent last: a few, for replies
 /// streaming at the same time. Each holds up to `MAX_HIGHLIGHT_BYTES` of
 /// code and `PROGRESS_HTML_BYTES` of HTML.
-static GROWING: Lazy<Mutex<Vec<Progress>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static GROWING: LazyLock<Mutex<Vec<Progress>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const GROWING_BLOCKS: usize = 4;
 const PROGRESS_HTML_BYTES: usize = 1024 * 1024;
 

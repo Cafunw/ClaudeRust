@@ -1,10 +1,10 @@
 //! Resolves the user's login-shell PATH so GUI launches can find tools like
 //! `npx`, `uvx`, `node` or `git` (macOS/Linux GUI apps don't inherit it).
 
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use std::ffi::OsString;
 
-static PATH: OnceCell<OsString> = OnceCell::new();
+static PATH: OnceLock<OsString> = OnceLock::new();
 
 pub fn init() {
     let _ = PATH.get_or_init(compute);

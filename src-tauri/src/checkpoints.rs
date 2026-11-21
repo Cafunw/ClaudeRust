@@ -24,8 +24,8 @@ pub struct Shadow {
 /// One lock per shadow repository: sessions in the same folder (and the
 /// rewind menu during a snapshot) share it, and git commands running at the
 /// same time collide on its index.lock.
-static LOCKS: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<PathBuf, Arc<parking_lot::Mutex<()>>>>> =
-    once_cell::sync::Lazy::new(Default::default);
+static LOCKS: std::sync::LazyLock<parking_lot::Mutex<HashMap<PathBuf, Arc<parking_lot::Mutex<()>>>>> =
+    std::sync::LazyLock::new(Default::default);
 
 impl Shadow {
     pub fn new(data_dir: &Path, work: &Path) -> Shadow {

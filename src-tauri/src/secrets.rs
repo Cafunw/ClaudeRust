@@ -1,7 +1,7 @@
 //! Secrets about to be committed: API keys, tokens and private keys in the
 //! added lines of a diff, and environment files being added.
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
@@ -15,7 +15,7 @@ pub struct Finding {
     pub preview: String,
 }
 
-static RULES: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+static RULES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     [
         ("Anthropic API key", r"\bsk-ant-[A-Za-z0-9_\-]{20,}"),
         ("OpenAI API key", r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}"),

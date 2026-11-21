@@ -59,12 +59,6 @@ impl Serialize for AppError {
     }
 }
 
-impl From<anyhow::Error> for AppError {
-    fn from(e: anyhow::Error) -> Self {
-        AppError::Msg(e.to_string())
-    }
-}
-
 impl From<tauri::Error> for AppError {
     fn from(e: tauri::Error) -> Self {
         AppError::Msg(e.to_string())
