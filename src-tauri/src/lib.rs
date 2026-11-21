@@ -382,6 +382,7 @@ pub fn run() {
             commands::project_dir,
             commands::project_file,
             commands::scan_todos,
+            commands::open_system_terminal,
             commands::file_sessions,
             commands::secret_scan,
             commands::git_branches,

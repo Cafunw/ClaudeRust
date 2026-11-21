@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  folder_editor: "Open folder in editor",
+  folder_terminal: "Open a terminal here",
   fv_sessions: "Conversations that edited this file",
   fv_sessions_none: "No conversation has edited this file.",
   cmd_recap: "Summarize this session (for a teammate, a standup or a PR)",
@@ -529,6 +531,8 @@ const en = {
 };
 
 const tr = {
+  folder_editor: "Klasörü düzenleyicide aç",
+  folder_terminal: "Burada bir terminal aç",
   fv_sessions: "Bu dosyayı düzenleyen sohbetler",
   fv_sessions_none: "Bu dosyayı düzenleyen bir sohbet yok.",
   cmd_recap: "Bu oturumu özetle (bir ekip arkadaşı, günlük toplantı ya da PR için)",

@@ -114,7 +114,13 @@ function renderTopbar() {
   }
   if (c.kind === 'code' && c.cwd) {
     const chip = h(`<button class="crumb" title="${esc(c.cwd)}">${icon('terminal', 15)}<span class="code-topinfo ellipsis" style="max-width:260px">${esc(c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd)}</span></button>`);
-    chip.onclick = () => call('reveal_path', { path: c.cwd }).catch(errorToast);
+    chip.onclick = () => showMenu(chip, [
+      { header: c.cwd },
+      { label: t('folder_editor'), icon: 'external', onClick: () => call('open_in_editor', { path: c.cwd, line: null }).catch(errorToast) },
+      { label: t('reveal'), icon: 'folder', onClick: () => call('reveal_path', { path: c.cwd }).catch(errorToast) },
+      { label: t('folder_terminal'), icon: 'terminal', onClick: () => call('open_system_terminal', { path: c.cwd }).catch(errorToast) },
+      { label: t('fv_copy_abs'), icon: 'copy', onClick: () => copyText(c.cwd).then(() => toast(t('copied'))) },
+    ], { placement: 'bottom-start', width: 280 });
     cur.topEl.append(chip, h(`<span class="muted">/</span>`));
     if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool" title="${esc(t('engine_cc'))}">${icon('terminal', 12)} Claude Code</span>`));
     if (c.options && c.options.worktree && c.options.worktree.branch) cur.topEl.append(h(`<span class="active-tool wt" title="${esc(t('worktree_topbar', { path: c.options.worktree.path }))}">${icon('code', 12)} ${esc(c.options.worktree.branch)}</span>`));

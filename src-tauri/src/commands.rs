@@ -1215,6 +1215,20 @@ pub async fn prompt_history(state: St<'_>, query: String) -> AppResult<Value> {
     Ok(json!(rows.into_iter().map(|(text, at, title)| json!({"text": text, "at": at, "title": title})).collect::<Vec<_>>()))
 }
 
+/// Open the system terminal in a folder, running the user's shell.
+#[tauri::command]
+pub async fn open_system_terminal(path: String) -> AppResult<()> {
+    let dir = std::path::PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(AppError::msg(format!("Folder not found: {path}")));
+    }
+    #[cfg(windows)]
+    let shell = std::path::PathBuf::from("cmd");
+    #[cfg(not(windows))]
+    let shell = std::path::PathBuf::from(std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()));
+    crate::claudecode::open_in_terminal(Some(&dir), &shell, &[])
+}
+
 /// Continue a Claude Code session in the system terminal (`claude --resume`).
 #[tauri::command]
 pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppResult<()> {
