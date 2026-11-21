@@ -65,6 +65,20 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then rustup target add aarch64-apple-darwin x86_64-apple-darwin; fi
       - name: Install Tauri CLI
         run: npm ci --ignore-scripts
+      # the version's section of CHANGELOG.md becomes the release notes (and
+      # the notes the app shows when it offers the update)
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v v="$version" '/^## / { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } } found { print }' CHANGELOG.md)
+          [ -n "$notes" ] || notes="See CHANGELOG.md."
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$notes"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,7 +87,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "ClaudeRust ${{ github.ref_name }}"
-          releaseBody: "Download the installer for your platform below."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           tauriScript: npx tauri
