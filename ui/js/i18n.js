@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  sess_running: "Working",
+  sess_waiting: "Needs you",
   conv_instructions: "Instructions for this conversation…",
   conv_instructions_none: "none",
   conv_instructions_ph: "e.g. Answer in Turkish. Keep answers short. Use metric units.",
@@ -566,6 +568,8 @@ const en = {
 };
 
 const tr = {
+  sess_running: "Çalışıyor",
+  sess_waiting: "Sizi bekliyor",
   conv_instructions: "Bu sohbet için talimatlar…",
   conv_instructions_none: "yok",
   conv_instructions_ph: "ör. Türkçe yanıtla. Yanıtları kısa tut. Metrik birimler kullan.",

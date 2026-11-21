@@ -86,7 +86,7 @@ function chatLink(c) {
   const a = h(`<button class="chat-link" data-id="${esc(c.id)}">
     ${c.kind === 'code' ? `<span class="code-badge">${icon('terminal', 14)}</span>` : ''}
     <span class="title">${esc(c.title || t('new_chat'))}</span>
-    ${running || waiting ? '<span class="dot"></span>' : ''}
+    ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : ''}
     <span class="icon-btn sm more" role="button" aria-label="more">${icon('more', 16)}</span></button>`);
   a.addEventListener('click', (e) => {
     if (e.target.closest('.more')) {

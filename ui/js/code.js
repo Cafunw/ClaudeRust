@@ -4,7 +4,7 @@ import * as workspace from './workspace.js';
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit, saveLocal, loadLocal } from './store.js';
+import { store, emit, on, saveLocal, loadLocal } from './store.js';
 import { $, esc, h, relTime, errorToast, toast, confirmDialog } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
@@ -116,14 +116,28 @@ export async function renderCode(view) {
 
   const list = $('.sessions', view);
   if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
+  const statusOf = (id) => ([...store.permissions.values()].some((p) => p.conversation_id === id) ? 'waiting' : store.running.has(id) ? 'running' : '');
   for (const s of sessions) {
-    const row = h(`<button class="list-item">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${esc(s.cwd || '')} · ${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+    const status = statusOf(s.id);
+    const row = h(`<button class="list-item" data-id="${esc(s.id)}">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${esc(s.cwd || '')} · ${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
     row.addEventListener('click', (e) => {
       if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderCode(view), onDelete: () => renderCode(view) }); return; }
       emit('navigate', { name: 'chat', params: { id: s.id } });
     });
     list.appendChild(row);
   }
+  // keep the status chips current while this page is shown
+  const refreshStatus = () => {
+    if (!list.isConnected) return;
+    list.querySelectorAll('.list-item[data-id]').forEach((r) => {
+      const st = statusOf(r.dataset.id);
+      const chip = r.querySelector('.sess-status');
+      chip.className = `sess-status ${st}`;
+      chip.textContent = st ? t('sess_' + st) : '';
+    });
+  };
+  const offs = [on('running-changed', refreshStatus)];
+  const watch = setInterval(() => { if (!list.isConnected) { clearInterval(watch); offs.forEach((f) => f && f()); } else refreshStatus(); }, 1500);
   composer.focus();
 }
 
