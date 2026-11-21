@@ -99,7 +99,7 @@ pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path
             c.current_dir(d);
         }
         c.spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -115,7 +115,7 @@ pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path
             line.replace('\\', "\\\\").replace('"', "\\\"")
         );
         std::process::Command::new("osascript").args(["-e", &script]).spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
