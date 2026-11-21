@@ -201,6 +201,7 @@ export function createComposer(opts) {
           if (opts.draftKey) store.drafts.delete(opts.draftKey);
           return;
         }
+        if (r && r.keep) return;
         if (r && r.prompt) text = r.prompt;
         if (r && r.attachments && r.attachments.length) atts.push(...r.attachments);
       }

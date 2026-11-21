@@ -423,8 +423,14 @@ impl Db {
     /// all words must appear).
     pub fn prompt_history(&self, query: &str, limit: usize) -> AppResult<Vec<(String, i64, String)>> {
         let c = self.conn.lock();
+        // only the text blocks leave SQLite (attachments can be megabytes of base64)
         let mut st = c.prepare(
-            "SELECT m.content, m.created_at, c.title FROM messages m JOIN conversations c ON c.id = m.conversation_id
+            "SELECT CASE WHEN json_type(m.content) = 'array'
+                    THEN (SELECT json_group_array(json_extract(j.value, '$.text')) FROM json_each(m.content) j
+                          WHERE json_extract(j.value, '$.type') = 'text')
+                    ELSE json_array(json_extract(m.content, '$')) END,
+                    m.created_at, c.title
+             FROM messages m JOIN conversations c ON c.id = m.conversation_id
              WHERE m.role = 'user' AND json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL
              ORDER BY m.created_at DESC LIMIT 5000",
         )?;
@@ -432,18 +438,13 @@ impl Db {
         let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for (content, at, title) in rows.flatten() {
-            let Ok(v) = serde_json::from_str::<Value>(&content) else { continue };
-            let typed = match &v {
-                Value::String(s) => Some(s.clone()),
-                Value::Array(a) => a
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .find(|t| !t.starts_with("<system-reminder") && !t.starts_with("<earlier_conversation") && !t.starts_with("This session is being continued"))
-                    .map(str::to_string),
-                _ => None,
-            };
+        for (texts, at, title) in rows.flatten() {
+            let Ok(Value::Array(texts)) = serde_json::from_str::<Value>(&texts) else { continue };
+            let typed = texts
+                .iter()
+                .filter_map(|t| t.as_str())
+                .find(|t| !t.starts_with("<system-reminder") && !t.starts_with("<earlier_conversation") && !t.starts_with("This session is being continued"))
+                .map(str::to_string);
             let Some(text) = typed.map(|t| t.trim().to_string()).filter(|t| t.len() >= 3) else { continue };
             let lower = text.to_lowercase();
             if !words.iter().all(|w| lower.contains(w.as_str())) || !seen.insert(lower) {

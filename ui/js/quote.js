@@ -63,7 +63,8 @@ function show(sel) {
     hide();
     const c = await composer();
     if (!c) return;
-    c.setText(`${asQuote(text)}\n\n${t('quote_explain_p')}`);
+    const draft = c.getText().trim();
+    c.setText(`${asQuote(text)}\n\n${draft || t('quote_explain_p')}`);
     c.send();
   };
 }

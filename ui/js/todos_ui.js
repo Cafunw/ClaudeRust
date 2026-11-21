@@ -44,7 +44,9 @@ async function openTodos(ctx) {
         const c = chat.current();
         if (!c || !c.composer) return;
         const target = `${it.path}#L${it.line}`;
-        c.composer.setText(t('todos_fix_p', { kind: it.kind, at: `@${/\s/.test(target) ? `"${target}"` : target}`, text: it.text || '' }));
+        const draft = c.composer.getText().trim();
+        const ask = t('todos_fix_p', { kind: it.kind, at: `@${/\s/.test(target) ? `"${target}"` : target}`, text: it.text || '' });
+        c.composer.setText(draft ? `${draft}\n\n${ask}` : ask);
         c.composer.send();
       };
       list.appendChild(row);

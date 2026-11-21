@@ -62,7 +62,13 @@ pub fn branch_for(title: &str) -> String {
 
 /// Split Claude's draft ("first line = title, rest = body").
 pub fn split_draft(text: &str) -> (String, String) {
-    let t = text.trim().trim_matches('`').trim();
+    let mut t = text.trim();
+    // a reply wrapped in a code fence (```markdown … ```)
+    if t.starts_with("```") {
+        t = t.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+        t = t.trim_end().strip_suffix("```").unwrap_or(t);
+    }
+    let t = t.trim().trim_matches('`').trim();
     let mut lines = t.lines();
     let title = lines
         .next()
@@ -267,6 +273,7 @@ mod tests {
         assert_eq!(split_draft("Add caching\n\nSpeeds up reads.\n\n## Changes\n- x"), ("Add caching".into(), "Speeds up reads.\n\n## Changes\n- x".into()));
         assert_eq!(split_draft("# Title: Add caching").0, "Add caching");
         assert_eq!(split_draft("").0, "");
+        assert_eq!(split_draft("```markdown\nAdd caching\n\nBody text\n```"), ("Add caching".into(), "Body text".into()));
     }
 
     #[tokio::test]

@@ -41,18 +41,20 @@ registerCommand({
     if (ctx.engine === 'claude-code') return `/review ${args}`.trim();
     // `/review 42` or a pull request URL: review that pull request
     const a = (args || '').trim();
-    if (/^#?\d+$/.test(a) || /^https?:\/\/\S+\/(pull|merge_requests)\/\d+/.test(a)) {
+    const [ref, ...focusWords] = a.split(/\s+/);
+    if (/^#?\d+$/.test(ref || '') || /^https?:\/\/\S+\/(pull|merge_requests)\/\d+\S*$/.test(ref || '')) {
+      const focus = focusWords.join(' ');
       try {
-        const pr = await call('pr_fetch', { conversationId: ctx.conversationId, pr: a });
+        const pr = await call('pr_fetch', { conversationId: ctx.conversationId, pr: ref });
         const att = await call('stage_text', { name: `PR-${pr.number}.diff`, text: pr.diff || '' });
         return {
           prompt: t('review_pr_p', {
             n: pr.number, title: pr.title || '', author: (pr.author && pr.author.login) || '', head: pr.headRefName || '', base: pr.baseRefName || '',
             add: pr.additions ?? 0, del: pr.deletions ?? 0, files: pr.changedFiles ?? 0, url: pr.url || '', body: (pr.body || '').trim() || '—',
-          }),
+          }) + (focus ? `\n\n${t('review_pr_focus', { focus })}` : ''),
           attachments: [att],
         };
-      } catch (e) { errorToast(e); return undefined; }
+      } catch (e) { errorToast(e); return false; }
     }
     return REVIEW_PROMPT(args);
   },

@@ -73,7 +73,7 @@ export function shellCommands(code) {
   const lines = String(code).replace(/\n+$/, '').split('\n');
   const prompted = lines.filter((l) => /^\s*[$%] /.test(l));
   if (prompted.length && prompted.length < lines.length) return prompted.map((l) => l.replace(/^\s*[$%] /, '')).join('\n');
-  return lines.map((l) => l.replace(/^\s*\$ /, '')).join('\n');
+  return lines.map((l) => l.replace(/^\s*[$%] /, '')).join('\n');
 }
 
 // Global delegated click handling for rendered content.

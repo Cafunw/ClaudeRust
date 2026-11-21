@@ -1208,7 +1208,10 @@ pub async fn file_search(state: St<'_>, conversation_id: Option<String>, cwd: Op
 /// Messages typed before (all conversations), newest first, for Ctrl+R.
 #[tauri::command]
 pub async fn prompt_history(state: St<'_>, query: String) -> AppResult<Value> {
-    let rows = state.db.prompt_history(&query, 60)?;
+    let st = state.inner().clone();
+    let rows = tokio::task::spawn_blocking(move || st.db.prompt_history(&query, 60))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
     Ok(json!(rows.into_iter().map(|(text, at, title)| json!({"text": text, "at": at, "title": title})).collect::<Vec<_>>()))
 }
 

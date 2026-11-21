@@ -449,6 +449,9 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
     let mut usage_cache_read = 0u64;
     let mut usage_cache_write = 0u64;
     let mut cost_usd = 0.0f64;
+    // the Claude Code CLI reports a whole run's cost on its last row; it
+    // replaces the estimates of that run's other rows
+    let mut reported_cost = 0.0f64;
     let mut duration_ms = 0u64;
     let mut last_meta = Value::Null;
 
@@ -480,7 +483,7 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
         // (sub-agents included; local models are free)
         let model = m.meta["model"].as_str().unwrap_or("");
         if let Some(c) = m.meta["cost_usd"].as_f64() {
-            cost_usd += c;
+            reported_cost += c;
         } else if !model.is_empty() && !model.starts_with(crate::oai::PREFIX) {
             for key in ["usage", "subagent_usage"] {
                 if m.meta[key].is_object() {
@@ -647,7 +650,7 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
                 "cache_creation_input_tokens": usage_cache_write,
             },
             "feedback": last_meta["feedback"],
-            "cost_usd": cost_usd,
+            "cost_usd": if reported_cost > 0.0 { reported_cost } else { cost_usd },
             "duration_ms": duration_ms,
         },
     })

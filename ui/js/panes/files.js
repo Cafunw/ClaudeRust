@@ -165,7 +165,8 @@ async function drawFile(el, ctx) {
   const ask = async (prompt) => {
     const c = await composer();
     if (!c) return;
-    c.setText(prompt);
+    const draft = c.getText().trim();
+    c.setText(draft ? `${draft}\n\n${prompt}` : prompt);
     c.send();
   };
   head.querySelector('[data-a=ask]').onclick = (ev) => showMenu(ev.currentTarget, [

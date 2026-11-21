@@ -22,6 +22,14 @@ const TABS = [
 
 let current = null;
 
+// the shortcut being recorded (Settings → Shortcuts): one at a time, and
+// never left listening once Settings closes
+let recorder = null;
+function stopRecording() {
+  if (recorder) window.removeEventListener('keydown', recorder, true);
+  recorder = null;
+}
+
 export function openSettings(tab = 'general') {
   if (current) { current.show(tab); return; }
   const root = h(`<div class="settings"><nav class="settings-nav"></nav><div class="settings-body"></div></div>`);
@@ -32,7 +40,7 @@ export function openSettings(tab = 'general') {
     b.onclick = () => show(id);
     nav.appendChild(b);
   }
-  const m = modal({ title: t('settings'), body: root, wide: true, onClose: () => { current = null; off(); } });
+  const m = modal({ title: t('settings'), body: root, wide: true, onClose: () => { current = null; stopRecording(); off(); } });
   m.body.style.padding = '0';
   m.body.style.flex = '1';
   m.body.style.minHeight = '0';
@@ -328,6 +336,7 @@ const RENDER = {
     const names = { new_chat: t('sc_new'), palette: t('sc_search'), sidebar: t('sc_sidebar'), settings: t('sc_settings'), workspace: t('ws_toggle'), find: t('sc_find'), history: t('sc_history'), shortcuts: t('sc_sheet') };
     const user = () => ({ ...(store.settings.keybindings || {}) });
     const draw = () => {
+      stopRecording();
       body.querySelectorAll('.kb-row').forEach((r) => r.remove());
       const anchor = body.querySelector('.kb-fixed');
       for (const action of keymap.ACTIONS) {
@@ -342,12 +351,15 @@ const RENDER = {
       }
     };
     const record = (action, chip) => {
+      stopRecording();
       chip.textContent = t('kb_press');
       chip.classList.add('rec');
       const onKey = (e) => {
+        // Settings closed or redrawn since: stop, and let the key through
+        if (!chip.isConnected) { stopRecording(); return; }
         e.preventDefault();
         e.stopPropagation();
-        const done = () => { window.removeEventListener('keydown', onKey, true); chip.classList.remove('rec'); };
+        const done = () => { stopRecording(); chip.classList.remove('rec'); };
         if (e.key === 'Escape') { done(); draw(); return; }
         if (e.key === 'Backspace' || e.key === 'Delete') { done(); save({ keybindings: { ...user(), [action]: '' } }); setTimeout(draw, 300); return; }
         const b = keymap.fromEvent(e);
@@ -360,6 +372,7 @@ const RENDER = {
         setTimeout(draw, 300);
       };
       window.addEventListener('keydown', onKey, true);
+      recorder = onKey;
     };
     const fixed = h('<div class="kb-fixed"></div>');
     body.appendChild(fixed);

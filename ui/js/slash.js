@@ -61,6 +61,8 @@ export async function handle(text, ctx) {
   if (b) {
     const r = await b.run(p.args, ctx);
     if (typeof r === 'string') return { prompt: r };
+    // false: the command failed; keep what was typed
+    if (r === false) return { keep: true };
     // a command can also hand back attachments to send with its prompt
     if (r && typeof r === 'object' && typeof r.prompt === 'string') return { prompt: r.prompt, attachments: r.attachments || [] };
     return { handled: true };

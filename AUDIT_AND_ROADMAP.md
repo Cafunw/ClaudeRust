@@ -163,3 +163,16 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 | 7 | Line mentions of paths with spaces lost the line (`@"a b.rs"#L12`) | Written as `@"a b.rs#L12"` |
 | 8 | Files filter could show results of an older query | Sequence number; stale replies ignored |
 | 9 | Find highlighted the wrong span when lower-casing changes length; hit cap checked only per node | Case-insensitive Unicode regex on the original text; cap checked across nodes |
+
+## Third review (D26–D39, independent review agent) — 8 findings, all fixed
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | Shortcut matching also used the physical key on Latin layouts, so on Dvorak/Colemak Ctrl+V / Ctrl+Z / Ctrl+X triggered sidebar / shortcut sheet and blocked paste/undo | The physical key is only a fallback when the layout gives a non-Latin character (Cyrillic, Greek, Turkish ı); verified Dvorak/Colemak/Cyrillic cases in the app |
+| 2 | Per-answer cost double-counted Claude Code turns with tools (run total on the last row + estimates for the others) | A reported run cost replaces the estimates |
+| 3 | The shortcut recorder kept capturing keys after Settings closed (and two could run) | One recorder at a time; stopped on redraw, on close, and whenever its row is gone |
+| 4 | Ctrl+R history parsed 5000 messages incl. base64 attachments under the DB lock on the async thread | SQLite returns only the text blocks; the query runs in `spawn_blocking` |
+| 5 | `% cmd` transcripts weren't stripped when every line had a prompt | `$` and `%` stripped in both cases |
+| 6 | A PR draft wrapped in ```` ```markdown ```` took "markdown" as the title | Opening fence (with language tag) and closing fence removed; test |
+| 7 | `/review <URL> <focus>` failed, and any failure cleared the typed text | PR reference and focus split (focus added to the prompt); a failed command keeps the text |
+| 8 | Files "Ask Claude", quote "Explain" and `/todos` "Fix" replaced the draft | The draft is kept (as the terminal actions do) |
