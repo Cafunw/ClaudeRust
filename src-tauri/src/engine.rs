@@ -148,6 +148,10 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
             web_search: web,
         })
     };
+    let system = match conversation_instructions(opts) {
+        Some(block) => format!("{system}\n\n{block}"),
+        None => system,
+    };
     for t in &mcp_tools {
         let mut desc = match &t.title {
             Some(title) if !t.description.contains(title.as_str()) => format!("{title}. {}", t.description),
@@ -810,6 +814,16 @@ async fn overload_switch(st: &AppState, conv: &Conversation, settings: &Settings
 /// The API said the model is overloaded (after the client's own retries).
 fn is_overloaded(e: &AppError) -> bool {
     e.status() == 529 || e.kind() == "overloaded_error"
+}
+
+/// The user's instructions for one conversation (conversation menu), as a
+/// system-prompt block.
+pub(crate) fn conversation_instructions(opts: &Value) -> Option<String> {
+    let ins = opts["instructions"].as_str().map(str::trim).filter(|s| !s.is_empty())?;
+    Some(format!(
+        "<conversation_instructions>\nThe user set these instructions for this conversation; follow them throughout:\n{}\n</conversation_instructions>",
+        crate::util::truncate_chars(ins, 8000)
+    ))
 }
 
 /// Spending limit for one agent turn in this conversation (USD; 0 = none):
@@ -1775,6 +1789,14 @@ mod tests {
         let last = msgs[2]["content"].as_array().unwrap();
         assert_eq!(last[0]["type"], "tool_result");
         assert_eq!(last[1]["text"], "Continue");
+    }
+
+    #[test]
+    fn conversation_instructions_block() {
+        assert_eq!(conversation_instructions(&json!({})), None);
+        assert_eq!(conversation_instructions(&json!({"instructions": "  "})), None);
+        let b = conversation_instructions(&json!({"instructions": "Answer in Turkish."})).unwrap();
+        assert!(b.starts_with("<conversation_instructions>") && b.contains("Answer in Turkish.") && b.ends_with("</conversation_instructions>"));
     }
 
     #[test]

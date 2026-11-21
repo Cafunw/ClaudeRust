@@ -181,6 +181,15 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
       } })), { width: 240 });
     } });
   }
+  const ins = ((c.options || {}).instructions || '').trim();
+  items.push({ label: t('conv_instructions'), sub: ins ? (ins.length > 40 ? `${ins.slice(0, 40)}…` : ins) : t('conv_instructions_none'), icon: 'edit', onClick: async () => {
+    const v = await promptDialog(t('conv_instructions'), ins, { multiline: true, placeholder: t('conv_instructions_ph') });
+    if (v === null) return;
+    c.options = { ...(c.options || {}), instructions: v.trim() };
+    await call('update_conversation', { req: { id: c.id, options: { instructions: v.trim() } } });
+    toast(v.trim() ? t('conv_instructions_set') : t('conv_instructions_cleared'));
+    onChange && onChange();
+  } });
   if (c.kind === 'code' && (c.options || {}).engine === 'claude-code') {
     items.push({ label: t('cc_open_terminal'), icon: 'terminal', onClick: () => call('cc_open_in_terminal', { conversationId: c.id }).catch(errorToast) });
   }

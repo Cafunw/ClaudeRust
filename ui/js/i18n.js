@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  conv_instructions: "Instructions for this conversation…",
+  conv_instructions_none: "none",
+  conv_instructions_ph: "e.g. Answer in Turkish. Keep answers short. Use metric units.",
+  conv_instructions_set: "Claude will follow these instructions in this conversation.",
+  conv_instructions_cleared: "Instructions removed.",
   code_save_tip: "Save as a file…",
   settings_backup_title: "Back up settings",
   settings_backup_d: "Save your settings (preferences, styles, shortcuts, tool permissions) to a file, or restore them — e.g. on a new computer. API keys and machine-specific paths aren't included.",
@@ -561,6 +566,11 @@ const en = {
 };
 
 const tr = {
+  conv_instructions: "Bu sohbet için talimatlar…",
+  conv_instructions_none: "yok",
+  conv_instructions_ph: "ör. Türkçe yanıtla. Yanıtları kısa tut. Metrik birimler kullan.",
+  conv_instructions_set: "Claude bu sohbette bu talimatlara uyacak.",
+  conv_instructions_cleared: "Talimatlar kaldırıldı.",
   code_save_tip: "Dosya olarak kaydet…",
   settings_backup_title: "Ayarları yedekle",
   settings_backup_d: "Ayarlarınızı (tercihler, stiller, kısayollar, araç izinleri) bir dosyaya kaydedin ya da geri yükleyin — örneğin yeni bir bilgisayarda. API anahtarları ve bu makineye özgü yollar dahil edilmez.",

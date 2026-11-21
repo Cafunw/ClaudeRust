@@ -403,6 +403,10 @@ async fn run_once(
         args.push("--fallback-model".into());
         args.push(fb);
     }
+    if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
+        args.push("--append-system-prompt".into());
+        args.push(block);
+    }
     let budget = crate::engine::turn_budget(&conv, &st.settings.read());
     if budget > 0.0 {
         args.push("--max-budget-usd".into());
