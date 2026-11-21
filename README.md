@@ -69,11 +69,13 @@ Resmî Claude Desktop bir Electron uygulamasıdır (yüzlerce MB disk, ayrı bir
 ## Kurulum
 
 ### Hazır paketler
-Her push'ta GitHub Actions üç platform için kurulum paketi üretir: depo → **Actions** → **Build installers** → son çalıştırma → **Artifacts**:
+Son sürümü **[Releases](https://github.com/Cafunw/ClaudeRust/releases/latest)** sayfasından indirin. Kurulduktan sonra uygulama yeni sürümleri kendisi bulur ve kurar (Ayarlar → Hakkında → Güncellemeler).
 
-- **Windows**: `.msi` veya `.exe` (NSIS). SmartScreen uyarısında "Ek bilgi → Yine de çalıştır".
+- **Windows**: `.exe` (NSIS) veya `.msi`. Paketler imzasız olduğu için SmartScreen uyarısında "Ek bilgi → Yine de çalıştır".
 - **macOS** (Apple Silicon + Intel, universal): `.dmg`. İmzasız olduğu için ilk açılışta sağ tık → Aç, ya da `xattr -cr /Applications/ClaudeRust.app`.
 - **Linux**: `.deb`, `.rpm`, `.AppImage`.
+
+Geliştirme sürümleri: her push'ta **Actions** → **Build installers** → son çalıştırma → **Artifacts** (GitHub hesabıyla giriş gerekir, 90 gün saklanır).
 
 `v0.1.0` gibi bir etiket gönderilirse **Release** iş akışı, paketleri ve imzalı güncelleme bildirimini (`latest.json`) taslak bir GitHub Release'e ekler.
 
@@ -203,7 +205,7 @@ ClaudeRust is an unofficial client that offers a Claude Desktop–style experien
 
 **Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs.
 
-**Install:** download the installer for your platform from the latest *Build installers* workflow run (Actions → Artifacts), or from a GitHub Release. macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npx tauri build --config src-tauri/tauri.no-updater.conf.json` (without that file, the build also makes signed update files and needs the signing key).
+**Install:** download the installer for your platform from the **[latest release](https://github.com/Cafunw/ClaudeRust/releases/latest)**; after that the app finds and installs new versions itself (Settings → About → Updates). Development builds are in the *Build installers* workflow runs (Actions → Artifacts, sign-in required). macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npx tauri build --config src-tauri/tauri.no-updater.conf.json` (without that file, the build also makes signed update files and needs the signing key).
 
 ### Architecture
 
