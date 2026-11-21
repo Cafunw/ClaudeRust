@@ -1082,3 +1082,20 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 :root[data-width="wide"] { --content-w: 1040px; }
 :root[data-width="full"] { --content-w: 100%; }
 :root[data-width="full"] .chat-col { padding-left: 32px; padding-right: 32px; }
+.fv-body { position: relative; }
+.fv-hl { position: absolute; left: 0; right: 0; background: rgba(201, 100, 66, .12); pointer-events: none; }
+.fv-gutter span.on { color: var(--accent); font-weight: 600; }
+
+/* /todos */
+.todos-view { display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
+.todos-list { max-height: 60vh; overflow: auto; }
+.todos-file { font-size: 12px; color: var(--text-2); padding: 10px 2px 4px; border-bottom: 1px solid var(--border); }
+.todos-row { display: flex; align-items: center; gap: 8px; padding: 4px 4px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.todos-row:hover { background: var(--bg-3); }
+.todos-row .no { width: 44px; text-align: right; color: var(--text-3); font-size: 12px; flex: none; }
+.todos-row .txt { flex: 1; min-width: 0; }
+.todos-row .btn { visibility: hidden; }
+.todos-row:hover .btn { visibility: visible; }
+.todo-kind { flex: none; font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 5px; background: var(--bg-2); color: var(--text-2); }
+.todo-kind.k-FIXME, .todo-kind.k-BUG { background: rgba(200, 60, 60, .14); color: #b03a3a; }
+.todo-kind.k-HACK, .todo-kind.k-XXX { background: rgba(176, 122, 16, .15); color: #8a5f0a; }

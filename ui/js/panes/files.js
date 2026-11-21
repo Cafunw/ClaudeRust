@@ -9,7 +9,7 @@ import { registerPane, context, refresh, show } from '../workspace.js';
 const state = new Map(); // convId -> { open: Set<dir>, file: path|null, filter: '' }
 
 function st(convId) {
-  if (!state.has(convId)) state.set(convId, { open: new Set(), file: null, filter: '', scroll: 0 });
+  if (!state.has(convId)) state.set(convId, { open: new Set(), file: null, line: null, filter: '', scroll: 0, seq: 0 });
   return state.get(convId);
 }
 
@@ -22,8 +22,9 @@ async function composer() {
 async function mention(path, line) {
   const c = await composer();
   if (!c) return;
-  const p = /\s/.test(path) ? `"${path}"` : path;
-  c.insertText(`@${p}${line ? `#L${line}` : ''} `);
+  // the line goes inside the quotes: `@"a b.rs#L12"` (how mentions are parsed)
+  const target = line ? `${path}#L${line}` : path;
+  c.insertText(`@${/\s/.test(target) ? `"${target}"` : target} `);
 }
 
 const base = (p) => p.split('/').pop();
@@ -62,6 +63,7 @@ function row(entry, depth, ctx, el) {
     r.onclick = (e) => {
       if (e.target.closest('.fb-at')) { mention(entry.path); return; }
       s.file = entry.path;
+      s.line = null;
       draw(el, ctx);
     };
   }
@@ -71,9 +73,11 @@ function row(entry, depth, ctx, el) {
 async function fill(list, ctx) {
   const s = st(ctx.convId);
   const el = list.closest('.ws-pane');
+  const seq = (s.seq = (s.seq || 0) + 1);
   if (s.filter) {
     let hits = [];
     try { hits = await call('file_search', { conversationId: ctx.convId, query: s.filter }); } catch { hits = []; }
+    if (seq !== s.seq) return; // a newer query has been typed
     list.innerHTML = '';
     if (!hits.length) { list.appendChild(h(`<div class="pane-empty">${esc(t('no_results'))}</div>`)); return; }
     for (const f of hits) {
@@ -93,6 +97,7 @@ async function fill(list, ctx) {
     }
   };
   await walk('', 0);
+  if (seq !== s.seq) return;
   list.innerHTML = '';
   if (!frag.childNodes.length) list.appendChild(h(`<div class="pane-empty">${esc(t('files_empty'))}</div>`));
   list.appendChild(frag);
@@ -110,9 +115,9 @@ async function drawFile(el, ctx) {
     <span class="muted small">${f.lines != null ? `${f.lines} ${esc(t('files_lines'))} · ` : ''}${esc(humanSize(f.size))}</span>
     <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}">@</button>
     <button class="icon-btn" data-a="edit" title="${esc(t('open_in_editor'))}">${icon('external', 14)}</button></div>`);
-  head.querySelector('[data-a=back]').onclick = () => { s.file = null; drawTree(el, ctx); };
+  head.querySelector('[data-a=back]').onclick = () => { s.file = null; s.line = null; drawTree(el, ctx); };
   head.querySelector('[data-a=at]').onclick = () => mention(f.path);
-  head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: null }).catch(errorToast);
+  head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: s.line || null }).catch(errorToast);
   el.appendChild(head);
   if (f.binary || f.too_large) {
     el.appendChild(h(`<div class="pane-empty">${icon('file', 22)}<div>${esc(f.binary ? t('files_binary') : t('files_too_large'))}</div></div>`));
@@ -127,6 +132,16 @@ async function drawFile(el, ctx) {
     if (sp) mention(f.path, Number(sp.textContent));
   };
   el.appendChild(body);
+  // a line to show (from /todos): scroll to it and mark it
+  const target = s.line && body.querySelectorAll('.fv-gutter span')[s.line - 1];
+  if (target) {
+    target.classList.add('on');
+    const band = h('<div class="fv-hl"></div>');
+    band.style.top = `${target.offsetTop}px`;
+    band.style.height = `${target.offsetHeight}px`;
+    body.appendChild(band);
+    requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
+  }
   if (f.lines > n) el.appendChild(h(`<div class="muted small fv-more">${esc(t('files_truncated', { n, total: f.lines }))}</div>`));
 }
 
@@ -134,11 +149,12 @@ function draw(el, ctx) {
   return st(ctx.convId).file ? drawFile(el, ctx) : drawTree(el, ctx);
 }
 
-/** Show a project file in the Files pane. */
-export function showFile(path) {
+/** Show a project file in the Files pane, optionally at a line. */
+export function showFile(path, line) {
   const ctx = context();
   if (!ctx) return;
   st(ctx.convId).file = path;
+  st(ctx.convId).line = line || null;
   show('files');
   refresh('files');
 }

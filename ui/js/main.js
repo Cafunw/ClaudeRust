@@ -20,6 +20,7 @@ import './usage_ui.js';
 import './shortcuts.js';
 import './findbar.js';
 import './quote.js';
+import './todos_ui.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
 import './panes/review.js';

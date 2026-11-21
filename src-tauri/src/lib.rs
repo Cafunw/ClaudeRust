@@ -38,6 +38,7 @@ pub mod state;
 pub mod subagent;
 pub mod symbols;
 pub mod terminal;
+pub mod todos;
 pub mod util;
 pub mod view;
 pub mod watch;
@@ -377,6 +378,7 @@ pub fn run() {
             commands::symbol_search,
             commands::project_dir,
             commands::project_file,
+            commands::scan_todos,
             commands::pr_info,
             commands::pr_suggest,
             commands::pr_create,

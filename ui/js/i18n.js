@@ -1,5 +1,12 @@
 // UI strings: English and Turkish.
 const en = {
+  cmd_todos: "List TODO / FIXME comments in the project",
+  todos_title: "TODO and FIXME comments",
+  todos_all: "All",
+  todos_none: "No TODO, FIXME, HACK, XXX or BUG comments found.",
+  todos_fix: "Fix",
+  todos_fix_p: "Resolve the {kind} comment at {at}: \"{text}\". Make the change it asks for, check it works, and remove or update the comment.",
+  todos_truncated: "Showing the first {n}.",
   chat_width: "Conversation width",
   chat_width_d: "How wide messages are shown on large windows.",
   width_normal: "Normal",
@@ -467,6 +474,13 @@ const en = {
 };
 
 const tr = {
+  cmd_todos: "Projedeki TODO / FIXME yorumlarını listele",
+  todos_title: "TODO ve FIXME yorumları",
+  todos_all: "Tümü",
+  todos_none: "TODO, FIXME, HACK, XXX ya da BUG yorumu bulunamadı.",
+  todos_fix: "Düzelt",
+  todos_fix_p: "{at} konumundaki {kind} yorumunu çöz: \"{text}\". İstediği değişikliği yap, çalıştığını kontrol et ve yorumu kaldır ya da güncelle.",
+  todos_truncated: "İlk {n} tanesi gösteriliyor.",
   chat_width: "Sohbet genişliği",
   chat_width_d: "Geniş pencerelerde mesajların ne kadar geniş gösterileceği.",
   width_normal: "Normal",

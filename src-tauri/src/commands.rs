@@ -1205,6 +1205,16 @@ pub async fn file_search(state: St<'_>, conversation_id: Option<String>, cwd: Op
     Ok(json!(r))
 }
 
+/// TODO / FIXME / HACK / XXX / BUG comments in the session's project.
+#[tauri::command]
+pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let (items, truncated) = tokio::task::spawn_blocking(move || crate::todos::scan(&root))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?;
+    Ok(json!({"items": items, "truncated": truncated}))
+}
+
 /// One level of the project's file tree (for the Files pane).
 #[tauri::command]
 pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {
