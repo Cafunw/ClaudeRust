@@ -8,7 +8,7 @@ import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call, on } from './api.js';
 import { store, emit, modelInfo, displayName } from './store.js';
-import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens } from './util.js';
+import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd } from './util.js';
 import { createComposer } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
 import * as artifacts from './artifacts.js';
@@ -503,6 +503,18 @@ function renderTurnFiles(el, turn, streaming) {
   });
 }
 
+/** "· 12s · $0.04" after the model name, with the token counts on hover. */
+function turnStats(meta) {
+  const u = meta.usage || {};
+  const secs = (meta.duration_ms || 0) / 1000;
+  const bits = [];
+  if (secs >= 1) bits.push(secs >= 60 ? `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s` : `${secs.toFixed(secs < 10 ? 1 : 0)}s`);
+  if (meta.cost_usd > 0) bits.push(fmtUsd(meta.cost_usd));
+  if (!bits.length) return null;
+  const tip = `${t('input_tokens')}: ${fmtTokens(u.input_tokens || 0)} · ${t('output_tokens')}: ${fmtTokens(u.output_tokens || 0)}${u.cache_read_input_tokens ? ` · ${t('cache_tokens')}: ${fmtTokens(u.cache_read_input_tokens)} / ${fmtTokens(u.cache_creation_input_tokens || 0)}` : ''}`;
+  return h(`<span class="small muted turn-stats" title="${esc(tip)}">· ${esc(bits.join(' · '))}</span>`);
+}
+
 function renderAssistantTurn(el, turn) {
   if (!el.querySelector('.assistant-body')) {
     el.innerHTML = `<div class="assistant-body"><div class="parts"></div><div class="streaming-indicator hidden">${spark(18, 'spark-anim')}</div></div><div class="turn-actions"></div>`;
@@ -526,7 +538,7 @@ function renderAssistantTurn(el, turn) {
   renderTurnFiles(el, turn, streaming);
   const actions = el.querySelector('.turn-actions');
   if (streaming) { actions.innerHTML = ''; actions.__sig = ''; return; }
-  const sig = JSON.stringify([turn.siblings, turn.meta && turn.meta.feedback, turn.parts.length]);
+  const sig = JSON.stringify([turn.siblings, turn.meta && turn.meta.feedback, turn.parts.length, turn.meta && turn.meta.cost_usd, turn.meta && turn.meta.duration_ms]);
   if (actions.__sig === sig) return;
   actions.__sig = sig;
   actions.innerHTML = '';
@@ -570,6 +582,8 @@ function renderAssistantTurn(el, turn) {
   actions.append(up, down, rb, rm);
   const model = turn.meta && turn.meta.model;
   if (model) actions.appendChild(h(`<span class="small muted model-label">${esc(modelInfo(model).name)}</span>`));
+  const stats = turnStats(turn.meta || {});
+  if (stats) actions.appendChild(stats);
   actions.appendChild(h(`<span class="disclaimer">${t('disclaimer')}</span>`));
   markLast();
 }

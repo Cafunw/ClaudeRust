@@ -448,6 +448,8 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
     let mut usage_out = 0u64;
     let mut usage_cache_read = 0u64;
     let mut usage_cache_write = 0u64;
+    let mut cost_usd = 0.0f64;
+    let mut duration_ms = 0u64;
     let mut last_meta = Value::Null;
 
     macro_rules! flush_text {
@@ -474,6 +476,19 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
             usage_cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
             usage_cache_write += u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
         }
+        // what this answer cost: the CLI reports it; otherwise list prices
+        // (sub-agents included; local models are free)
+        let model = m.meta["model"].as_str().unwrap_or("");
+        if let Some(c) = m.meta["cost_usd"].as_f64() {
+            cost_usd += c;
+        } else if !model.is_empty() && !model.starts_with(crate::oai::PREFIX) {
+            for key in ["usage", "subagent_usage"] {
+                if m.meta[key].is_object() {
+                    cost_usd += crate::commands::usage_cost(model, &m.meta[key]);
+                }
+            }
+        }
+        duration_ms += m.meta["duration_ms"].as_u64().unwrap_or(0);
         let blocks = m.content.as_array().cloned().unwrap_or_default();
         let server_results: HashMap<String, Value> = blocks
             .iter()
@@ -632,6 +647,8 @@ pub fn assistant_turn(msgs: &[&Message], ctx: &RenderCtx, tracker: &mut Artifact
                 "cache_creation_input_tokens": usage_cache_write,
             },
             "feedback": last_meta["feedback"],
+            "cost_usd": cost_usd,
+            "duration_ms": duration_ms,
         },
     })
 }
