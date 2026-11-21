@@ -1,9 +1,9 @@
 // Files pane: the session folder's file tree (.gitignore-aware) and a
 // read-only, highlighted viewer. Files and lines can be @mentioned.
-import { t } from '../i18n.js';
+import { t, currentLanguage } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, humanSize, debounce, showMenu, toast, relTime } from '../util.js';
+import { h, esc, errorToast, humanSize, debounce, showMenu, toast, relTime, snapshot, sameSnapshot } from '../util.js';
 import { copyText } from '../parts.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
 
@@ -88,6 +88,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
   const s = st(ctx.convId);
   const el = list.closest('.ws-pane');
   const seq = (s.seq = (s.seq || 0) + 1);
+  if (s.mode === 'contents' || s.filter) list.__tree = null; // what's drawn below is no tree
   if (s.mode === 'contents') {
     const q = s.grep || '';
     if (!q.trim()) { list.innerHTML = `<div class="pane-empty">${esc(t('files_grep_hint'))}</div>`; return; }
@@ -137,16 +138,23 @@ async function fill(list, ctx, { quiet = false } = {}) {
     return;
   }
   const frag = document.createDocumentFragment();
+  const seen = []; // what the rows are drawn from
   const walk = async (dir, depth) => {
     let items;
-    try { items = await call('project_dir', { conversationId: ctx.convId, dir }); } catch (e) { frag.appendChild(h(`<div class="pane-empty">${esc(e.message || String(e))}</div>`)); return; }
+    try { items = await call('project_dir', { conversationId: ctx.convId, dir }); } catch (e) { seen.push(['error', e.message || String(e)]); frag.appendChild(h(`<div class="pane-empty">${esc(e.message || String(e))}</div>`)); return; }
     for (const it of items) {
+      seen.push([depth, it, !!(it.dir && s.open.has(it.path))]);
       frag.appendChild(row(it, depth, ctx, el));
       if (it.dir && s.open.has(it.path)) await walk(it.path, depth + 1);
     }
   };
   await walk('', 0);
   if (seq !== s.seq) return;
+  // the tree that's shown already (a refill after files changed, mostly):
+  // keep its rows, and with them hover and focus
+  const sig = snapshot([seen, currentLanguage()]);
+  if (sameSnapshot(list.__tree, sig)) { list.__tree = sig; return; }
+  list.__tree = sig;
   list.innerHTML = '';
   if (!frag.childNodes.length) list.appendChild(h(`<div class="pane-empty">${esc(t('files_empty'))}</div>`));
   list.appendChild(frag);
