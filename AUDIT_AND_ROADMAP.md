@@ -89,7 +89,7 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 - [x] D59. ✅ Tam — Unsent drafts survive a restart: the per-conversation drafts map now saves itself to local storage (debounced; empty drafts dropped; up to 50 drafts of ≤ 100 KB, newest kept) and is reloaded at start, so a half-written message is still there after closing the app or a crash. Verified in the app (typed, restarted, draft back in the box).
 - [x] D58. ✅ Tam — Instructions for one conversation (conversation menu → *Instructions for this conversation…*, shown with the current text): added to the system prompt as `<conversation_instructions>` for chats and built-in code sessions, and passed to Claude Code CLI sessions with `--append-system-prompt`; empty removes them. Test: `conversation_instructions_block`. Verified in the app ("Answer in Turkish." reached the request's system prompt).
 - [x] D57. ✅ Tam — Save a code block as a file: every code block's header has a download button that opens a save dialog with a name from the language (`snippet.py`, `snippet.rs`, `Dockerfile`, …; `.txt` otherwise). The language stays left and the buttons right, also for shell blocks with *Run*. Verified in the app (buttons on all 7 blocks; names).
-- [x] D56. ✅ Tam — Settings backup (Settings → About): *Save to file…* writes all settings (preferences, styles, shortcuts, tool permissions, …) as JSON, without API keys, trusted-hook decisions or machine-specific paths; *Restore…* takes such a file (marker required; only known, exportable fields applied; this machine's keys and paths kept) after a confirmation and reloads. Test: `backup_and_restore` (exclusions, merge, no smuggled fields, marker). Verified in the app (wide → restored to normal).
+- [x] D56. ✅ Tam — Settings backup (Settings → About): *Save to file…* writes the settings (preferences, styles, shortcuts, …) as JSON, without API keys, trusted-hook decisions, machine-specific paths, server addresses, the editor command or permission settings (the last three since the fourth review); *Restore…* takes such a file (marker required; only known, exportable fields applied; this machine's keys and paths kept) after a confirmation and reloads. Test: `backup_and_restore` (exclusions, merge, no smuggled fields, marker). Verified in the app (wide → restored to normal).
 - [x] D55. ✅ Tam — Search in the History pane: by commit message (case-insensitive, literal), by author, or by *code added / removed* (git's pickaxe `-S`: the commits that introduced or deleted a piece of text); the search box stays put while results update (stale replies dropped); search values are glued to their git option so they can't be read as options. Verified in the app on this repository ("pull request" → 2 commits; `fn overload_switch` → the commit that added it).
 - [x] D54. ✅ Tam — `/tour [area]` (code sessions): a read-only guided tour of the codebase for a newcomer — what it does, architecture with file paths, data/control flow, build/run/test, conventions, where to start for common changes.
 - [x] D53. ✅ Tam — *Improve my message* (composer tools menu): the fast model rewrites the draft to be clearer and more specific (goal, context, constraints, wanted answer) while keeping the intent, language, @mentions, paths, code and slash commands; the box shows the rewrite with an *Undo* toast; nothing is sent. Shared `quick_complete` helper for one-off fast-model calls. Verified in the app (rewrite and undo).
@@ -147,6 +147,7 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 - F3+F7 done: verified typing into the PTY (`echo`, `ls`) and stopping a dev server from the Tasks pane.
 - F4 done. Note for later work: the UI is embedded in the binary, so UI changes need a `cargo build` (touch `src-tauri/build.rs`).
 - Phase 2 complete (items 1-9).
+- Feature freeze after U1 (user request): fourth review (19 findings) and an end-to-end pass in dark mode, all bugs found fixed; `cargo test` 113 passing, clippy `-D warnings` and ESLint clean.
 - Release build re-checked after D46 (`cargo build --release`, LTO): no warnings, 21 MB binary, starts under Xvfb and restores the last session.
 - CI note: since commit 5b72e07 GitHub Actions jobs are not starting ("recent account payments have failed or your spending limit needs to be increased"). This is an account billing setting, not a code failure; all checks pass locally on Linux (cargo test, clippy, node --check). Windows/macOS-only code added tonight was reviewed by hand (no cross C toolchain here for sqlite/ring).
 
@@ -197,3 +198,63 @@ Discovered while reviewing the app after Phase 2 (ordered by value / effort):
 | 6 | A PR draft wrapped in ```` ```markdown ```` took "markdown" as the title | Opening fence (with language tag) and closing fence removed; test |
 | 7 | `/review <URL> <focus>` failed, and any failure cleared the typed text | PR reference and focus split (focus added to the prompt); a failed command keeps the text |
 | 8 | Files "Ask Claude", quote "Explain" and `/todos` "Fix" replaced the draft | The draft is kept (as the terminal actions do) |
+
+## Fourth review (D40–D61, U1; two independent review agents, UI and backend) — 19 findings, all fixed
+
+| # | Area | Finding | Fix |
+|---|---|---|---|
+| 1 | UI | Chat/Code mode memory read the wrong storage key, so the mode and the last place in each mode were never restored | Shared `loadLocal`; a new conversation is remembered from the open event; startup honours a saved Code route |
+| 2 | UI | List menus (sidebar, Chats, Code page) had no `options`: instructions showed as "none" and Save could wipe them; "Continue in terminal" was missing there | Instructions and engine in the list payload; save errors handled |
+| 3 | UI | Overlapping Code-page renders (double press, leaving quickly) stacked two composers and timers | Render sequence; superseded renders stop |
+| 4 | UI | The sidebar re-bound its listeners on every language change (toggle did nothing, Routines opened twice) | Listeners bound once |
+| 5 | UI | Commit was clickable before the secret scan answered; a failed scan allowed commits silently | Commit disabled until the scan answers; a failure asks for confirmation |
+| 6 | UI | Alt+↑/↓ took the key from `<select>`, dialogs and menus | Skipped for fields, selects, editable content, open dialogs/menus |
+| 7 | UI | Drafts: Improve/Undo not saved, no flush on quit, deleted conversations kept theirs | Saved on every change, flushed on `pagehide`, removed on delete |
+| 8 | UI | "Run in terminal" sent the command and Enter in two calls (could arrive in the wrong order) | One write |
+| 9 | UI | Dark mode: hard-coded light accent colours on the "waiting" status and blame highlight | Theme variables |
+| 10 | Backend | Windows: `cmd /C start /D <dir>` re-parsed folder names (`R&D`), and `.cmd` CLIs cut arguments at a line break | Terminal opened with `CREATE_NEW_CONSOLE` + working directory and a fully quoted `/S /K` line; npm `.cmd` shims run through node directly (unit-tested shim parsing) |
+| 11 | Backend | Before the first commit `git diff HEAD` failed, so the secret scan, commit message and patch saw nothing | Diffs against the empty tree when there is no `HEAD` |
+| 12 | Backend | Diffs with new files changed the real index (`add -N` + `reset`), racing with the agent's git and dropping a whole chunk when one file vanished | A copy of the index (`GIT_INDEX_FILE`); chunks retried file by file |
+| 13 | Backend | `diff.noprefix=true` made hunk revert patch the wrong path | Explicit `a/` `b/` prefixes and `--no-textconv` |
+| 14 | Backend | Hunks of CRLF files never reverted; pasted CRLF patches were normalised to LF | Line endings kept; patches tried as given, then with LF |
+| 15 | Backend | Settings restore imported server address, editor command, permission mode and tool policies; one mistyped field failed it all; side effects (autostart, shortcut…) skipped | Those fields stay as set on this machine; field-by-field import; shared side effects |
+| 16 | Backend | package.json/deno/composer script names went unquoted into a shell line | Only safe names listed; deno.jsonc comments and make `::=` handled |
+| 17 | Backend | One odd row (bare string in a content array) broke prompt history | Every `json_extract` guarded by `CASE` |
+| 18 | Backend | Files' "sessions that edited this file" looked at only 400 rows before filtering | Filter in SQL, 2000 rows |
+| 19 | Backend | Improve my message replaced a long draft with a cut-off rewrite; a fully staged hunk stayed staged after revert; one-string Linux terminals got split arguments | Error on `max_tokens`; the index is reverted too when the file was staged as is; quoted line for lxterminal / `x-terminal-emulator` |
+
+## End-to-end test pass in dark mode (after the feature freeze)
+
+Every feature added in Phases 1–3 and U1 was exercised in the running app (debug
+build under Xvfb, isolated HOME, mock Anthropic API, dark theme), with screenshots
+of each page, pane and dialog:
+
+- **Chat:** answers with Markdown/tables/math/code (Copy/Save, no Run in chats),
+  find bar (count, Enter/Shift+Enter, no results), quote / explain a selection,
+  fork (history carried over), outline menu and Alt+↑/↓, conversation
+  instructions (reach the system prompt), Improve my message + Undo, Ctrl+R
+  history (filter, Enter), message queue during a slow answer, `/context`,
+  `/usage`, `/cost`, Markdown/JSON/HTML exports, large-log digest (30 000 lines →
+  digest with error/warning counts), overload fallback (HTTP 529 and in-stream
+  error), artifacts panel, edit last message (↑) with branch navigation, retry.
+- **Code sessions:** permission modes and the permission prompt, file write with
+  the turn file summary, rewind (code and conversation), `/todos` (+ Fix),
+  `/doctor`, `/budget`, `/recap`, `/tour`, `/init`, `/compact`, `/hooks`, watch
+  mode dialog.
+- **Side panel:** Changes (diff, hunk view, commit dialog with the secret scan
+  gate), History (commit details, explain/revert), Terminal (run a command),
+  Tasks, Plan, Preview, Map, Files (tree, viewer, blame).
+- **App:** Chat/Code mode memory across switches, sidebar menus, settings tabs,
+  search palette, shortcut sheet.
+
+Bugs found by this pass and fixed: conversations didn't open at their end (late
+layout of math/code, and an async scroll event turned "follow the end" off);
+the palette ranked loose letter matches of commands above matching
+conversations; wide dialogs filled the screen when nearly empty; GTK drew light
+checkboxes in dark mode; prompt-history previews showed a cut-off line; the
+instructions dialog title kept the menu's "…".
+
+Known limits (not fixable from this environment): Windows/macOS-only code paths
+were reviewed by hand and unit-tested where the logic is portable (shim parsing,
+quoting), but not compiled for those targets here (no cross C toolchain); GitHub
+Actions can't start jobs because of the account's billing setting.

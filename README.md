@@ -14,6 +14,10 @@ _A lightweight rewrite of the Claude desktop app in Rust (Tauri 2)._ — [Englis
 |---|---|
 | ![](docs/screenshots/import.png) | ![](docs/screenshots/desktop-settings.png) |
 
+| Koyu mod: kod oturumu ve Değişiklikler | Commit öncesi gizli bilgi taraması | Kullanım panosu (`/usage`) |
+|---|---|---|
+| ![](docs/screenshots/dark-changes.png) | ![](docs/screenshots/dark-commit.png) | ![](docs/screenshots/dark-usage.png) |
+
 ## Neden?
 
 Resmî Claude Desktop bir Electron uygulamasıdır (yüzlerce MB disk, ayrı bir Chromium + Node.js çalışma zamanı). ClaudeRust aynı deneyimi şu şekilde sunar:
@@ -77,7 +81,11 @@ npm install          # Tauri CLI
 npx tauri dev        # geliştirme modunda çalıştır
 npx tauri build      # kurulum paketi üret (target/release/bundle)
 cargo test -p clauderust --lib   # birim testleri
+cargo clippy -p clauderust --lib -- -D warnings
+npm run lint         # arayüz için ESLint
 ```
+
+Arayüz dosyaları (`ui/`) ikili dosyaya gömülür: arayüzde değişiklik yaptıktan sonra `cargo build` gerekir (`src-tauri/build.rs` dosyasına `touch` yeterli). Hata ayıklama derlemelerinde `CLAUDERUST_EVAL_DIR` ile uygulama içinde betik çalıştırılabilir; uçtan uca testler bu kancayla, Xvfb altında ve sahte bir API sunucusuyla yapılır.
 
 ## Kullanım notları
 
@@ -132,12 +140,17 @@ cargo test -p clauderust --lib   # birim testleri
   - **Git araçları**: Değişiklikler'de dal menüsü (dallar arası geçiş, yeni dal, stash / geri uygulama), tek bir parçayı (hunk) geri alma, tüm değişiklikleri yama olarak kopyalama/kaydetme ve yapıştırılan yamayı uygulama; commit öncesi gizli bilgi taraması (API anahtarları, özel anahtarlar, `.env` dosyaları); Dosyalar görüntüleyicisinde satır satır *blame* ve dosyayı düzenleyen sohbetler; `/review <PR no ya da URL>` ile GitHub çekme isteği incelemesi.
   - **Proje betikleri**: Görevler panelinde package.json / Makefile / justfile / Cargo / Go / pytest komutları; tek tıkla terminalde çalıştırma ya da Claude'a çalıştırıp düzelttirme.
   - **Oturum araçları**: `/recap` (oturum özeti), klasör menüsü (düzenleyicide aç, terminal aç), Claude Code oturumunu sistem terminalinde sürdürme (`claude --resume`), her yanıtın süresi ve maliyeti.
+  - **Kod sayfası**: 6'dan fazla oturum olunca başlık ya da klasöre göre süzme kutusu; oturumlar klasörlerine göre gruplanır ve her birinde *Çalışıyor* / *Sizi bekliyor* durumu canlı görünür (paralel oturumlar için).
+  - **`/tour [alan]`**: yeni gelen biri için kod tabanında salt okunur rehberli tur (ne yaptığı, mimari ve dosya yolları, nereden başlanacağı). `@klasör/` etiketleri klasörün yapısını (3 düzey, .gitignore'a uyarak) ağaç olarak ekler.
+  - **Geçmişte arama**: commit mesajında, yazarda ya da eklenen/silinen kodda (git'in `-S` araması).
   - **Aşırı yükte model değişimi**: seçilen model meşgulse tur otomatik olarak başka bir modelle sürer (Ayarlar → Özellikler; Claude Code'da `--fallback-model`).
   - **Düzenleyicide aç**: araç kartlarındaki, Değişiklikler'deki ve Harita'daki dosya yolları VS Code / Cursor / Zed / IntelliJ … ile ilgili satırda açılır (Ayarlar → Kod).
-- **Sohbet araçları**: yanıttaki metni seçip *Alıntıla* / *Açıkla*, gönderilen mesajlarda arama (`Ctrl/⌘+R`), sohbet genişliği (normal / geniş / tam), sohbet içinde arama (`Ctrl/⌘+F`), her yanıtın altındaki dal düğmesiyle sohbeti o noktadan **yeni bir sohbete çatallama**, Claude yanıt verirken yazılan mesajları **sıraya koyma**, `@https://…` ile bir sayfayı bağlama ekleme, `/context` ile bağlam penceresinin dökümü, `/usage` ile 7/30/90 günlük maliyet panosu, sohbeti **HTML rapor** olarak dışa aktarma.
+- **Sohbet araçları**: *Mesajımı iyileştir* (araçlar menüsü; hızlı model taslağı daha açık hâle getirir, Geri al ile eski metne dönülür), *Bu sohbet için talimatlar* (sohbet menüsü; yalnızca o sohbette geçerli sistem talimatı), kod bloklarını dosya olarak kaydetme, gönderilmemiş taslakların yeniden başlatmadan sonra da korunması, yanıttaki metni seçip *Alıntıla* / *Açıkla*, gönderilen mesajlarda arama (`Ctrl/⌘+R`), sohbet genişliği (normal / geniş / tam), sohbet içinde arama (`Ctrl/⌘+F`), her yanıtın altındaki dal düğmesiyle sohbeti o noktadan **yeni bir sohbete çatallama**, Claude yanıt verirken yazılan mesajları **sıraya koyma**, `@https://…` ile bir sayfayı bağlama ekleme, `/context` ile bağlam penceresinin dökümü, `/usage` ile 7/30/90 günlük maliyet panosu, sohbeti **HTML rapor** olarak dışa aktarma.
 - **Büyük loglar ve çökme dökümleri**: bağlama sığmayacak kadar büyük metin ekleri (log, crash raporu, yapıştırılan çıktı; 40 MB'a kadar) özetlenerek gönderilir: genel bakış, sayılarıyla gruplanmış farklı hatalar/uyarılar, ilk geçtikleri yerlerin çevresi ve yığın izleri, dosyanın başı ve sonu.
 - **Yerel ve diğer modeller**: Ayarlar → Hesap → *Yerel ve diğer modeller*: Ollama, LM Studio, llama.cpp, vLLM, OpenRouter gibi OpenAI uyumlu bir uç nokta; modelleri model menüsünde `oai:` önekiyle görünür (sohbetlerde).
 - **Sohbet / Kod ayrımı**: Claude Desktop'taki gibi kenar çubuğunun üstünde *Sohbet* / *Kod* geçişi; Sohbet'te yeni sohbet, sohbetler, projeler, artifact'ler ve yalnızca sohbetler; Kod'da yeni oturum, rutinler ve klasör adıyla yalnızca kod oturumları.
+- **Ayar yedeği**: Ayarlar → Hakkında → *Dosyaya kaydet* / *Geri yükle*: tercihler, stiller ve kısayollar bir JSON dosyasına yazılır. API anahtarları, sunucu adresleri, düzenleyici komutu, izin ayarları ve bu makineye özgü yollar dosyaya girmez ve geri yüklemede değişmez.
+- **Koyu mod**: Ayarlar → Görünüm → Açık / Koyu / Sistemle eşleş. Tüm sayfalar, paneller ve iletişim kutuları (diff renkleri, terminal, onay kutuları dahil) tema renklerini kullanır.
 - **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama ve komut paleti `Ctrl/⌘+K` (`>` komutlar, `@` dosyalar), sohbette bul `Ctrl/⌘+F`, gönderilen mesajlar `Ctrl/⌘+R`, son sohbetler arasında `Ctrl+Tab`, mesajlarınız arasında `Alt+↑/↓` (üst çubukta ana hat), panel sekmeleri `Alt+1…8`, çalışma alanı/terminal ``Ctrl/⌘+` ``, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`, tüm liste `Ctrl/⌘+/`. Kısayolların çoğu Ayarlar → Kısayollar'dan değiştirilebilir.
 
 ---
@@ -161,6 +174,10 @@ ClaudeRust recreates the Claude desktop experience — chats, projects, artifact
 **Git and project tools:** create pull requests from the Changes pane (Claude drafts the title and description; `gh pr create`, or the GitHub/GitLab compare page without `gh`); search inside files (text/regex) from the Files pane; `/todos` for TODO/FIXME comments; a per-turn "Edited N files" summary; *Run* on shell snippets pastes them into the terminal; notifications when long background commands finish; automatic fallback to another model when the chosen one is overloaded; quote/explain a selection; Ctrl/⌘+R searches messages you've sent; conversation width setting; customizable shortcuts (Settings → Shortcuts).
 
 **More git and session tools:** a branch menu in the Changes pane (switch, create, stash / apply), revert a single hunk, copy/save all changes as a patch and apply a pasted patch, a secret scan before committing, per-line blame and "conversations that edited this file" in the Files viewer, `/review <PR number or URL>` for GitHub pull requests, project scripts (package.json, Makefile, justfile, Cargo, Go, pytest) one click away in the Tasks pane, `/recap`, a folder menu (open in editor / terminal), continuing a Claude Code session in the system terminal, each answer's time and cost, and a conversation outline with Alt+↑/↓ between your messages.
+
+**Since then:** *Improve my message* (composer tools menu, with Undo), *Instructions for this conversation* (conversation menu), save a code block as a file, drafts that survive a restart, `/tour [area]` (a read-only guided tour of the codebase), `@folder/` mentions that include the folder's layout, History search (message, author, or code added/removed), a Code page filter with sessions grouped by folder and live *Working* / *Needs you* status, and a settings backup (Settings → About; API keys, server addresses, the editor command, permission settings and machine-specific paths are neither saved nor overwritten). Every page, pane and dialog uses the theme's colours in dark mode (Settings → Appearance).
+
+**Testing:** `cargo test -p clauderust --lib`, `cargo clippy -p clauderust --lib -- -D warnings` and `npm run lint` (ESLint). The UI is embedded in the binary, so UI changes need a `cargo build`. Debug builds can run scripts inside the window (`CLAUDERUST_EVAL_DIR`); the end-to-end checks drive the app that way under Xvfb against a mock API.
 
 **Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs.
 
