@@ -1969,6 +1969,43 @@ pub async fn commit_message_suggest(state: St<'_>, conversation_id: String) -> A
     Ok(if text.is_empty() { fallback } else { text })
 }
 
+/// Local branches of the session's repository, most recently used first.
+#[tauri::command]
+pub async fn git_branches(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let out = crate::gitops::git(&root, &["for-each-ref", "--sort=-committerdate", "--format=%(HEAD)%09%(refname:short)%09%(committerdate:unix)%09%(subject)", "refs/heads/"]).await?;
+    let list: Vec<Value> = out
+        .lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(4, '\t');
+            let head = p.next()? == "*";
+            let name = p.next()?.to_string();
+            let at = p.next().and_then(|x| x.parse::<i64>().ok()).unwrap_or(0) * 1000;
+            Some(json!({"name": name, "current": head, "at": at, "subject": p.next().unwrap_or("")}))
+        })
+        .collect();
+    Ok(json!(list))
+}
+
+/// Switch to a local branch, or create it (`create`) from the current commit.
+/// Uncommitted changes come along when git can carry them.
+#[tauri::command]
+pub async fn git_switch(app: AppHandle, state: St<'_>, conversation_id: String, name: String, create: bool) -> AppResult<String> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let name = name.trim().to_string();
+    if name.is_empty() || name.starts_with('-') {
+        return Err(AppError::msg("Give a branch name."));
+    }
+    crate::gitops::git(&root, &["check-ref-format", "--branch", &name]).await.map_err(|_| AppError::msg(format!("“{name}” isn't a valid branch name.")))?;
+    let r = if create {
+        crate::gitops::git(&root, &["switch", "-c", &name]).await
+    } else {
+        crate::gitops::git(&root, &["switch", &name]).await
+    };
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    r.map(|_| format!("On branch {name}."))
+}
+
 /// Secrets in the session's uncommitted changes (added lines only).
 #[tauri::command]
 pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Value> {

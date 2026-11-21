@@ -3,7 +3,7 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, confirmDialog, debounce, showMenu } from '../util.js';
+import { h, esc, errorToast, confirmDialog, debounce, showMenu, promptDialog, toast } from '../util.js';
 import { registerPane, refresh, context, updateTabs } from '../workspace.js';
 
 const state = new Map(); // convId -> { data, selected, diff, collapsed }
@@ -62,7 +62,7 @@ function draw(el, ctx) {
   const add = files.reduce((a, f) => a + (f.added || 0), 0);
   const del = files.reduce((a, f) => a + (f.removed || 0), 0);
   const head = h(`<div class="pane-head">
-    ${d.repo ? `<span class="branch">${icon('code', 13)} ${esc(d.branch || '')}</span>` : `<span class="muted">${t('changes_session')}</span>`}
+    ${d.repo ? `<button class="branch branch-btn" title="${esc(t('branch_menu'))}">${icon('code', 13)} ${esc(d.branch || '')} ${icon('chevDown', 12)}</button>` : `<span class="muted">${t('changes_session')}</span>`}
     <span class="diff-stat"><span class="a">+${add}</span> <span class="d">-${del}</span></span>
     <div class="grow"></div>
     <span class="hooks"></span>
@@ -70,6 +70,8 @@ function draw(el, ctx) {
     ${files.length ? `<button class="btn sm ghost" data-a="revert-all">${t('revert_all')}</button>` : ''}
   </div>`);
   head.querySelector('[data-a=refresh]').onclick = () => load(el, ctx);
+  const bb = head.querySelector('.branch-btn');
+  if (bb) bb.onclick = (ev) => branchMenu(ev.currentTarget, el, ctx);
   const ra = head.querySelector('[data-a=revert-all]');
   if (ra) ra.onclick = async () => {
     if (!(await confirmDialog(t('revert_all_confirm', { n: files.length }), { okLabel: t('revert_all') }))) return;
@@ -122,6 +124,24 @@ function draw(el, ctx) {
     if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx));
   }
   el.appendChild(list);
+}
+
+async function branchMenu(anchor, el, ctx) {
+  let list = [];
+  try { list = await call('git_branches', { conversationId: ctx.convId }); } catch (e) { errorToast(e); return; }
+  const go = async (name, create) => {
+    try { toast(await call('git_switch', { conversationId: ctx.convId, name, create })); } catch (e) { errorToast(e); }
+    load(el, ctx);
+  };
+  showMenu(anchor, [
+    { header: t('branch_switch') },
+    ...list.slice(0, 15).map((b) => ({ label: b.name, sub: b.subject, icon: 'code', checked: b.current, onClick: () => { if (!b.current) go(b.name, false); } })),
+    { sep: true },
+    { label: t('branch_new'), icon: 'plus', onClick: async () => {
+      const name = await promptDialog(t('branch_new'), 'clauderust/');
+      if (name && name.trim()) go(name.trim(), true);
+    } },
+  ], { placement: 'bottom-start', width: 300 });
 }
 
 function diffView(text, path, ctx) {

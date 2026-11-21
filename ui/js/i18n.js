@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  branch_menu: "Switch or create a branch",
+  branch_switch: "Switch branch",
+  branch_new: "New branch…",
   review_pr_focus: "Focus especially on: {focus}",
   secrets_found: "This commit looks like it contains {n} secret(s):",
   secrets_anyway: "Commit anyway (I've checked these aren't real secrets)",
@@ -521,6 +524,9 @@ const en = {
 };
 
 const tr = {
+  branch_menu: "Dal değiştir ya da oluştur",
+  branch_switch: "Dal değiştir",
+  branch_new: "Yeni dal…",
   review_pr_focus: "Özellikle şuna odaklan: {focus}",
   secrets_found: "Bu commit {n} gizli bilgi içeriyor gibi görünüyor:",
   secrets_anyway: "Yine de commit et (bunların gerçek gizli bilgi olmadığını kontrol ettim)",

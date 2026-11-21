@@ -383,6 +383,8 @@ pub fn run() {
             commands::project_file,
             commands::scan_todos,
             commands::secret_scan,
+            commands::git_branches,
+            commands::git_switch,
             commands::project_scripts,
             commands::cc_open_in_terminal,
             commands::file_blame,
