@@ -89,10 +89,40 @@ fn normalize_math_delims(md: &str) -> String {
     out
 }
 
-fn code_block_html(lang: &str, code: &str) -> String {
+/// Whether a fenced code block (its source, from the opening fence) has no
+/// closing fence: at the end of a text, that is a block still streaming in.
+/// (The parser ends such a block at the end of the text like a closed one.)
+/// Only decides how the block is highlighted, not what that gives.
+fn fence_left_open(block: &str) -> bool {
+    let opening = block.trim_start();
+    let Some(fence) = opening.chars().next() else { return false };
+    let width = opening.chars().take_while(|&c| c == fence).count();
+    let mut lines = block.trim_end_matches(['\n', '\r']).lines();
+    lines.next(); // the opening fence
+    match lines.last().map(str::trim) {
+        Some(last) => !(last.len() >= width && last.chars().all(|c| c == fence)),
+        None => true,
+    }
+}
+
+fn highlight_code(code: &str, lang: &str, open: bool) -> String {
+    #[cfg(test)]
+    if from_scratch() {
+        return highlight::from_scratch(code, lang);
+    }
+    if open {
+        highlight::highlight_growing(code, lang)
+    } else {
+        highlight::highlight(code, lang)
+    }
+}
+
+/// `open`: the block has no closing fence (yet): it is most likely still
+/// streaming, so the next render will have more code in it.
+fn code_block_html(lang: &str, code: &str, open: bool) -> String {
     let lang_clean = lang.split_whitespace().next().unwrap_or("").to_string();
     let label = highlight::language_label(&lang_clean);
-    let body = highlight::highlight(code, &lang_clean);
+    let body = highlight_code(code, &lang_clean, open);
     format!(
         "<div class=\"code-block\" data-lang=\"{l}\"><div class=\"code-header\"><span class=\"code-lang\">{label}</span><button class=\"code-copy\" type=\"button\" data-action=\"copy-code\"></button></div><pre><code class=\"hl-code\">{body}</code></pre></div>",
         l = escape_html(&lang_clean),
@@ -136,14 +166,67 @@ fn linkify(text: &str) -> Vec<Event<'static>> {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: render without the caches, highlighting each code block from
+    /// its start (as before the caches and resumable highlighting): the
+    /// reference the optimized rendering is compared with.
+    pub(crate) static FROM_SCRATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn from_scratch() -> bool {
+    FROM_SCRATCH.with(|f| f.get())
+}
+
+#[cfg(not(test))]
+fn from_scratch() -> bool {
+    false
+}
+
+fn cache_key(md: &str, opts: Opts) -> u64 {
+    hash64(md) ^ (opts.math as u64) ^ ((opts.breaks as u64) << 1)
+}
+
+/// The last `render_live` result (key and HTML). Only one: the text of a
+/// streaming reply is new on every update, but its last version is often
+/// rendered once more (the final update, then as a finished message).
+static LIVE: Lazy<Mutex<Option<(u64, String)>>> = Lazy::new(|| Mutex::new(None));
+
 /// Render markdown to HTML (cached by content hash).
 pub fn render(md: &str, opts: Opts) -> String {
-    let key = hash64(md) ^ (opts.math as u64) ^ ((opts.breaks as u64) << 1);
+    if from_scratch() {
+        return render_uncached(md, opts);
+    }
+    let key = cache_key(md, opts);
     if let Some(h) = CACHE.lock().get(key) {
         return h.clone();
     }
-    let html = render_uncached(md, opts);
+    let live = LIVE.lock().as_ref().filter(|(k, _)| *k == key).map(|(_, h)| h.clone());
+    let html = live.unwrap_or_else(|| render_uncached(md, opts));
     CACHE.lock().insert(key, html.clone());
+    html
+}
+
+/// Render text that is still streaming: the same HTML as `render`, but
+/// kept out of the cache, as the next update has a longer text. (Every
+/// update of a long answer used to add a near-copy of it to the cache,
+/// pushing out the renderings worth keeping.)
+pub fn render_live(md: &str, opts: Opts) -> String {
+    if from_scratch() {
+        return render_uncached(md, opts);
+    }
+    let key = cache_key(md, opts);
+    if let Some(h) = CACHE.lock().get(key) {
+        return h.clone();
+    }
+    if let Some((_, h)) = LIVE.lock().as_ref().filter(|(k, _)| *k == key) {
+        return h.clone();
+    }
+    let html = render_uncached(md, opts);
+    if html.len() <= CACHE_ENTRY_BYTES {
+        *LIVE.lock() = Some((key, html.clone()));
+    }
     html
 }
 
@@ -157,23 +240,23 @@ fn render_uncached(md: &str, opts: Opts) -> String {
     if opts.math {
         options |= Options::ENABLE_MATH;
     }
-    let parser = Parser::new_ext(&src, options);
+    let parser = Parser::new_ext(&src, options).into_offset_iter();
 
     let mut events: Vec<Event> = Vec::new();
-    let mut code: Option<(String, String)> = None; // (lang, buffer)
+    let mut code: Option<(String, String, bool)> = None; // (lang, buffer, open)
     let mut link_depth = 0usize;
     let mut skip_link_end: Vec<bool> = vec![];
 
-    for ev in parser {
-        if let Some((_, buf)) = code.as_mut() {
+    for (ev, range) in parser {
+        if let Some((_, buf, _)) = code.as_mut() {
             match ev {
                 Event::Text(t) => {
                     buf.push_str(&t);
                     continue;
                 }
                 Event::End(TagEnd::CodeBlock) => {
-                    let (lang, buf) = code.take().unwrap();
-                    events.push(Event::Html(CowStr::from(code_block_html(&lang, &buf))));
+                    let (lang, buf, open) = code.take().unwrap();
+                    events.push(Event::Html(CowStr::from(code_block_html(&lang, &buf, open))));
                     continue;
                 }
                 _ => continue,
@@ -181,11 +264,11 @@ fn render_uncached(md: &str, opts: Opts) -> String {
         }
         match ev {
             Event::Start(Tag::CodeBlock(kind)) => {
-                let lang = match kind {
-                    CodeBlockKind::Fenced(l) => l.to_string(),
-                    CodeBlockKind::Indented => String::new(),
+                let (lang, open) = match kind {
+                    CodeBlockKind::Fenced(l) => (l.to_string(), range.end >= src.len() && fence_left_open(&src[range])),
+                    CodeBlockKind::Indented => (String::new(), false),
                 };
-                code = Some((lang, String::new()));
+                code = Some((lang, String::new(), open));
             }
             Event::Html(s) | Event::InlineHtml(s) => {
                 events.push(Event::Text(s));
@@ -271,8 +354,8 @@ fn render_uncached(md: &str, opts: Opts) -> String {
         }
     }
     // Unterminated code block (still streaming)
-    if let Some((lang, buf)) = code.take() {
-        events.push(Event::Html(CowStr::from(code_block_html(&lang, &buf))));
+    if let Some((lang, buf, _)) = code.take() {
+        events.push(Event::Html(CowStr::from(code_block_html(&lang, &buf, true))));
     }
     // Second pass: merge adjacent text events and linkify bare URLs.
     let mut final_events: Vec<Event> = Vec::with_capacity(events.len());
@@ -371,5 +454,40 @@ mod tests {
         assert!(render(&huge, O).len() > CACHE_ENTRY_BYTES);
         let key = hash64(&huge) ^ (O.math as u64) ^ ((O.breaks as u64) << 1);
         assert!(CACHE.lock().get(key).is_none());
+    }
+
+    #[test]
+    fn open_fences() {
+        assert!(fence_left_open("```rust\nfn a() {}\n"));
+        assert!(fence_left_open("```rust"));
+        assert!(fence_left_open("````\nx\n```\n"), "a shorter fence doesn't close it");
+        assert!(!fence_left_open("```rust\nfn a() {}\n```\n"));
+        assert!(!fence_left_open("~~~\nx\n~~~~"));
+        assert!(!fence_left_open("  ```\nx\n  ```  \r\n"));
+        // a code block streaming in is highlighted from where it got, and
+        // its partial versions stay out of the highlight cache
+        let code = format!("let x = {};\n", crate::util::new_id().len());
+        let h = render(&format!("Hi\n\n```rust\n{code}let y"), O);
+        assert!(h.contains("hl-"), "{h}");
+        assert!(!highlight::is_cached(&format!("{code}let y"), "rust"));
+        let h2 = render(&format!("Hi\n\n```rust\n{code}let y = 2;\n```\n"), O);
+        assert!(h2.contains("hl-") && highlight::is_cached(&format!("{code}let y = 2;\n"), "rust"));
+    }
+
+    #[test]
+    fn streaming_text_renders_the_same_and_stays_out_of_the_cache() {
+        let full = "Intro *text*\n\n```rust\nfn a() {\n    /* long\n comment */ 1\n}\n```\n\n- item\n- more\n\n```py\nx = '''a\nb'''\n";
+        let opts = Opts { math: true, breaks: true };
+        let mut end = 0;
+        while end < full.len() {
+            end = (end + 5).min(full.len());
+            let md = format!("{}<!-- {} -->", &full[..end], crate::util::new_id());
+            let live = render_live(&md, opts);
+            assert!(CACHE.lock().get(cache_key(&md, opts)).is_none(), "a streaming text isn't cached");
+            assert_eq!(live, render_uncached(&md, opts));
+            // its last version, rendered again once finished
+            assert_eq!(render(&md, opts), live);
+            assert!(CACHE.lock().get(cache_key(&md, opts)).is_some());
+        }
     }
 }

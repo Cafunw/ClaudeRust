@@ -560,27 +560,82 @@ struct TurnRenderer {
     tracker: ArtifactTracker,
     mcp_names: HashMap<String, (String, String)>,
     math: bool,
+    /// `prefix` rendered once: the turn is rendered again on every update of
+    /// the reply (every 45 ms while it streams) and only the reply changes.
+    done: parking_lot::Mutex<Option<render::TurnPrefix>>,
 }
 
 impl TurnRenderer {
-    fn render(&self, current: &Message, live: &LiveRun) -> Value {
-        let mut msgs: Vec<&Message> = self.prefix.iter().collect();
-        msgs.push(current);
+    fn new(first_id: Option<String>, siblings: Value, prefix: Vec<Message>, tracker: ArtifactTracker, mcp_names: HashMap<String, (String, String)>, math: bool) -> Self {
+        TurnRenderer { first_id, siblings, prefix, tracker, mcp_names, math, done: Default::default() }
+    }
+
+    /// The turn with `current` (the reply) as its last message. Hand it to
+    /// `give_back` once sent: it holds the cached rendering of the prefix.
+    fn render(&self, current: &Message, live_tools: &HashMap<String, String>, streaming_tools: &HashSet<String>) -> Value {
         let ctx = RenderCtx {
             math: self.math,
-            live_tools: &live.live_tools,
-            streaming_tools: &live.streaming_tools,
+            live_tools,
+            streaming_tools,
             mcp_names: &self.mcp_names,
             streaming_msg: Some(&current.id),
         };
-        let mut tracker = self.tracker.clone();
-        let mut t = render::assistant_turn(&msgs, &ctx, &mut tracker);
+        let mut t = if current.role == "assistant" {
+            let mut done = self.done.lock();
+            let prefix = match done.take() {
+                Some(p) if p.fits(&self.prefix, &ctx) => done.insert(p),
+                _ => done.insert(render::TurnPrefix::new(&self.prefix, &ctx, &self.tracker)),
+            };
+            prefix.render(&self.prefix, current, &ctx)
+        } else {
+            let mut msgs: Vec<&Message> = self.prefix.iter().collect();
+            msgs.push(current);
+            let mut tracker = self.tracker.clone();
+            render::assistant_turn(&msgs, &ctx, &mut tracker)
+        };
         if let Some(f) = &self.first_id {
             t["id"] = json!(f);
         }
         t["siblings"] = self.siblings.clone();
         t
     }
+
+    fn give_back(&self, turn: Value) {
+        let mut done = self.done.lock();
+        if let Some(p) = done.as_mut() {
+            if !p.give_back(turn) {
+                *done = None;
+            }
+        }
+    }
+
+    /// Render the turn with `current` as its last message and send it.
+    fn emit(&self, app: &AppHandle, conv_id: &str, current: &Message, live: &LiveRun) {
+        let t = self.render(current, &live.live_tools, &live.streaming_tools);
+        emit_turn(app, conv_id, &t);
+        self.give_back(t);
+    }
+}
+
+/// One update of the reply streaming in `cur`: its content so far goes to
+/// `st.live` (for a view opened meanwhile) and the turn to `emit`.
+fn live_tick(st: &AppState, conv_id: &str, renderer: &TurnRenderer, cur: &mut Message, base: &[Value], acc: &Accumulator, emit: impl FnOnce(&Value)) {
+    let (c, streaming) = live_content(base, acc);
+    cur.content = c;
+    let live_tools = st.live.lock().get(conv_id).map(|l| l.live_tools.clone()).unwrap_or_default();
+    let t = renderer.render(cur, &live_tools, &streaming);
+    {
+        // moved, not copied: the next update makes the content anew
+        let mut lives = st.live.lock();
+        let l = lives.entry(conv_id.to_string()).or_default();
+        if l.msg_id != cur.id {
+            l.msg_id = cur.id.clone();
+        }
+        l.content = std::mem::take(&mut cur.content);
+        l.streaming_tools = streaming;
+    }
+    emit(&t);
+    renderer.give_back(t);
 }
 
 fn live_content(base: &[Value], acc: &Accumulator) -> (Value, HashSet<String>) {
@@ -943,33 +998,26 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
         let first_id = prefix.iter().find(|m| m.role == "assistant").map(|m| m.id.clone());
         let nodes = st.db.tree_nodes(conv_id)?;
         let siblings = view::siblings_of(&nodes, first_id.as_deref().unwrap_or(&am_id));
-        let renderer = TurnRenderer {
-            first_id: first_id.clone(),
-            siblings,
-            tracker: view::tracker_for(&path[..turn_start]),
-            prefix,
-            mcp_names: rc.mcp_names.clone(),
-            math: settings.latex_enabled,
-        };
+        let renderer = TurnRenderer::new(first_id.clone(), siblings, prefix, view::tracker_for(&path[..turn_start]), rc.mcp_names.clone(), settings.latex_enabled);
         let mut live = LiveRun {
             msg_id: am_id.clone(),
             content: json!([]),
             ..Default::default()
         };
         st.live.lock().insert(conv_id.to_string(), live.clone());
-        emit_turn(app, conv_id, &renderer.render(&am, &live));
+        renderer.emit(app, conv_id, &am, &live);
 
         if steps > max_steps {
             am.meta["error"] = json!({"message": "Stopped after too many tool calls in one response.", "kind": "error"});
             st.db.msg_update(&am_id, &am.content, &am.meta)?;
-            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            renderer.emit(app, conv_id, &am, &live);
             return Ok(());
         }
         let budget = turn_budget(&conv, &settings);
         if budget > 0.0 && turn_cost >= budget {
             am.meta["budget_stop"] = json!({"budget": budget, "spent": turn_cost});
             st.db.msg_update(&am_id, &am.content, &am.meta)?;
-            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            renderer.emit(app, conv_id, &am, &live);
             notify_attention(app, st, conv_id, &json!({"kind": "budget", "budget": budget}));
             return Ok(());
         }
@@ -979,7 +1027,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             Err(e) => {
                 am.meta["error"] = serde_json::to_value(&e)?;
                 st.db.msg_update(&am_id, &am.content, &am.meta)?;
-                emit_turn(app, conv_id, &renderer.render(&am, &live));
+                renderer.emit(app, conv_id, &am, &live);
                 return Err(e);
             }
         };
@@ -999,24 +1047,14 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             let st2 = st.clone();
             let app2 = app.clone();
-            let am_ref = am.clone();
+            // the reply as rendered: `am` with the content streamed so far
+            let mut cur = am.clone();
             let mut on_event = |acc: &Accumulator, _changed: Option<usize>| {
                 if last_emit.elapsed() < Duration::from_millis(45) {
                     return;
                 }
                 last_emit = Instant::now();
-                let (c, streaming) = live_content(&base, acc);
-                let mut cur = am_ref.clone();
-                cur.content = c.clone();
-                let lr = {
-                    let mut lives = st2.live.lock();
-                    let l = lives.entry(conv_id.to_string()).or_default();
-                    l.msg_id = cur.id.clone();
-                    l.content = c;
-                    l.streaming_tools = streaming;
-                    l.clone()
-                };
-                emit_turn(&app2, conv_id, &renderer.render(&cur, &lr));
+                live_tick(&st2, conv_id, &renderer, &mut cur, &base, acc, |t| emit_turn(&app2, conv_id, t));
             };
             let res = stream_with_recovery(st, &client, &mut body, &mut betas, cancel, &mut on_event).await;
             match res {
@@ -1114,7 +1152,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
         live.content = am.content.clone();
         live.streaming_tools.clear();
         st.live.lock().insert(conv_id.to_string(), live.clone());
-        emit_turn(app, conv_id, &renderer.render(&am, &live));
+        renderer.emit(app, conv_id, &am, &live);
 
         if cancelled {
             return Ok(());
@@ -1170,7 +1208,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
                 live.live_tools.insert(t["id"].as_str().unwrap_or("").to_string(), "running".into());
             }
             st.live.lock().insert(conv_id.to_string(), live.clone());
-            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            renderer.emit(app, conv_id, &am, &live);
             let futs = tasks.iter().map(|t| {
                 let tid = t["id"].as_str().unwrap_or("").to_string();
                 let rc = &rc;
@@ -1213,7 +1251,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             }
             live.live_tools.insert(id.clone(), "running".into());
             st.live.lock().insert(conv_id.to_string(), live.clone());
-            emit_turn(app, conv_id, &renderer.render(&am, &live));
+            renderer.emit(app, conv_id, &am, &live);
             let (blocks, is_error) = execute_tool(app, st, conv_id, tu, &rc, &mut live, &renderer, &am, cancel).await;
             live.live_tools.remove(&id);
             let mut r = json!({"type": "tool_result", "tool_use_id": id, "content": blocks});
@@ -1240,33 +1278,23 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
         st.db.conv_set_leaf(conv_id, Some(&tr.id))?;
         // render with results attached
         {
-            let mut r2 = TurnRenderer {
-                first_id: renderer.first_id.clone(),
-                siblings: renderer.siblings.clone(),
-                prefix: renderer.prefix.clone(),
-                tracker: renderer.tracker.clone(),
-                mcp_names: renderer.mcp_names.clone(),
-                math: renderer.math,
-            };
-            r2.prefix.push(am.clone());
             live.live_tools.clear();
-            let mut fake = tr.clone();
-            fake.role = "user".into();
-            let mut msgs: Vec<&Message> = r2.prefix.iter().collect();
-            msgs.push(&fake);
+            let mut msgs: Vec<&Message> = renderer.prefix.iter().collect();
+            msgs.push(&am);
+            msgs.push(&tr);
             let ctx = RenderCtx {
-                math: r2.math,
+                math: renderer.math,
                 live_tools: &live.live_tools,
                 streaming_tools: &live.streaming_tools,
-                mcp_names: &r2.mcp_names,
+                mcp_names: &renderer.mcp_names,
                 streaming_msg: None,
             };
-            let mut tracker = r2.tracker.clone();
+            let mut tracker = renderer.tracker.clone();
             let mut t = render::assistant_turn(&msgs, &ctx, &mut tracker);
-            if let Some(f) = &r2.first_id {
+            if let Some(f) = &renderer.first_id {
                 t["id"] = json!(f);
             }
-            t["siblings"] = r2.siblings.clone();
+            t["siblings"] = renderer.siblings.clone();
             t["streaming"] = json!(true);
             emit_turn(app, conv_id, &t);
         }
@@ -1297,21 +1325,14 @@ async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: Str
     st.db.msg_insert(&am)?;
     st.db.conv_set_leaf(conv_id, Some(&am_id))?;
     let nodes = st.db.tree_nodes(conv_id)?;
-    let renderer = TurnRenderer {
-        first_id: None,
-        siblings: view::siblings_of(&nodes, &am_id),
-        tracker: view::tracker_for(&path),
-        prefix: vec![],
-        mcp_names: HashMap::new(),
-        math: settings.latex_enabled,
-    };
+    let renderer = TurnRenderer::new(None, view::siblings_of(&nodes, &am_id), vec![], view::tracker_for(&path), HashMap::new(), settings.latex_enabled);
     let mut live = LiveRun { msg_id: am_id.clone(), content: json!([]), ..Default::default() };
     st.live.lock().insert(conv_id.to_string(), live.clone());
-    emit_turn(app, conv_id, &renderer.render(&am, &live));
+    renderer.emit(app, conv_id, &am, &live);
     if conv.kind == "code" {
         am.meta["error"] = json!({"message": "Models from an OpenAI-compatible endpoint can chat but can't run the coding agent. Pick a Claude model for code sessions.", "kind": "error"});
         st.db.msg_update(&am_id, &am.content, &am.meta)?;
-        emit_turn(app, conv_id, &renderer.render(&am, &live));
+        renderer.emit(app, conv_id, &am, &live);
         return Ok(());
     }
     let messages = crate::oai::to_messages(&rc.system, &path);
@@ -1324,13 +1345,13 @@ async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: Str
         last = Instant::now();
         let mut cur = am.clone();
         cur.content = json!([{"type": "text", "text": text}]);
-        let mut l = live.clone();
-        l.content = cur.content.clone();
+        let t = renderer.render(&cur, &live.live_tools, &live.streaming_tools);
         // kept current for a view opened mid-answer (it reads `live`)
         if let Some(x) = st.live.lock().get_mut(conv_id) {
-            x.content = l.content.clone();
+            x.content = std::mem::take(&mut cur.content);
         }
-        emit_turn(app, conv_id, &renderer.render(&cur, &l));
+        emit_turn(app, conv_id, &t);
+        renderer.give_back(t);
     })
     .await;
     am.meta["duration_ms"] = json!(started.elapsed().as_millis() as u64);
@@ -1355,7 +1376,7 @@ async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: Str
     save_artifacts(st, conv_id, &am_id, &text);
     live.content = am.content.clone();
     st.live.lock().insert(conv_id.to_string(), live.clone());
-    emit_turn(app, conv_id, &renderer.render(&am, &live));
+    renderer.emit(app, conv_id, &am, &live);
     match err {
         Some(e) => Err(e),
         None => Ok(()),
@@ -1419,7 +1440,7 @@ async fn ask_permission(
     st.pending_perms.lock().insert(req_id.clone(), ev.clone());
     live.live_tools.insert(tool_use_id.to_string(), "awaiting_permission".into());
     st.live.lock().insert(conv_id.to_string(), live.clone());
-    emit_turn(app, conv_id, &renderer.render(am, live));
+    renderer.emit(app, conv_id, am, live);
     let _ = app.emit("permission-request", &ev);
     notify_attention(app, st, conv_id, &ev);
     let reply = tokio::select! {
@@ -1431,7 +1452,7 @@ async fn ask_permission(
     let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
     live.live_tools.insert(tool_use_id.to_string(), "running".into());
     st.live.lock().insert(conv_id.to_string(), live.clone());
-    emit_turn(app, conv_id, &renderer.render(am, live));
+    renderer.emit(app, conv_id, am, live);
     reply
 }
 
@@ -1932,5 +1953,141 @@ mod tests {
         assert_eq!(turn_budget(&c, &s), 0.0);
         c.options = json!({"budget_usd": null});
         assert_eq!(turn_budget(&c, &s), 2.0);
+    }
+
+    /// Each streaming update renders the turn byte-for-byte as before (when
+    /// the whole turn was rendered from its start, with the old renderer)
+    /// and leaves the same live state for a view opened meanwhile.
+    #[test]
+    fn live_updates_render_as_before() {
+        use crate::render::fixture;
+        let st = test_state();
+        let conv_id = "c";
+        let prefix = fixture::turn_prefix(2);
+        let mut mcp_names = HashMap::new();
+        mcp_names.insert("mcp__github__get_issue".to_string(), ("github".to_string(), "get_issue".to_string()));
+        let siblings = json!({"index": 1, "count": 2, "ids": ["x", "a0"]});
+        let mut tracker = ArtifactTracker::default();
+        tracker.bump("report");
+        let renderer = TurnRenderer::new(Some("a0".into()), siblings.clone(), prefix.clone(), tracker.clone(), mcp_names.clone(), true);
+        let am = fixture::msg("am", "assistant", json!([]), json!({"model": "claude-opus-5-5", "fingerprint": "fp"}));
+        // what the content of an earlier pause_turn part looks like
+        let paused = vec![json!({"type": "text", "text": "Searching first. "}), json!({"type": "server_tool_use", "id": "s9", "name": "web_search", "input": {"query": "q"}})];
+        for base in [vec![], paused] {
+            st.live.lock().insert(conv_id.to_string(), LiveRun { msg_id: "am".into(), content: json!([]), ..Default::default() });
+            let mut cur = am.clone();
+            let mut acc = Accumulator::default();
+            for (i, ev) in fixture::reply_events(8, 0).into_iter().enumerate() {
+                acc.apply(&ev).unwrap();
+                // every block boundary, and enough deltas (the old renderer is slow)
+                if ev["type"] == "content_block_delta" && i % 5 != 0 {
+                    continue;
+                }
+                // before: the content cloned into a copy of the message and
+                // into `st.live`, and all of the turn rendered
+                let (c, streaming) = live_content(&base, &acc);
+                let mut old = am.clone();
+                old.content = c.clone();
+                let lr = LiveRun { msg_id: "am".into(), content: c, live_tools: HashMap::new(), streaming_tools: streaming };
+                let mut msgs: Vec<&Message> = prefix.iter().collect();
+                msgs.push(&old);
+                let ctx = RenderCtx { math: true, live_tools: &lr.live_tools, streaming_tools: &lr.streaming_tools, mcp_names: &mcp_names, streaming_msg: Some(&old.id) };
+                let mut t = render::reference::assistant_turn(&msgs, &ctx, &mut tracker.clone());
+                t["id"] = json!("a0");
+                t["siblings"] = siblings.clone();
+                let want = serde_json::to_string(&json!({"conversation_id": conv_id, "turn": t})).unwrap();
+                let mut got = String::new();
+                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, |t| got = serde_json::to_string(&json!({"conversation_id": conv_id, "turn": t})).unwrap());
+                assert_eq!(got, want, "after {ev}");
+                let lives = st.live.lock();
+                let l = &lives[conv_id];
+                assert_eq!((&l.msg_id, &l.content, &l.streaming_tools, &l.live_tools), (&lr.msg_id, &lr.content, &lr.streaming_tools, &lr.live_tools));
+            }
+            // then the final update and the tool's live states
+            let mut done = am.clone();
+            done.content = Value::Array(acc.content());
+            for tools in [vec![], vec![("t_write", "awaiting_permission")], vec![("t_write", "running")]] {
+                let live = LiveRun { live_tools: tools.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(), ..Default::default() };
+                let mut msgs: Vec<&Message> = prefix.iter().collect();
+                msgs.push(&done);
+                let ctx = RenderCtx { math: true, live_tools: &live.live_tools, streaming_tools: &live.streaming_tools, mcp_names: &mcp_names, streaming_msg: Some(&done.id) };
+                let mut want = render::reference::assistant_turn(&msgs, &ctx, &mut tracker.clone());
+                want["id"] = json!("a0");
+                want["siblings"] = siblings.clone();
+                let got = renderer.render(&done, &live.live_tools, &live.streaming_tools);
+                assert_eq!(serde_json::to_string(&got).unwrap(), serde_json::to_string(&want).unwrap());
+                renderer.give_back(got);
+            }
+        }
+    }
+
+    /// Time (and, under DHAT, count the allocations of) the streaming
+    /// updates of a reply at the end of a long agentic turn: 40 tool calls
+    /// before it, then thinking, a long text with code blocks and a Write
+    /// call whose input streams. `BENCH_TICKS=0` runs the setup only.
+    #[test]
+    #[ignore]
+    fn bench_live_ticks() {
+        use crate::render::fixture;
+        let st = test_state();
+        let conv_id = "c";
+        let rounds: usize = std::env::var("BENCH_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+        let max_ticks: usize = std::env::var("BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let prefix = fixture::turn_prefix(rounds);
+        let mut mcp_names = HashMap::new();
+        mcp_names.insert("mcp__github__get_issue".to_string(), ("github".to_string(), "get_issue".to_string()));
+        let renderer = TurnRenderer::new(Some("a0".into()), json!({"index": 0, "count": 1, "ids": ["a0"]}), prefix, ArtifactTracker::default(), mcp_names, true);
+        let mut cur = fixture::msg("am", "assistant", json!([]), json!({"model": "claude-opus-5-5", "fingerprint": "fp"}));
+        let live = LiveRun { msg_id: "am".into(), content: json!([]), ..Default::default() };
+        st.live.lock().insert(conv_id.to_string(), live.clone());
+        let base: Vec<Value> = vec![];
+        // what happened earlier in the app: syntaxes loaded (each compiles
+        // its patterns on first use), caches filled by the earlier steps;
+        // a reply of the same shape streamed once, with other text
+        let mut warm = Accumulator::default();
+        for ev in fixture::reply_events(40, 1) {
+            warm.apply(&ev).unwrap();
+            live_tick(&st, conv_id, &renderer, &mut cur, &base, &warm, |_| {});
+        }
+        let events = fixture::reply_events(40, 0);
+        let mut acc = Accumulator::default();
+        // per phase of the reply (thinking, text, tool input): ticks, render ns, emit ns, bytes
+        let mut phases = [(0u64, 0u128, 0u128, 0usize); 3];
+        let mut ticks = 0usize;
+        for (i, ev) in events.iter().enumerate() {
+            acc.apply(ev).unwrap();
+            // one update per two events: about what 45 ms of streaming holds
+            if i % 2 == 1 && ticks < max_ticks {
+                ticks += 1;
+                let phase = acc.blocks.len().clamp(1, 3) - 1;
+                let (mut emit_ns, mut len) = (0u128, 0usize);
+                let t0 = Instant::now();
+                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, |turn| {
+                    // what emit_turn does with it (to_value, then the event's JSON)
+                    let e0 = Instant::now();
+                    let payload = json!({"conversation_id": conv_id, "turn": turn});
+                    len = serde_json::to_string(&payload).unwrap().len();
+                    emit_ns = e0.elapsed().as_nanos();
+                });
+                let total = t0.elapsed().as_nanos();
+                let p = &mut phases[phase];
+                p.0 += 1;
+                p.1 += total - emit_ns;
+                p.2 += emit_ns;
+                p.3 += len;
+            }
+        }
+        let all = phases.iter().fold((0u64, 0u128, 0u128, 0usize), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2, a.3 + p.3));
+        for (name, p) in ["thinking", "text", "tool input", "all"].iter().zip(phases.iter().chain([&all])) {
+            if p.0 > 0 {
+                eprintln!(
+                    "{rounds} rounds, {name}: {} ticks, render {:.1} us/tick, emit {:.1} us/tick, {} bytes/tick",
+                    p.0,
+                    p.1 as f64 / p.0 as f64 / 1000.0,
+                    p.2 as f64 / p.0 as f64 / 1000.0,
+                    p.3 / p.0 as usize
+                );
+            }
+        }
     }
 }
