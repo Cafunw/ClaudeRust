@@ -239,6 +239,73 @@ pub async fn revert_hunk(session: &CodeSession, path: &str, index: usize, expect
     r.map(|_| ())
 }
 
+/// `git diff HEAD <args>` including files git doesn't track yet. They're
+/// marked intent-to-add only for the diff and unmarked again afterwards, so
+/// nothing is left behind (leftover marks make `git stash` refuse to work).
+pub async fn diff_including_new(root: &Path, args: &[&str]) -> AppResult<String> {
+    let untracked: Vec<String> = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])
+        .await
+        .unwrap_or_default()
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let run_on = |base: &[&str], files: &[String]| {
+        let mut a: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        a.push("--".into());
+        a.extend(files.iter().cloned());
+        a
+    };
+    for chunk in untracked.chunks(200) {
+        let a = run_on(&["--literal-pathspecs", "add", "--intent-to-add"], chunk);
+        let _ = git(root, &a.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    }
+    let mut full = vec!["diff", "HEAD"];
+    full.extend_from_slice(args);
+    let diff = git(root, &full).await;
+    for chunk in untracked.chunks(200) {
+        let a = run_on(&["--literal-pathspecs", "reset", "-q"], chunk);
+        let _ = git(root, &a.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    }
+    diff
+}
+
+/// Files only marked intent-to-add (left behind by older versions), unmarked.
+pub async fn clear_intent_to_add(root: &Path) {
+    let st = git(root, &["status", "--porcelain", "-z"]).await.unwrap_or_default();
+    let ita: Vec<&str> = st.split('\0').filter(|e| e.starts_with(" A ")).map(|e| &e[3..]).collect();
+    if ita.is_empty() {
+        return;
+    }
+    let mut a = vec!["--literal-pathspecs", "reset", "-q", "--"];
+    a.extend(ita);
+    let _ = git(root, &a).await;
+}
+
+/// Apply a unified diff to the working tree of `root`: checked first, so a
+/// patch that doesn't fit changes nothing. Returns the files it touches.
+pub async fn apply_patch(root: &Path, patch: &str) -> AppResult<Vec<String>> {
+    let mut text = patch.replace("\r\n", "\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.lines().any(|l| l.starts_with("@@") || l.starts_with("GIT binary patch") || l.starts_with("rename from")) {
+        return Err(AppError::msg("That doesn't look like a patch (no @@ hunks)."));
+    }
+    let tmp = std::env::temp_dir().join(format!("clauderust-apply-{}.patch", crate::util::new_id()));
+    std::fs::write(&tmp, &text)?;
+    let p = tmp.to_string_lossy().to_string();
+    let r = async {
+        let files = git(root, &["apply", "--numstat", &p]).await.map_err(|e| AppError::msg(format!("Not a valid patch: {e}")))?;
+        git(root, &["apply", "--check", "--whitespace=nowarn", &p]).await.map_err(|e| AppError::msg(format!("The patch doesn't apply here: {e}")))?;
+        git(root, &["apply", "--whitespace=nowarn", &p]).await?;
+        Ok(files.lines().filter_map(|l| l.splitn(3, '\t').nth(2).map(str::to_string)).collect())
+    }
+    .await;
+    let _ = std::fs::remove_file(&tmp);
+    r
+}
+
 /// Put one file back to the baseline (deleting it if it didn't exist).
 pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
     if let Some(top) = repo_root(&session.root).await {
@@ -343,6 +410,54 @@ mod tests {
         let now = std::fs::read_to_string(d.join("f.txt")).unwrap();
         assert!(now.contains("LINE TWO") && now.contains("line 28\n") && !now.contains("LINE 28"), "{now}");
         assert!(revert_hunk(&s, "f.txt", 1, &second).await.is_err(), "that hunk is gone");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn new_files_in_diffs_leave_no_marks() {
+        let d = std::env::temp_dir().join(format!("cr-ita-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&d).output().unwrap();
+        run(&["init", "-q"]);
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+        std::fs::write(d.join("a.txt"), "A\n").unwrap();
+        std::fs::write(d.join("new file.txt"), "n\n").unwrap();
+        let diff = diff_including_new(&d, &["--no-color"]).await.unwrap();
+        assert!(diff.contains("+++ b/new file.txt") && diff.contains("+A"));
+        let st = String::from_utf8_lossy(&run(&["status", "--porcelain"]).stdout).to_string();
+        assert!(st.contains("?? \"new file.txt\"") || st.contains("?? new file.txt"), "back to untracked: {st}");
+        // stash works afterwards
+        assert!(run(&["stash", "push", "--include-untracked", "-m", "x"]).status.success());
+        // leftovers from older versions are cleared
+        run(&["stash", "pop"]);
+        run(&["add", "-N", "new file.txt"]);
+        clear_intent_to_add(&d).await;
+        let st = String::from_utf8_lossy(&run(&["status", "--porcelain"]).stdout).to_string();
+        assert!(!st.contains(" A "), "{st}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn applying_patches() {
+        let d = std::env::temp_dir().join(format!("cr-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&d).output().unwrap().status.success());
+        run(&["init", "-q"]);
+        std::fs::write(d.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+        let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hi\n";
+        let files = apply_patch(&d, patch).await.unwrap();
+        assert_eq!(files, vec!["a.txt", "new.txt"]);
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "one\nTWO\nthree\n");
+        assert!(d.join("new.txt").exists());
+        // applying it again doesn't fit any more, and changes nothing
+        assert!(apply_patch(&d, patch).await.unwrap_err().to_string().contains("doesn't apply"));
+        assert!(apply_patch(&d, "just some text").await.is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

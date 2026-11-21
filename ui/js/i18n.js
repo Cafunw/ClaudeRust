@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  changes_apply_patch: "Apply a patch…",
+  changes_apply: "Apply",
+  changes_applied: "Patch applied to {n} files.",
   changes_more: "More",
   changes_copy_patch: "Copy all changes as a patch",
   changes_save_patch: "Save as a .patch file…",
@@ -541,6 +544,9 @@ const en = {
 };
 
 const tr = {
+  changes_apply_patch: "Yama uygula…",
+  changes_apply: "Uygula",
+  changes_applied: "Yama {n} dosyaya uygulandı.",
   changes_more: "Diğer",
   changes_copy_patch: "Tüm değişiklikleri yama olarak kopyala",
   changes_save_patch: ".patch dosyası olarak kaydet…",

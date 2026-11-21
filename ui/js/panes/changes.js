@@ -67,7 +67,7 @@ function draw(el, ctx) {
     <div class="grow"></div>
     <span class="hooks"></span>
     <button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button>
-    ${files.length ? `<button class="icon-btn" data-a="more" title="${esc(t('changes_more'))}">${icon('more', 14)}</button>` : ''}
+    ${files.length || d.repo ? `<button class="icon-btn" data-a="more" title="${esc(t('changes_more'))}">${icon('more', 14)}</button>` : ''}
   </div>`);
   head.querySelector('[data-a=refresh]').onclick = () => load(el, ctx);
   const bb = head.querySelector('.branch-btn');
@@ -83,12 +83,13 @@ function draw(el, ctx) {
       { label: t('changes_copy_patch'), icon: 'copy', onClick: async () => {
         try { const { copyText } = await import('../parts.js'); await copyText(await call('changes_patch', { conversationId: ctx.convId })); toast(t('copied')); } catch (e) { errorToast(e); }
       } },
+      { label: t('changes_apply_patch'), icon: 'plus', onClick: () => applyPatch(el, ctx) },
       { label: t('changes_save_patch'), icon: 'download', onClick: async () => {
         try { await call('save_text_file', { name: `${(d.branch || 'changes').replace(/[\\/:*?"<>|]+/g, '-')}.patch`, content: await call('changes_patch', { conversationId: ctx.convId }) }); } catch (e) { errorToast(e); }
       } },
       { sep: true },
     ] : []),
-    { label: t('revert_all'), icon: 'retry', danger: true, onClick: revertAll },
+    ...(files.length ? [{ label: t('revert_all'), icon: 'retry', danger: true, onClick: revertAll }] : []),
   ], { placement: 'bottom-end', width: 260 });
   for (const fn of headerHooks) fn(head.querySelector('.hooks'), ctx, d);
   el.appendChild(head);
@@ -136,6 +137,16 @@ function draw(el, ctx) {
     if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx, d.repo && f.status !== '?' && f.status !== 'A' ? () => load(el, ctx) : null));
   }
   el.appendChild(list);
+}
+
+async function applyPatch(el, ctx) {
+  const text = await promptDialog(t('changes_apply_patch'), '', { multiline: true, placeholder: 'diff --git a/… b/…\n--- a/…\n+++ b/…\n@@ … @@', okLabel: t('changes_apply') });
+  if (!text || !text.trim()) return;
+  try {
+    const files = await call('apply_patch', { conversationId: ctx.convId, patch: text });
+    toast(t('changes_applied', { n: files.length }));
+  } catch (e) { errorToast(e); }
+  load(el, ctx);
 }
 
 async function branchMenu(anchor, el, ctx) {

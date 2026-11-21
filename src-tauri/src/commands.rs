@@ -1976,8 +1976,7 @@ pub async fn commit_message_suggest(state: St<'_>, conversation_id: String) -> A
     let st = state.inner().clone();
     let cwd = conv_cwd(&st, &conversation_id)?;
     let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
-    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
-    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--stat", "--patch"]).await.unwrap_or_default();
+    let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff", "--stat", "--patch"]).await.unwrap_or_default();
     if diff.trim().is_empty() {
         return Err(AppError::msg("There are no changes to commit."));
     }
@@ -2025,12 +2024,20 @@ pub async fn git_branches(state: St<'_>, conversation_id: String) -> AppResult<V
     Ok(json!(list))
 }
 
+/// Apply a pasted patch to the session's repository.
+#[tauri::command]
+pub async fn apply_patch(app: AppHandle, state: St<'_>, conversation_id: String, patch: String) -> AppResult<Vec<String>> {
+    let root = session_repo(&state, &conversation_id).await?;
+    let r = crate::gitops::apply_patch(&root, &patch).await;
+    let _ = app.emit("files-changed", json!({"conversation_id": conversation_id}));
+    r
+}
+
 /// All uncommitted changes as one patch (new files included), for sharing.
 #[tauri::command]
 pub async fn changes_patch(state: St<'_>, conversation_id: String) -> AppResult<String> {
     let root = session_repo(&state, &conversation_id).await?;
-    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
-    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--binary"]).await?;
+    let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff", "--binary"]).await?;
     if diff.trim().is_empty() {
         return Err(AppError::msg("There are no changes."));
     }
@@ -2042,6 +2049,7 @@ pub async fn changes_patch(state: St<'_>, conversation_id: String) -> AppResult<
 #[tauri::command]
 pub async fn git_stash(app: AppHandle, state: St<'_>, conversation_id: String, pop: bool) -> AppResult<String> {
     let root = session_repo(&state, &conversation_id).await?;
+    crate::gitops::clear_intent_to_add(&root).await;
     let r = if pop {
         crate::gitops::git(&root, &["stash", "pop"]).await.map(|_| "Applied the latest stash.".to_string())
     } else {
@@ -2084,9 +2092,7 @@ pub async fn git_switch(app: AppHandle, state: St<'_>, conversation_id: String, 
 #[tauri::command]
 pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Value> {
     let root = session_repo(&state, &conversation_id).await?;
-    // new files only show in the diff once git knows about them
-    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
-    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).await.unwrap_or_default();
+    let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff"]).await.unwrap_or_default();
     Ok(serde_json::to_value(crate::secrets::scan_diff(&diff))?)
 }
 
