@@ -260,7 +260,7 @@ async function init() {
   refreshModels();
   const last = local.lastRoute;
   if (last && last.name === 'chat' && last.params && last.params.id) navigate(last);
-  else navigate({ name: 'new' });
+  else navigate({ name: last && last.name === 'code' ? 'code' : (store.appMode === 'code' ? 'code' : 'new') });
   void currentLanguage;
 }
 

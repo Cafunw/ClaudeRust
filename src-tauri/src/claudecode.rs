@@ -87,14 +87,17 @@ pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path
     let prog = program.display().to_string();
     #[cfg(target_os = "windows")]
     {
-        // separate arguments: Rust quotes a path with spaces, and `cmd /K`
-        // keeps a single quoted program name as it is
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        // cmd.exe re-reads its command line: every word is quoted (so & | < >
+        // ^ in a path stay literal) and the whole line wrapped once more for
+        // /S; the folder is the new console's working directory, not a word
+        let line = std::iter::once(prog.as_str()).chain(args.iter().map(String::as_str)).map(|w| format!("\"{}\"", crate::shellenv::cmd_safe(w))).collect::<Vec<_>>().join(" ");
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
+        c.raw_arg(format!("/S /K \"{line}\"")).creation_flags(CREATE_NEW_CONSOLE);
         if let Some(d) = cwd {
-            c.arg("/D").arg(d);
+            c.current_dir(d);
         }
-        c.args(["cmd", "/K"]).arg(&prog).args(args);
         c.spawn()?;
         return Ok(());
     }
@@ -116,21 +119,35 @@ pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let terms: [(&str, &[&str]); 6] = [
-            ("x-terminal-emulator", &["-e"]),
-            ("gnome-terminal", &["--"]),
-            ("konsole", &["-e"]),
-            ("xfce4-terminal", &["-x"]),
-            ("kitty", &[]),
-            ("xterm", &["-e"]),
+        // terminals known to take the command as separate words first; the
+        // ones that want it as one string (lxterminal, and possibly the
+        // distribution's `x-terminal-emulator`) get a quoted shell line
+        let terms: [(&str, &[&str], bool); 9] = [
+            ("gnome-terminal", &["--"], false),
+            ("konsole", &["-e"], false),
+            ("xfce4-terminal", &["-x"], false),
+            ("kitty", &[], false),
+            ("alacritty", &["-e"], false),
+            ("wezterm", &["start", "--"], false),
+            ("xterm", &["-e"], false),
+            ("lxterminal", &["-e"], true),
+            ("x-terminal-emulator", &["-e"], true),
         ];
         // sh -c 'cd "$0" && exec "$@"' <dir> <program> <args…>
         let dir = cwd.map(|d| d.display().to_string()).unwrap_or_else(|| ".".into());
+        let words: Vec<String> = ["sh", "-c", "cd \"$0\" && exec \"$@\"", &dir, &prog].iter().map(|s| s.to_string()).chain(args.iter().cloned()).collect();
+        let sq = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let one_line = words.iter().map(|w| sq(w)).collect::<Vec<_>>().join(" ");
         let path = crate::shellenv::path();
-        for (t, pre) in terms {
+        for (t, pre, as_line) in terms {
             if let Ok(bin) = which::which_in(t, Some(&path), "/") {
                 let mut c = std::process::Command::new(bin);
-                c.args(pre).args(["sh", "-c", "cd \"$0\" && exec \"$@\"", &dir, &prog]).args(args);
+                c.args(pre);
+                if as_line {
+                    c.arg(&one_line);
+                } else {
+                    c.args(&words);
+                }
                 if let Some(d) = cwd {
                     c.current_dir(d);
                 }

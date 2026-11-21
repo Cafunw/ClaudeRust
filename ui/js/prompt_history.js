@@ -13,6 +13,12 @@ function close() {
 }
 
 /** Open the history search above `anchor` (the composer element). */
+/** A message as a short preview: blank lines folded, long text cut. */
+function preview(text) {
+  const s = text.replace(/\n\s*\n+/g, '\n');
+  return s.length > 400 ? `${s.slice(0, 400)}…` : s;
+}
+
 export function openPromptHistory(composer, anchor) {
   if (pop) { close(); return; }
   pop = h(`<div class="ph-pop" role="dialog"><div class="ph-search">${icon('history', 14)}<input placeholder="${esc(t('ph_placeholder'))}" spellcheck="false"><kbd>Esc</kbd></div><div class="ph-list"></div></div>`);
@@ -35,7 +41,7 @@ export function openPromptHistory(composer, anchor) {
   };
   const draw = () => {
     if (!items.length) { list.innerHTML = `<div class="ph-empty">${esc(input.value.trim() ? t('no_results') : t('ph_empty'))}</div>`; return; }
-    list.innerHTML = items.map((it, i) => `<button class="ph-item ${i === sel ? 'on' : ''}" data-i="${i}"><div class="ph-text">${esc(it.text.length > 400 ? `${it.text.slice(0, 400)}…` : it.text)}</div><div class="ph-meta">${esc(it.title || '')} · ${esc(relTime(it.at))}</div></button>`).join('');
+    list.innerHTML = items.map((it, i) => `<button class="ph-item ${i === sel ? 'on' : ''}" data-i="${i}"><div class="ph-text">${esc(preview(it.text))}</div><div class="ph-meta">${esc(it.title || '')} · ${esc(relTime(it.at))}</div></button>`).join('');
     list.querySelectorAll('.ph-item').forEach((b) => { b.onmousedown = (e) => { e.preventDefault(); pick(Number(b.dataset.i)); }; });
     const on = list.querySelector('.ph-item.on');
     if (on) on.scrollIntoView({ block: 'nearest' });

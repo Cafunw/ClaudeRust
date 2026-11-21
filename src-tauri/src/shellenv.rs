@@ -84,6 +84,31 @@ pub fn which(program: &str) -> bool {
     which::which_in(program, Some(path()), std::env::current_dir().unwrap_or_default()).is_ok()
 }
 
+/// The script an npm `.cmd` shim runs (`"%dp0%\node_modules\…\cli.js"`),
+/// resolved against the shim's folder.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn npm_shim_target(text: &str, dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    const MARK: &str = "\"%dp0%\\";
+    // the quoted `%dp0%\…` paths in it (node.exe comes first), the script one
+    let rel = text.match_indices(MARK).filter_map(|(i, _)| {
+        let rest = &text[i + MARK.len()..];
+        let rel = &rest[..rest.find('"')?];
+        let lower = rel.to_ascii_lowercase();
+        (lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs")).then_some(rel)
+    }).next()?;
+    if rel.contains("..") {
+        return None;
+    }
+    let p = rel.split(['\\', '/']).filter(|s| !s.is_empty()).fold(dir.to_path_buf(), |p, s| p.join(s));
+    p.is_file().then_some(p)
+}
+
+/// An argument as cmd.exe can carry it: on one line, without `"`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn cmd_safe(a: &str) -> String {
+    a.replace(['\r', '\n'], " ").replace('"', "'")
+}
+
 pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
     let path = path();
     let resolved = which::which_in(program, Some(&path), std::env::current_dir().unwrap_or_default())
@@ -92,9 +117,27 @@ pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
     #[cfg(windows)]
     let mut cmd = {
         let lower = resolved.to_string_lossy().to_ascii_lowercase();
-        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+        let shim = std::path::Path::new(&resolved);
+        // an npm shim (`claude.cmd`): run its script with node directly, as
+        // cmd.exe would cut arguments at a line break and re-read & | < >
+        let npm = if lower.ends_with(".cmd") {
+            std::fs::read_to_string(shim).ok().zip(shim.parent()).and_then(|(text, dir)| npm_shim_target(&text, dir)).and_then(|js| {
+                let local = shim.parent().map(|d| d.join("node.exe")).filter(|n| n.is_file());
+                let node = local.or_else(|| which::which_in("node", Some(&path), std::env::current_dir().unwrap_or_default()).ok())?;
+                Some((node, js))
+            })
+        } else {
+            None
+        };
+        if let Some((node, js)) = npm {
+            let mut c = tokio::process::Command::new(node);
+            c.arg(js).args(args);
+            c
+        } else if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            // last resort through cmd.exe: keep every argument on one line,
+            // and no `"` that would end a quoted argument early
             let mut c = tokio::process::Command::new("cmd");
-            c.arg("/C").arg(&resolved).args(args);
+            c.arg("/C").arg(&resolved).args(args.iter().map(|a| cmd_safe(a)));
             c
         } else {
             let mut c = tokio::process::Command::new(&resolved);
@@ -115,4 +158,23 @@ pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npm_shims() {
+        let d = std::env::temp_dir().join(format!("cr-shim-{}", crate::util::new_id()));
+        let js = d.join("node_modules").join("@anthropic-ai").join("claude-code").join("cli.js");
+        std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+        std::fs::write(&js, "").unwrap();
+        let shim = "@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n)\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n";
+        assert_eq!(npm_shim_target(shim, &d), Some(js.clone()));
+        assert_eq!(npm_shim_target("@echo off\r\nclaude.exe %*", &d), None);
+        assert_eq!(npm_shim_target("\"%dp0%\\..\\x.js\"", &d), None);
+        assert_eq!(cmd_safe("a\nb \"c\" & d"), "a b 'c' & d");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

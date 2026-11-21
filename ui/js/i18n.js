@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  secrets_scan_failed: "Couldn't check this commit for secrets:",
+  search_artifacts: "Search your artifacts…",
+  search_projects: "Search your projects…",
   mode_chat: "Chat",
   mode_code: "Code",
   sess_filter: "Filter sessions by title or folder…",
@@ -12,10 +15,10 @@ const en = {
   conv_instructions_cleared: "Instructions removed.",
   code_save_tip: "Save as a file…",
   settings_backup_title: "Back up settings",
-  settings_backup_d: "Save your settings (preferences, styles, shortcuts, tool permissions) to a file, or restore them — e.g. on a new computer. API keys and machine-specific paths aren't included.",
+  settings_backup_d: "Save your settings (preferences, styles, shortcuts) to a file, or restore them — e.g. on a new computer. API keys, server addresses, the editor command, permission settings and machine-specific paths aren't included.",
   settings_backup: "Save to file…",
   settings_restore: "Restore…",
-  settings_restore_confirm: "Replace your current settings with the ones in this file? API keys and local paths stay as they are.",
+  settings_restore_confirm: "Replace your current settings with the ones in this file? API keys, server addresses, the editor command, permission settings and local paths stay as they are.",
   hist_commit_one: "1 commit",
   hist_search_ph: "Search commits…",
   hist_mode_message: "Message",
@@ -571,6 +574,9 @@ const en = {
 };
 
 const tr = {
+  secrets_scan_failed: "Bu commit gizli bilgi açısından kontrol edilemedi:",
+  search_artifacts: "Artifact'lerinde ara…",
+  search_projects: "Projelerinde ara…",
   mode_chat: "Sohbet",
   mode_code: "Kod",
   sess_filter: "Oturumları başlık ya da klasöre göre süz…",
@@ -583,10 +589,10 @@ const tr = {
   conv_instructions_cleared: "Talimatlar kaldırıldı.",
   code_save_tip: "Dosya olarak kaydet…",
   settings_backup_title: "Ayarları yedekle",
-  settings_backup_d: "Ayarlarınızı (tercihler, stiller, kısayollar, araç izinleri) bir dosyaya kaydedin ya da geri yükleyin — örneğin yeni bir bilgisayarda. API anahtarları ve bu makineye özgü yollar dahil edilmez.",
+  settings_backup_d: "Ayarlarınızı (tercihler, stiller, kısayollar) bir dosyaya kaydedin ya da geri yükleyin — örneğin yeni bir bilgisayarda. API anahtarları, sunucu adresleri, düzenleyici komutu, izin ayarları ve bu makineye özgü yollar dahil edilmez.",
   settings_backup: "Dosyaya kaydet…",
   settings_restore: "Geri yükle…",
-  settings_restore_confirm: "Mevcut ayarlarınız bu dosyadakilerle değiştirilsin mi? API anahtarları ve yerel yollar olduğu gibi kalır.",
+  settings_restore_confirm: "Mevcut ayarlarınız bu dosyadakilerle değiştirilsin mi? API anahtarları, sunucu adresleri, düzenleyici komutu, izin ayarları ve yerel yollar olduğu gibi kalır.",
   hist_commit_one: "1 commit",
   hist_search_ph: "Commit'lerde ara…",
   hist_mode_message: "Mesaj",

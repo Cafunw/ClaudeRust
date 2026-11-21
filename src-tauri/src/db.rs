@@ -425,13 +425,18 @@ impl Db {
         let c = self.conn.lock();
         // only the text blocks leave SQLite (attachments can be megabytes of base64)
         let mut st = c.prepare(
-            "SELECT CASE WHEN json_type(m.content) = 'array'
+            // (CASE guards every json_extract: on anything but a JSON object
+            // it fails the whole query, e.g. a bare string in a content array)
+            "SELECT CASE WHEN NOT json_valid(m.content) THEN json_array(m.content)
+                    WHEN json_type(m.content) = 'array'
                     THEN (SELECT json_group_array(json_extract(j.value, '$.text')) FROM json_each(m.content) j
-                          WHERE json_extract(j.value, '$.type') = 'text')
+                          WHERE CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.type') = 'text' ELSE 0 END)
                     ELSE json_array(json_extract(m.content, '$')) END,
                     m.created_at, c.title
              FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'user' AND json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL
+             WHERE m.role = 'user'
+               AND CASE WHEN json_valid(m.meta) AND json_type(m.meta) = 'object'
+                   THEN json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL ELSE 1 END
              ORDER BY m.created_at DESC LIMIT 5000",
         )?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
@@ -469,8 +474,9 @@ impl Db {
         let c = self.conn.lock();
         let mut st = c.prepare(
             "SELECT m.conversation_id, c.title, m.created_at, m.content, coalesce(c.cwd, '') FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'assistant' AND instr(m.content, ?1) > 0
-             ORDER BY m.created_at DESC LIMIT 400",
+             WHERE m.role = 'assistant' AND instr(m.content, ?1) > 0 AND instr(m.content, '\"tool_use\"') > 0
+               AND (instr(m.content, '\"Write\"') > 0 OR instr(m.content, 'Edit\"') > 0)
+             ORDER BY m.created_at DESC LIMIT 2000",
         )?;
         let rows = st.query_map([&needle], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?;
         let mut out: Vec<(String, String, i64)> = Vec::new();
@@ -978,8 +984,10 @@ mod tests {
         db.msg_insert(&mk("3", json!([{"type":"text","text":"review the diff"},{"type":"text","text":"<system-reminder>file</system-reminder>"}]), json!({}), 3)).unwrap();
         db.msg_insert(&mk("4", json!([{"type":"text","text":"run the tests and fix failures"}]), json!({}), 4)).unwrap();
         db.msg_insert(&mk("5", json!([{"type":"document","source":{}},{"type":"text","text":"summarize this log"}]), json!({}), 5)).unwrap();
+        // odd rows (a bare string in the content array, plain-text meta) don't break the query
+        db.msg_insert(&mk("6", json!(["stray", {"type":"text","text":"odd row"}]), json!("x"), 0)).unwrap();
         let all: Vec<String> = db.prompt_history("", 10).unwrap().into_iter().map(|r| r.0).collect();
-        assert_eq!(all, vec!["summarize this log", "run the tests and fix failures", "review the diff"]);
+        assert_eq!(all, vec!["summarize this log", "run the tests and fix failures", "review the diff", "odd row"]);
         let hits: Vec<String> = db.prompt_history("TESTS fix", 10).unwrap().into_iter().map(|r| r.0).collect();
         assert_eq!(hits, vec!["run the tests and fix failures"]);
         assert_eq!(db.prompt_history("", 1).unwrap().len(), 1);

@@ -267,8 +267,8 @@ export function createComposer(opts) {
     try {
       const out = await call('improve_prompt', { text: before, code: mode === 'code' });
       if (ta.value === before) {
-        ta.value = out; autoGrow(ta); updateSend();
-        toast(t('improved'), '', { action: t('undo'), onAction: () => { ta.value = before; autoGrow(ta); updateSend(); ta.focus(); } });
+        ta.value = out; autoGrow(ta); updateSend(); saveDraft();
+        toast(t('improved'), '', { action: t('undo'), onAction: () => { ta.value = before; autoGrow(ta); updateSend(); saveDraft(); ta.focus(); } });
       }
     } catch (e) { errorToast(e); } finally {
       busy = false; ta.classList.remove('improving'); updateSend(); ta.focus();
@@ -355,10 +355,11 @@ export function createComposer(opts) {
     else if (act === 'attach') attachMenu(b);
     else if (act === 'mode') modeMenu(b);
   });
+  const saveDraft = () => { if (opts.draftKey) store.drafts.set(opts.draftKey, ta.value); };
   ta.addEventListener('input', () => {
     autoGrow(ta);
     updateSend();
-    if (opts.draftKey) store.drafts.set(opts.draftKey, ta.value);
+    saveDraft();
   });
   attachSuggest(ta, { context: cmdContext, anchor: el, onPick: (p) => { if (p.type === '/' && p.item.kind === 'builtin' && !p.item.hint) send(); } });
   ta.addEventListener('keydown', (e) => {
@@ -423,7 +424,7 @@ export function createComposer(opts) {
         q.appendChild(c);
       });
     },
-    setText(s) { ta.value = s; autoGrow(ta); updateSend(); },
+    setText(s) { ta.value = s; autoGrow(ta); updateSend(); saveDraft(); },
     getText() { return ta.value; },
     setState(patch) { Object.assign(st, patch); refreshBar(); },
     addPaths,

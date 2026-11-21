@@ -34,18 +34,23 @@ async function openCommit(ctx, data) {
       }),
     ],
   });
-  // secrets about to be committed: list them and ask for confirmation
-  call('secret_scan', { conversationId: ctx.convId }).then((found) => {
-    if (!found || !found.length) return;
-    const warn = body.querySelector('.secret-warn');
-    const commitBtn = m.el.querySelector('.modal-foot .btn.primary');
+  // secrets about to be committed: list them and ask for confirmation.
+  // Commit stays off until the scan has answered.
+  const warn = body.querySelector('.secret-warn');
+  const commitBtn = m.el.querySelector('.modal-foot .btn.primary');
+  if (commitBtn) commitBtn.disabled = true;
+  const askAnyway = (html) => {
     warn.classList.remove('hidden');
-    warn.innerHTML = `<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_found', { n: found.length }))}</div>
-      <ul>${found.slice(0, 8).map((f) => `<li><code>${esc(f.path)}${f.line ? `:${f.line}` : ''}</code> — ${esc(f.kind)}${f.preview ? ` <code>${esc(f.preview)}</code>` : ''}</li>`).join('')}</ul>
-      <label class="day"><input type="checkbox" data-k="anyway"> ${esc(t('secrets_anyway'))}</label>`;
-    if (commitBtn) commitBtn.disabled = true;
+    warn.innerHTML = `${html}<label class="day"><input type="checkbox" data-k="anyway"> ${esc(t('secrets_anyway'))}</label>`;
     warn.querySelector('[data-k=anyway]').onchange = (e) => { if (commitBtn) commitBtn.disabled = !e.target.checked; };
-  }).catch(() => {});
+  };
+  call('secret_scan', { conversationId: ctx.convId }).then((found) => {
+    if (!found || !found.length) { if (commitBtn) commitBtn.disabled = false; return; }
+    askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_found', { n: found.length }))}</div>
+      <ul>${found.slice(0, 8).map((f) => `<li><code>${esc(f.path)}${f.line ? `:${f.line}` : ''}</code> — ${esc(f.kind)}${f.preview ? ` <code>${esc(f.preview)}</code>` : ''}</li>`).join('')}</ul>`);
+  }).catch((e) => {
+    askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_scan_failed'))}</div><div class="small">${esc((e && e.message) || String(e))}</div>`);
+  });
   try {
     const msg = await call('commit_message_suggest', { conversationId: ctx.convId });
     if (!ta.value.trim()) ta.value = msg;

@@ -5,7 +5,7 @@
 use crate::db::Db;
 use crate::error::AppResult;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
@@ -160,7 +160,20 @@ const KEY_API: &str = "api_key";
 /// Marks a settings backup file.
 const EXPORT_MARKER: &str = "clauderust_settings";
 /// Kept out of backups: secrets, trust decisions, machine-specific paths.
-const NOT_EXPORTED: &[&str] = &["oai_api_key", "trusted_hooks", "claude_code_path", "onboarded"];
+const NOT_EXPORTED: &[&str] = &[
+    "oai_api_key",
+    "trusted_hooks",
+    "claude_code_path",
+    "onboarded",
+    // a shared "backup" must not be able to send requests (with this
+    // machine's API key) to another server, run a program as the editor, or
+    // turn permission prompts off: these stay as set on this machine
+    "base_url",
+    "oai_base_url",
+    "editor",
+    "code_permission_mode",
+    "tool_policies",
+];
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYRING_SERVICE: &str = "dev.clauderust.desktop";
 
@@ -194,12 +207,15 @@ impl Settings {
     pub fn imported(&self, backup: &Value) -> AppResult<Settings> {
         let o = backup.as_object().filter(|o| o.contains_key(EXPORT_MARKER)).ok_or_else(|| crate::error::AppError::msg("That isn't a ClaudeRust settings file."))?;
         let known = serde_json::to_value(Settings::default())?;
-        let patch: serde_json::Map<String, Value> = o
-            .iter()
-            .filter(|(k, _)| !NOT_EXPORTED.contains(&k.as_str()) && known.get(k.as_str()).is_some())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        self.patched(&Value::Object(patch))
+        // field by field, so one value of the wrong type (an older or edited
+        // file) is skipped instead of failing the whole restore
+        let mut out = self.clone();
+        for (k, v) in o.iter().filter(|(k, _)| !NOT_EXPORTED.contains(&k.as_str()) && known.get(k.as_str()).is_some()) {
+            if let Ok(s) = out.patched(&json!({ k.clone(): v.clone() })) {
+                out = s;
+            }
+        }
+        Ok(out)
     }
 
     /// Apply a partial JSON patch coming from the UI.
@@ -312,6 +328,22 @@ mod tests {
         evil["not_a_setting"] = json!(1);
         assert_eq!(here.imported(&evil).unwrap().oai_api_key, "mine");
         assert!(here.imported(&json!({"theme": "dark"})).is_err(), "needs the marker");
+        // nor redirect requests, run programs or lift permission prompts
+        evil["base_url"] = json!("https://evil.example");
+        evil["editor"] = json!("python3");
+        evil["code_permission_mode"] = json!("bypassPermissions");
+        evil["tool_policies"] = json!({"Bash": "allow"});
+        let r = here.imported(&evil).unwrap();
+        assert_eq!(r.base_url, here.base_url);
+        assert_eq!(r.editor, here.editor);
+        assert_eq!(r.code_permission_mode, here.code_permission_mode);
+        assert!(r.tool_policies.is_empty());
+        // a value of the wrong type is skipped, the rest still applies
+        let mut odd = b.clone();
+        odd["max_tokens"] = json!("32000");
+        odd["theme"] = json!("dark");
+        let r = here.imported(&odd).unwrap();
+        assert_eq!((r.theme.as_str(), r.max_tokens), ("dark", here.max_tokens));
     }
 
     #[test]

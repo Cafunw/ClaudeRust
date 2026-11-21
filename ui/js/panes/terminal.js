@@ -182,30 +182,37 @@ registerPane({
   },
 });
 
-/** Put `text` into the session's terminal as if pasted (opening the pane
- *  first). Shells with bracketed paste (bash 5.1+, zsh) run nothing until
- *  Enter is pressed. */
-export async function pasteToTerminal(text) {
+/** The open conversation's terminal once its shell is up (opening the
+ *  pane first), or null. */
+async function readySession() {
   const ctx = context();
-  if (!ctx) return false;
+  if (!ctx) return null;
   show('terminal');
   for (let i = 0; i < 50; i++) {
     const s = sessions.get(ctx.convId);
-    if (s && s.ptyId && !s.exited) {
-      s.term.paste(String(text).replace(/\n+$/, ''));
-      s.term.focus();
-      return true;
-    }
+    if (s && s.ptyId && !s.exited) return s;
     await new Promise((r) => setTimeout(r, 100));
   }
-  return false;
+  return null;
 }
 
-/** Run `cmd` in the session's terminal (typed and entered, as if by you). */
+/** Put `text` into the session's terminal as if pasted. Shells with
+ *  bracketed paste (bash 5.1+, zsh) run nothing until Enter is pressed. */
+export async function pasteToTerminal(text) {
+  const s = await readySession();
+  if (!s) return false;
+  s.term.paste(String(text).replace(/\n+$/, ''));
+  s.term.focus();
+  return true;
+}
+
+/** Run `cmd` in the session's terminal (typed and entered, as if by you).
+ *  The command and its Enter go in one write, so they can't arrive out of
+ *  order. */
 export async function runInTerminal(cmd) {
-  if (!(await pasteToTerminal(cmd))) return false;
-  const ctx = context();
-  const s = ctx && sessions.get(ctx.convId);
-  if (s && s.ptyId) await call('term_write', { id: s.ptyId, data: '\r' }).catch(() => {});
+  const s = await readySession();
+  if (!s) return false;
+  s.term.focus();
+  try { await call('term_write', { id: s.ptyId, data: `${String(cmd).replace(/\n+$/, '')}\r` }); } catch { return false; }
   return true;
 }

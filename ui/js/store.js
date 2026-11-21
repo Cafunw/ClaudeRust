@@ -15,18 +15,22 @@ class Drafts extends Map {
   }
   persist() {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      try {
-        const keep = [...this.entries()].filter(([, v]) => v && v.trim() && v.length <= 100_000).slice(-50);
-        localStorage.setItem(DRAFTS_KEY, JSON.stringify(keep));
-      } catch { /* storage full or unavailable */ }
-    }, 400);
+    this.timer = setTimeout(() => this.flush(), 400);
+  }
+  /** Write now (also on quit, so the last keystrokes aren't lost). */
+  flush() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    try {
+      const keep = [...this.entries()].filter(([, v]) => v && v.trim() && v.length <= 100_000).slice(-50);
+      localStorage.setItem(DRAFTS_KEY, JSON.stringify(keep));
+    } catch { /* storage full or unavailable */ }
   }
   set(k, v) {
     // re-insert so the newest drafts are kept when trimming
     super.delete(k);
     if (v && v.trim()) super.set(k, v);
-    if (this.timer !== undefined) this.persist();
+    this.persist();
     return this;
   }
   delete(k) {
@@ -81,3 +85,7 @@ export function loadLocal() {
 export function saveLocal(patch) {
   try { localStorage.setItem(LS, JSON.stringify({ ...loadLocal(), ...patch })); } catch { /* ignore */ }
 }
+
+// a pending draft write must not be lost when the window closes
+window.addEventListener('pagehide', () => store.drafts.flush());
+window.addEventListener('beforeunload', () => store.drafts.flush());

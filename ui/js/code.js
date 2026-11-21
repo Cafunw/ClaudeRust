@@ -10,9 +10,15 @@ import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
 
+// a newer render (a double press, or leaving the page) supersedes this one
+let renderSeq = 0;
+
 export async function renderCode(view) {
+  const seq = ++renderSeq;
+  const stale = () => seq !== renderSeq || store.route.name !== 'code';
   let folder = loadLocal().codeFolder || '';
   const sessions = await call('list_conversations', { kind: 'code' }).catch(() => []);
+  if (stale()) return;
   const recentFolders = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))].slice(0, 6);
   if (!folder && recentFolders.length) folder = recentFolders[0];
 
@@ -75,6 +81,7 @@ export async function renderCode(view) {
   };
   // Engine: the official Claude Code CLI (signs in with your Claude account) or the built-in agent (API key).
   const cc = await call('claude_code_info', {}).catch(() => ({ found: false }));
+  if (stale()) return;
   const defEngine = store.settings.code_engine === 'builtin' ? 'builtin'
     : store.settings.code_engine === 'claude-code' ? 'claude-code' : (cc.found ? 'claude-code' : 'builtin');
   let engine = loadLocal().codeEngine || defEngine;
@@ -185,7 +192,11 @@ export async function renderChats(view) {
   };
   delBtn.onclick = async () => {
     if (!selected.size || !(await confirmDialog(t('confirm_delete_chat')))) return;
-    for (const id of selected) { await call('delete_conversation', { id }).catch(errorToast); workspace.disposeConversation(id); }
+    for (const id of selected) {
+      try { await call('delete_conversation', { id }); } catch (e) { errorToast(e); continue; }
+      workspace.disposeConversation(id);
+      store.drafts.delete(id);
+    }
     emit('conversations-changed');
     renderChats(view);
   };

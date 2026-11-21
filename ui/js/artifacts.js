@@ -192,7 +192,7 @@ export async function renderGallery(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head"><h1>${t('artifacts')}</h1></div>
     <p class="muted" style="margin:-10px 0 22px">${t('artifacts_desc')}</p>
-    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_chats')}"></div>
+    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_artifacts')}"></div>
     <div class="grid"></div></div></div>`;
   const grid = $('.grid', view);
   let items = [];

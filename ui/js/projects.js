@@ -18,7 +18,7 @@ export async function refreshProjects() {
 export async function renderProjects(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head"><h1>${t('projects')}</h1><div class="grow"></div><button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_project')}</button></div>
-    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_chats')}"></div>
+    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_projects')}"></div>
     <div class="grid"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => newProjectDialog();
   await refreshProjects();

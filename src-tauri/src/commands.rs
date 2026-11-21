@@ -61,16 +61,18 @@ pub async fn settings_export(state: St<'_>) -> AppResult<String> {
 
 /// Restore settings from a backup file.
 #[tauri::command]
-pub async fn settings_import(state: St<'_>, path: String) -> AppResult<()> {
+pub async fn settings_import(app: AppHandle, state: St<'_>, path: String) -> AppResult<()> {
     let st = state.inner().clone();
     let meta = std::fs::metadata(&path)?;
     if meta.len() > 2 * 1024 * 1024 {
         return Err(AppError::msg("That file is too large to be a settings file."));
     }
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|_| AppError::msg("That isn't a ClaudeRust settings file."))?;
-    let new = st.settings.read().imported(&v)?;
+    let old = st.settings.read().clone();
+    let new = old.imported(&v)?;
     new.save(&st.db)?;
-    *st.settings.write() = new;
+    *st.settings.write() = new.clone();
+    apply_settings_change(&app, &st, &old, &new);
     Ok(())
 }
 
@@ -84,12 +86,19 @@ pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppRe
     };
     new.save(&st.db)?;
     *st.settings.write() = new.clone();
+    apply_settings_change(&app, &st, &old, &new);
+    Ok(settings_json(&st))
+}
+
+/// What a settings change sets in motion beyond storing it (shortcut,
+/// autostart, rendering mode, MCP servers, the models list).
+fn apply_settings_change(app: &AppHandle, st: &Arc<AppState>, old: &settings::Settings, new: &settings::Settings) {
     if old.base_url != new.base_url {
         st.degraded.store(false, std::sync::atomic::Ordering::Relaxed);
         *st.models.lock() = None;
     }
     if old.quick_entry_shortcut != new.quick_entry_shortcut || old.quick_entry_enabled != new.quick_entry_enabled {
-        crate::register_shortcut(&app, &new);
+        crate::register_shortcut(app, new);
     }
     if old.launch_at_login != new.launch_at_login {
         use tauri_plugin_autostart::ManagerExt;
@@ -100,9 +109,8 @@ pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppRe
         let _ = crate::display::write_mode(&new.hardware_acceleration);
     }
     if old.disabled_mcp_servers != new.disabled_mcp_servers {
-        reload_mcp_in_background(&app, &st);
+        reload_mcp_in_background(app, st);
     }
-    Ok(settings_json(&st))
 }
 
 #[tauri::command]
@@ -194,6 +202,7 @@ pub async fn list_conversations(state: St<'_>, kind: Option<String>, project_id:
                 "created_at": c.created_at, "updated_at": c.updated_at,
                 "running": running.contains(&c.id),
                 "engine": c.options["engine"],
+                "instructions": c.options["instructions"],
             })
         })
         .collect();
@@ -2114,7 +2123,9 @@ pub async fn git_switch(app: AppHandle, state: St<'_>, conversation_id: String, 
 #[tauri::command]
 pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Value> {
     let root = session_repo(&state, &conversation_id).await?;
-    let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff"]).await.unwrap_or_default();
+    // an error is reported (the commit dialog then asks before committing)
+    // rather than passing as "no secrets"
+    let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff"]).await?;
     Ok(serde_json::to_value(crate::secrets::scan_diff(&diff))?)
 }
 
@@ -2190,7 +2201,8 @@ pub async fn pr_suggest(state: St<'_>, conversation_id: String, base: String) ->
 }
 
 /// One short completion from the fast model (titles, rewrites, drafts).
-async fn quick_complete(st: &AppState, system: &str, user: String, max_tokens: u32) -> AppResult<String> {
+/// Also tells whether the answer hit `max_tokens` (was cut off).
+async fn quick_complete(st: &AppState, system: &str, user: String, max_tokens: u32) -> AppResult<(String, bool)> {
     let client = st.client()?;
     let model_id = st.settings.read().title_model.clone();
     let model = models::info(&model_id);
@@ -2203,7 +2215,8 @@ async fn quick_complete(st: &AppState, system: &str, user: String, max_tokens: u
     let v = tokio::time::timeout(std::time::Duration::from_secs(60), client.create(&body, &[]))
         .await
         .map_err(|_| AppError::msg("That took too long."))??;
-    Ok(v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<String>().trim().to_string())
+    let text = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<String>().trim().to_string();
+    Ok((text, v["stop_reason"] == "max_tokens"))
 }
 
 pub const IMPROVE_PROMPT: &str = "You rewrite a draft message that a user is about to send to Claude so it gets a better answer. Keep the user's intent, facts, language and voice; make it clearer and more specific: state the goal, the relevant context and constraints, and the kind of answer wanted. Keep @mentions, file paths, code and slash commands exactly as written. Don't answer the message, don't add assumptions the user didn't make, and don't make it much longer than needed. Reply with the rewritten message only.";
@@ -2215,7 +2228,13 @@ pub async fn improve_prompt(state: St<'_>, text: String, code: bool) -> AppResul
         return Err(AppError::msg("Write a message first."));
     }
     let ctx = if code { "It's for a coding agent working in the user's project." } else { "It's for a chat with Claude." };
-    let out = quick_complete(&state, IMPROVE_PROMPT, format!("{ctx}\n\n<draft>\n{}\n</draft>", text.trim()), 2048).await?;
+    // room for a rewrite somewhat longer than the draft (~4 characters a token)
+    let budget = (text.len() / 2).clamp(2048, 16_000) as u32;
+    let (out, cut) = quick_complete(&state, IMPROVE_PROMPT, format!("{ctx}\n\n<draft>\n{}\n</draft>", text.trim()), budget).await?;
+    if cut {
+        // a cut-off rewrite would silently drop the end of the draft
+        return Err(AppError::msg("This draft is too long to rewrite in one go."));
+    }
     let out = out.trim().trim_start_matches("<draft>").trim_end_matches("</draft>").trim().to_string();
     if out.is_empty() {
         return Err(AppError::msg("No rewrite came back."));

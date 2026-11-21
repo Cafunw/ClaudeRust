@@ -182,16 +182,23 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
       } })), { width: 240 });
     } });
   }
-  const ins = ((c.options || {}).instructions || '').trim();
+  // `c` is either a loaded conversation (with `options`) or a list entry,
+  // which carries just the engine and the instructions
+  const opts = c.options || {};
+  const ins = String(opts.instructions ?? c.instructions ?? '').trim();
   items.push({ label: t('conv_instructions'), sub: ins ? (ins.length > 40 ? `${ins.slice(0, 40)}…` : ins) : t('conv_instructions_none'), icon: 'edit', onClick: async () => {
-    const v = await promptDialog(t('conv_instructions'), ins, { multiline: true, placeholder: t('conv_instructions_ph') });
+    const v = await promptDialog(t('conv_instructions').replace(/…$/, ''), ins, { multiline: true, placeholder: t('conv_instructions_ph') });
     if (v === null) return;
-    c.options = { ...(c.options || {}), instructions: v.trim() };
-    await call('update_conversation', { req: { id: c.id, options: { instructions: v.trim() } } });
+    try {
+      await call('update_conversation', { req: { id: c.id, options: { instructions: v.trim() } } });
+    } catch (e) { errorToast(e); return; }
+    if (c.options) c.options = { ...c.options, instructions: v.trim() };
+    c.instructions = v.trim();
+    if (cur && cur.id === c.id && cur !== c) cur.options = { ...(cur.options || {}), instructions: v.trim() };
     toast(v.trim() ? t('conv_instructions_set') : t('conv_instructions_cleared'));
     onChange && onChange();
   } });
-  if (c.kind === 'code' && (c.options || {}).engine === 'claude-code') {
+  if (c.kind === 'code' && (opts.engine ?? c.engine) === 'claude-code') {
     items.push({ label: t('cc_open_terminal'), icon: 'terminal', onClick: () => call('cc_open_in_terminal', { conversationId: c.id }).catch(errorToast) });
   }
   items.push(
@@ -202,8 +209,9 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
     { sep: true },
     { label: t('delete'), icon: 'trash', danger: true, onClick: async () => {
       if (!(await confirmDialog(t('confirm_delete_chat')))) return;
-      await call('delete_conversation', { id: c.id });
+      try { await call('delete_conversation', { id: c.id }); } catch (e) { errorToast(e); return; }
       workspace.disposeConversation(c.id);
+      store.drafts.delete(c.id);
       emit('conversations-changed');
       if (onDelete) onDelete(); else if (cur && cur.id === c.id) emit('navigate', { name: c.kind === 'code' ? 'code' : 'new' });
     } },
@@ -393,8 +401,10 @@ function showOutline(anchor) {
 
 // Alt+↑ / Alt+↓: previous / next of your messages
 window.addEventListener('keydown', (e) => {
-  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !cur) return;
-  if (e.target && e.target.closest && e.target.closest('textarea, input, .xterm')) return;
+  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !cur || e.defaultPrevented) return;
+  // keep the key for fields (Alt+↓ opens a <select>) and for dialogs and menus
+  if (e.target && e.target.closest && e.target.closest('textarea, input, select, [contenteditable], .xterm')) return;
+  if (document.querySelector('.modal-scrim, .popover')) return;
   const els = userTurnEls();
   if (!els.length) return;
   e.preventDefault();

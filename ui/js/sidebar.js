@@ -3,7 +3,7 @@
 import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac } from './api.js';
-import { store, emit, on, displayName, saveLocal } from './store.js';
+import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
 import { $, esc, h, showMenu, initials, errorToast } from './util.js';
 import { conversationMenu } from './chat.js';
 
@@ -14,7 +14,7 @@ const RECENT_LIMIT = 30;
 const CHAT_ROUTES = new Set(['new', 'chats', 'projects', 'project', 'artifacts']);
 
 function savedMode() {
-  try { return JSON.parse(localStorage.getItem('clauderust') || '{}').appMode === 'code' ? 'code' : 'chat'; } catch { return 'chat'; }
+  return loadLocal().appMode === 'code' ? 'code' : 'chat';
 }
 
 /** The mode a route belongs to (null when it can't be told yet). */
@@ -41,11 +41,15 @@ export function setMode(mode) {
 
 /** Go to a mode: back to where you were in it, or its start page. */
 function enterMode(mode) {
-  const last = (JSON.parse(localStorage.getItem('clauderust') || '{}').lastByMode || {})[mode];
+  const last = (loadLocal().lastByMode || {})[mode];
   setMode(mode);
   if (last && last.name === 'chat' && (store.conversations || []).some((c) => c.id === last.id)) emit('navigate', { name: 'chat', params: { id: last.id } });
   else if (last && last.name && last.name !== 'chat') emit('navigate', { name: last.name });
   else emit('navigate', { name: mode === 'code' ? 'code' : 'new' });
+}
+
+function remember(mode, entry) {
+  saveLocal({ lastByMode: { ...(loadLocal().lastByMode || {}), [mode]: entry } });
 }
 
 function rememberRoute() {
@@ -53,13 +57,10 @@ function rememberRoute() {
   const mode = modeForRoute(r);
   if (!mode) return;
   setMode(mode);
-  try {
-    const all = JSON.parse(localStorage.getItem('clauderust') || '{}');
-    const lastByMode = { ...(all.lastByMode || {}) };
-    lastByMode[mode] = r.name === 'chat' ? { name: 'chat', id: r.params && r.params.id } : (r.name === 'project' ? { name: 'projects' } : { name: r.name });
-    saveLocal({ lastByMode });
-  } catch { /* storage unavailable */ }
+  remember(mode, r.name === 'chat' ? { name: 'chat', id: r.params && r.params.id } : (r.name === 'project' ? { name: 'projects' } : { name: r.name }));
 }
+
+let bound = false;
 
 export function mountSidebar() {
   const el = $('#sidebar');
@@ -77,6 +78,13 @@ export function mountSidebar() {
     <div class="sidebar-scroll"></div>
     <div class="sidebar-bottom"><button class="user-card"></button></div>`;
   el.classList.toggle('collapsed', store.sidebarCollapsed);
+  $('.user-card', el).addEventListener('click', (e) => accountMenu(e.currentTarget));
+  renderNav();
+  renderUserCard();
+  refreshSidebar();
+  // the sidebar is redrawn on a language change; its listeners stay bound once
+  if (bound) return;
+  bound = true;
   el.addEventListener('click', (e) => {
     const m = e.target.closest('[data-mode]');
     if (m) { if (m.dataset.mode !== store.appMode) enterMode(m.dataset.mode); return; }
@@ -88,17 +96,20 @@ export function mountSidebar() {
     }
     if (e.target.closest('[data-act=toggle]')) toggleSidebar();
   });
-  $('.user-card', el).addEventListener('click', (e) => accountMenu(e.currentTarget));
   on('conversations-changed', refreshSidebar);
   on('running-changed', renderLists);
   on('route-changed', () => { rememberRoute(); highlight(); });
   // a conversation's kind is only known once it's loaded
-  on('conversation-opened', ({ kind }) => { setMode(kind === 'code' ? 'code' : 'chat'); rememberRoute(); highlight(); });
+  // (the list may not hold a conversation created a moment ago, so the
+  // event's kind is used rather than looking it up)
+  on('conversation-opened', ({ id, kind }) => {
+    const mode = kind === 'code' ? 'code' : 'chat';
+    setMode(mode);
+    if (store.route.name === 'chat' && store.route.params && store.route.params.id === id) remember(mode, { name: 'chat', id });
+    highlight();
+  });
   on('settings-changed', renderUserCard);
   on('collapse-sidebar', () => { if (!store.sidebarCollapsed) toggleSidebar(); });
-  renderNav();
-  renderUserCard();
-  refreshSidebar();
 }
 
 function renderNav() {

@@ -22,6 +22,11 @@ pub async fn git(cwd: &Path, args: &[&str]) -> AppResult<String> {
 }
 
 pub async fn git_raw(cwd: &Path, args: &[&str]) -> AppResult<std::process::Output> {
+    git_raw_env(cwd, args, &[]).await
+}
+
+/// `git_raw` with extra environment variables (e.g. `GIT_INDEX_FILE`).
+async fn git_raw_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> AppResult<std::process::Output> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let mut cmd = crate::shellenv::command("git", &args);
     cmd.current_dir(cwd)
@@ -29,6 +34,9 @@ pub async fn git_raw(cwd: &Path, args: &[&str]) -> AppResult<std::process::Outpu
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     let fut = cmd.output();
     match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
         Ok(r) => r.map_err(|e| AppError::msg(format!("Could not run git: {e}"))),
@@ -127,7 +135,8 @@ pub async fn changes(session: &CodeSession) -> AppResult<Value> {
     if let Some(top) = repo_root(&root).await {
         let out = git(&top, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).await?;
         let mut files = parse_porcelain(&out);
-        let numstat = git(&top, &["diff", "HEAD", "--numstat", "-z"]).await.unwrap_or_default();
+        let base = base_rev(&top).await;
+        let numstat = git(&top, &["diff", base, "--numstat", "-z"]).await.unwrap_or_default();
         let mut stats = std::collections::HashMap::new();
         for rec in numstat.split('\0').filter(|s| !s.is_empty()) {
             let parts: Vec<&str> = rec.splitn(3, '\t').collect();
@@ -190,7 +199,8 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
         let full = abs_in(&top, path)?;
         let tracked = git_raw(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).await.map(|o| o.status.success()).unwrap_or(false);
         if tracked {
-            let d = git(&top, &["--literal-pathspecs", "diff", "HEAD", "--no-color", "--no-ext-diff", "--", path]).await?;
+            let base = base_rev(&top).await;
+            let d = git(&top, &["--literal-pathspecs", "diff", base, "--no-color", "--no-ext-diff", "--no-textconv", PREFIX_A, PREFIX_B, "--", path]).await?;
             if !d.trim().is_empty() {
                 return Ok(d);
             }
@@ -208,7 +218,9 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
 /// The patch for hunk `index` of a unified diff (the file header plus that
 /// hunk), when its `@@` line is still `expect` (the hunk the user saw).
 pub fn hunk_patch(diff: &str, index: usize, expect: &str) -> Option<String> {
-    let lines: Vec<&str> = diff.lines().collect();
+    // lines keep their endings: a file with CRLF line endings has `\r\n`
+    // in its diff, and the patch must keep them to apply
+    let lines: Vec<&str> = diff.split_inclusive('\n').collect();
     let first = lines.iter().position(|l| l.starts_with("@@"))?;
     let starts: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.starts_with("@@")).map(|(i, _)| i).collect();
     let start = *starts.get(index)?;
@@ -216,10 +228,11 @@ pub fn hunk_patch(diff: &str, index: usize, expect: &str) -> Option<String> {
         return None;
     }
     let end = starts.get(index + 1).copied().unwrap_or(lines.len());
-    let mut out = lines[..first].join("\n");
-    out.push('\n');
-    out.push_str(&lines[start..end].join("\n"));
-    out.push('\n');
+    let mut out = lines[..first].concat();
+    out.push_str(&lines[start..end].concat());
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
     Some(out)
 }
 
@@ -230,19 +243,49 @@ pub async fn revert_hunk(session: &CodeSession, path: &str, index: usize, expect
     if !tracked {
         return Err(AppError::msg("This is a new file: revert it as a whole."));
     }
-    let diff = git(&top, &["--literal-pathspecs", "diff", "HEAD", "--no-color", "--no-ext-diff", "--", path]).await?;
+    let base = base_rev(&top).await;
+    let diff = git(&top, &["--literal-pathspecs", "diff", base, "--no-color", "--no-ext-diff", "--no-textconv", PREFIX_A, PREFIX_B, "--", path]).await?;
     let patch = hunk_patch(&diff, index, expect).ok_or_else(|| AppError::msg("The file changed since the diff was shown. Refresh and try again."))?;
+    // when the whole file is staged as it is, the hunk is unstaged too (else
+    // a later `git commit` would still commit it); a partly staged file's
+    // index is left alone
+    let staged_as_is = git_raw(&top, &["--literal-pathspecs", "diff", "--quiet", "--", path]).await.map(|o| o.status.success()).unwrap_or(false)
+        && !git_raw(&top, &["--literal-pathspecs", "diff", "--cached", "--quiet", base, "--", path]).await.map(|o| o.status.success()).unwrap_or(true);
     let tmp = std::env::temp_dir().join(format!("clauderust-hunk-{}.patch", crate::util::new_id()));
     std::fs::write(&tmp, patch)?;
-    let r = git(&top, &["apply", "-R", "--whitespace=nowarn", &tmp.to_string_lossy()]).await;
+    let p = tmp.to_string_lossy().to_string();
+    let r = git(&top, &["apply", "-R", "--whitespace=nowarn", &p]).await;
+    if r.is_ok() && staged_as_is {
+        let _ = git(&top, &["apply", "-R", "--cached", "--whitespace=nowarn", &p]).await;
+    }
     let _ = std::fs::remove_file(&tmp);
     r.map(|_| ())
 }
 
-/// `git diff HEAD <args>` including files git doesn't track yet. They're
-/// marked intent-to-add only for the diff and unmarked again afterwards, so
-/// nothing is left behind (leftover marks make `git stash` refuse to work).
+/// Diff prefixes, given explicitly so a user's `diff.noprefix` or
+/// `diff.mnemonicPrefix` can't change the paths `git apply` sees.
+const PREFIX_A: &str = "--src-prefix=a/";
+const PREFIX_B: &str = "--dst-prefix=b/";
+/// The empty tree: the baseline of a repository with no commits yet.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// What changes are measured against: `HEAD`, or the empty tree before the
+/// first commit (where `git diff HEAD` fails).
+pub async fn base_rev(root: &Path) -> &'static str {
+    let has_head = git_raw(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).await.map(|o| o.status.success()).unwrap_or(false);
+    if has_head {
+        "HEAD"
+    } else {
+        EMPTY_TREE
+    }
+}
+
+/// `git diff HEAD <args>` (against the empty tree before the first commit)
+/// including files git doesn't track yet. They're marked intent-to-add in a
+/// copy of the index, so the real index is never touched: nothing is left
+/// behind, and an add or commit running at the same time isn't disturbed.
 pub async fn diff_including_new(root: &Path, args: &[&str]) -> AppResult<String> {
+    let base = base_rev(root).await;
     let untracked: Vec<String> = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])
         .await
         .unwrap_or_default()
@@ -250,24 +293,44 @@ pub async fn diff_including_new(root: &Path, args: &[&str]) -> AppResult<String>
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let run_on = |base: &[&str], files: &[String]| {
-        let mut a: Vec<String> = base.iter().map(|s| s.to_string()).collect();
-        a.push("--".into());
-        a.extend(files.iter().cloned());
-        a
+    let tmp_index = std::env::temp_dir().join(format!("clauderust-index-{}", crate::util::new_id()));
+    let tmp_s = tmp_index.to_string_lossy().to_string();
+    if !untracked.is_empty() {
+        // relative to `root`, or absolute (e.g. in a linked worktree)
+        let index = git(root, &["rev-parse", "--git-path", "index"]).await.unwrap_or_default();
+        let index = root.join(index.trim_end_matches(['\r', '\n']));
+        if index.is_file() {
+            std::fs::copy(&index, &tmp_index)?;
+        }
+    }
+    let env: Vec<(&str, &str)> = if untracked.is_empty() { vec![] } else { vec![("GIT_INDEX_FILE", tmp_s.as_str())] };
+    let add = |files: Vec<String>| {
+        let env = env.clone();
+        async move {
+            let mut a: Vec<&str> = vec!["--literal-pathspecs", "add", "--intent-to-add", "--"];
+            a.extend(files.iter().map(String::as_str));
+            git_raw_env(root, &a, &env).await.map(|o| o.status.success()).unwrap_or(false)
+        }
     };
     for chunk in untracked.chunks(200) {
-        let a = run_on(&["--literal-pathspecs", "add", "--intent-to-add"], chunk);
-        let _ = git(root, &a.iter().map(String::as_str).collect::<Vec<_>>()).await;
+        // a file that vanished since the listing fails its whole chunk:
+        // then add the rest one by one
+        if !add(chunk.to_vec()).await {
+            for f in chunk {
+                add(vec![f.clone()]).await;
+            }
+        }
     }
-    let mut full = vec!["diff", "HEAD"];
+    let mut full = vec!["diff", base, "--no-textconv", PREFIX_A, PREFIX_B];
     full.extend_from_slice(args);
-    let diff = git(root, &full).await;
-    for chunk in untracked.chunks(200) {
-        let a = run_on(&["--literal-pathspecs", "reset", "-q"], chunk);
-        let _ = git(root, &a.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    let out = git_raw_env(root, &full, &env).await;
+    let _ = std::fs::remove_file(&tmp_index);
+    let out = out?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(AppError::msg(if err.is_empty() { "git diff failed".to_string() } else { err }));
     }
-    diff
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// Files only marked intent-to-add (left behind by older versions), unmarked.
@@ -285,25 +348,43 @@ pub async fn clear_intent_to_add(root: &Path) {
 /// Apply a unified diff to the working tree of `root`: checked first, so a
 /// patch that doesn't fit changes nothing. Returns the files it touches.
 pub async fn apply_patch(root: &Path, patch: &str) -> AppResult<Vec<String>> {
-    let mut text = patch.replace("\r\n", "\n");
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    if !text.lines().any(|l| l.starts_with("@@") || l.starts_with("GIT binary patch") || l.starts_with("rename from")) {
+    let with_nl = |mut t: String| {
+        if !t.ends_with('\n') {
+            t.push('\n');
+        }
+        t
+    };
+    let lf = with_nl(patch.replace("\r\n", "\n"));
+    if !lf.lines().any(|l| l.starts_with("@@") || l.starts_with("GIT binary patch") || l.starts_with("rename from")) {
         return Err(AppError::msg("That doesn't look like a patch (no @@ hunks)."));
     }
-    let tmp = std::env::temp_dir().join(format!("clauderust-apply-{}.patch", crate::util::new_id()));
-    std::fs::write(&tmp, &text)?;
-    let p = tmp.to_string_lossy().to_string();
-    let r = async {
-        let files = git(root, &["apply", "--numstat", &p]).await.map_err(|e| AppError::msg(format!("Not a valid patch: {e}")))?;
-        git(root, &["apply", "--check", "--whitespace=nowarn", &p]).await.map_err(|e| AppError::msg(format!("The patch doesn't apply here: {e}")))?;
-        git(root, &["apply", "--whitespace=nowarn", &p]).await?;
-        Ok(files.lines().filter_map(|l| l.splitn(3, '\t').nth(2).map(str::to_string)).collect())
+    // as given first (a patch for a file with CRLF line endings needs its
+    // `\r`s); with LF endings when that doesn't fit (a patch whose line
+    // endings were changed by copying it around)
+    let raw = with_nl(patch.to_string());
+    let mut tries = vec![raw.clone()];
+    if lf != raw {
+        tries.push(lf);
     }
-    .await;
-    let _ = std::fs::remove_file(&tmp);
-    r
+    let mut last_err = None;
+    for text in tries {
+        let tmp = std::env::temp_dir().join(format!("clauderust-apply-{}.patch", crate::util::new_id()));
+        std::fs::write(&tmp, &text)?;
+        let p = tmp.to_string_lossy().to_string();
+        let r: AppResult<Vec<String>> = async {
+            let files = git(root, &["apply", "--numstat", &p]).await.map_err(|e| AppError::msg(format!("Not a valid patch: {e}")))?;
+            git(root, &["apply", "--check", "--whitespace=nowarn", &p]).await.map_err(|e| AppError::msg(format!("The patch doesn't apply here: {e}")))?;
+            git(root, &["apply", "--whitespace=nowarn", &p]).await?;
+            Ok(files.lines().filter_map(|l| l.splitn(3, '\t').nth(2).map(str::to_string)).collect())
+        }
+        .await;
+        let _ = std::fs::remove_file(&tmp);
+        match r {
+            Ok(files) => return Ok(files),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| AppError::msg("The patch doesn't apply here.")))
 }
 
 /// Put one file back to the baseline (deleting it if it didn't exist).
@@ -437,6 +518,70 @@ mod tests {
         clear_intent_to_add(&d).await;
         let st = String::from_utf8_lossy(&run(&["status", "--porcelain"]).stdout).to_string();
         assert!(!st.contains(" A "), "{st}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn test_repo(name: &str) -> (PathBuf, impl Fn(&[&str]) -> std::process::Output) {
+        let d = std::env::temp_dir().join(format!("cr-{name}-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dd = d.clone();
+        let run = move |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&dd).output().unwrap();
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t"]);
+        (d, run)
+    }
+
+    #[tokio::test]
+    async fn diffs_before_the_first_commit() {
+        let (d, run) = test_repo("empty");
+        std::fs::write(d.join("staged.txt"), "s\n").unwrap();
+        run(&["add", "staged.txt"]);
+        std::fs::write(d.join(".env"), "API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789\n").unwrap();
+        let diff = diff_including_new(&d, &["--no-color"]).await.unwrap();
+        assert!(diff.contains("+++ b/staged.txt") && diff.contains("+++ b/.env"), "{diff}");
+        // the real index is untouched: .env is still untracked, staged.txt still staged
+        let st = String::from_utf8_lossy(&run(&["status", "--porcelain"]).stdout).to_string();
+        assert!(st.contains("?? .env") && st.contains("A  staged.txt"), "{st}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn hunks_with_noprefix_crlf_and_staging() {
+        let (d, run) = test_repo("hunk2");
+        run(&["config", "diff.noprefix", "true"]);
+        run(&["config", "core.autocrlf", "false"]);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("f.txt"), "top\n").unwrap();
+        let body: String = (1..=30).map(|i| format!("line {i}\r\n")).collect();
+        std::fs::write(d.join("src/f.txt"), &body).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        std::fs::write(d.join("src/f.txt"), body.replace("line 2\r\n", "LINE TWO\r\n").replace("line 28\r\n", "LINE 28\r\n")).unwrap();
+        run(&["add", "src/f.txt"]);
+        let s = CodeSession::new(d.clone());
+        let diff = file_diff(&s, "src/f.txt").await.unwrap();
+        let second = diff.lines().filter(|l| l.starts_with("@@")).nth(1).unwrap().to_string();
+        revert_hunk(&s, "src/f.txt", 1, &second).await.unwrap();
+        let now = std::fs::read_to_string(d.join("src/f.txt")).unwrap();
+        assert!(now.contains("LINE TWO\r\n") && now.contains("line 28\r\n") && !now.contains("LINE 28"), "{now}");
+        assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), "top\n", "the top-level file is untouched");
+        // it was staged as a whole, so it's unstaged too
+        let staged = String::from_utf8_lossy(&run(&["diff", "--cached"]).stdout).to_string();
+        assert!(staged.contains("LINE TWO") && !staged.contains("LINE 28"), "{staged}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn crlf_patches_apply() {
+        let (d, run) = test_repo("crlfp");
+        run(&["config", "core.autocrlf", "false"]);
+        std::fs::write(d.join("w.txt"), "one\r\ntwo\r\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        let patch = "diff --git a/w.txt b/w.txt\n--- a/w.txt\n+++ b/w.txt\n@@ -1,2 +1,2 @@\n one\r\n-two\r\n+TWO\r\n";
+        apply_patch(&d, patch).await.unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("w.txt")).unwrap(), "one\r\nTWO\r\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
