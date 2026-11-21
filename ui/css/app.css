@@ -1140,3 +1140,14 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .gr-hit mark { background: rgba(255, 196, 0, .4); color: inherit; border-radius: 2px; }
 .gr-hit .fb-at { visibility: hidden; }
 .gr-hit:hover .fb-at { visibility: visible; }
+
+/* Files viewer: blame column */
+.fv-blame { flex: none; width: 210px; position: sticky; left: 0; z-index: 1; background: var(--bg-2); border-right: 1px solid var(--border); padding: 8px 6px 8px 8px !important; }
+.fv-blame span { display: block; height: var(--row-h, calc(12px * 1.55)); line-height: var(--row-h, calc(12px * 1.55)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); font-size: 11px; }
+.fv-blame span.c { cursor: pointer; }
+.fv-blame span.c:hover { color: var(--accent); }
+.fv-blame span.unc { color: #3a9a5b; font-style: italic; }
+.fv-blame-err { white-space: normal !important; height: auto !important; color: var(--text-3) !important; }
+.fv-head .icon-btn.on { color: var(--accent); background: var(--bg-3); }
+.fv-gutter { left: 0; }
+.fv-blame + .fv-gutter { position: static; }

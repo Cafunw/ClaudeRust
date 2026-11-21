@@ -1232,6 +1232,21 @@ pub async fn search_in_files(state: St<'_>, conversation_id: String, query: Stri
     Ok(serde_json::to_value(r)?)
 }
 
+/// Who last changed each line of a project file (Files viewer → Blame).
+#[tauri::command]
+pub async fn file_blame(state: St<'_>, conversation_id: String, path: String) -> AppResult<Value> {
+    let Some(cwd) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let abs = std::fs::canonicalize(cwd.join(path.trim_start_matches('/'))).map_err(|_| AppError::msg(format!("File not found: {path}")))?;
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let rel = abs.strip_prefix(&root).map_err(|_| AppError::msg("That file is outside the repository."))?;
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let out = crate::gitops::git(&root, &["blame", "--porcelain", "--", &rel])
+        .await
+        .map_err(|e| AppError::msg(if e.to_string().contains("no such path") { "This file isn't in git yet.".to_string() } else { e.to_string() }))?;
+    Ok(crate::gitops::parse_blame(&out))
+}
+
 /// One level of the project's file tree (for the Files pane).
 #[tauri::command]
 pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {

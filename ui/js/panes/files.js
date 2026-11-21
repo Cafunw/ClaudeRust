@@ -3,7 +3,7 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, humanSize, debounce, showMenu, toast } from '../util.js';
+import { h, esc, errorToast, humanSize, debounce, showMenu, toast, relTime } from '../util.js';
 import { copyText } from '../parts.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
 
@@ -156,6 +156,7 @@ async function drawFile(el, ctx) {
   const head = h(`<div class="pane-head fv-head"><button class="icon-btn" data-a="back" title="${t('back')}">${icon('arrowLeft', 14)}</button>
     <div class="fv-path ellipsis" title="${esc(f.path)}">${crumbs}</div>
     <span class="muted small">${f.lines != null ? `${f.lines} ${esc(t('files_lines'))} · ` : ''}${esc(humanSize(f.size))}</span>
+    <button class="icon-btn ${s.blame ? 'on' : ''}" data-a="blame" title="${esc(t('fv_blame'))}">${icon('history', 14)}</button>
     <button class="icon-btn" data-a="ask" title="${esc(t('fv_ask'))}">${icon('sparkle', 14)}</button>
     <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}">@</button>
     <button class="icon-btn" data-a="more" title="${esc(t('fv_more'))}">${icon('more', 14)}</button>
@@ -179,6 +180,7 @@ async function drawFile(el, ctx) {
     { label: t('reveal'), icon: 'folder', onClick: () => call('reveal_path', { path: String(f.abs) }).catch(errorToast) },
   ], { placement: 'bottom-end', width: 240 });
   head.querySelector('[data-a=back]').onclick = () => { s.file = null; s.line = null; drawTree(el, ctx); };
+  head.querySelector('[data-a=blame]').onclick = () => { s.blame = !s.blame; drawFile(el, ctx); };
   head.querySelector('[data-a=at]').onclick = () => mention(f.path);
   head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: s.line || null }).catch(errorToast);
   el.appendChild(head);
@@ -195,6 +197,7 @@ async function drawFile(el, ctx) {
     if (sp) mention(f.path, Number(sp.textContent));
   };
   el.appendChild(body);
+  if (s.blame) addBlame(body, ctx, f.path, n);
   // a line to show (from /todos): scroll to it and mark it
   const target = s.line && body.querySelectorAll('.fv-gutter span')[s.line - 1];
   if (target) {
@@ -206,6 +209,36 @@ async function drawFile(el, ctx) {
     requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
   }
   if (f.lines > n) el.appendChild(h(`<div class="muted small fv-more">${esc(t('files_truncated', { n, total: f.lines }))}</div>`));
+}
+
+/** A column with the commit that last changed each line. */
+async function addBlame(body, ctx, path, n) {
+  const col = h(`<pre class="fv-blame"><span class="muted">…</span></pre>`);
+  body.insertBefore(col, body.firstChild);
+  let b;
+  try { b = await call('file_blame', { conversationId: ctx.convId, path }); } catch (e) { col.innerHTML = `<span class="fv-blame-err" title="${esc(e.message || String(e))}">${esc(e.message || String(e))}</span>`; return; }
+  const zero = /^0+$/;
+  let out = '';
+  for (let i = 0; i < Math.min(n, b.lines.length); i++) {
+    const ci = b.lines[i];
+    if (i > 0 && b.lines[i - 1] === ci) { out += '<span class="same"></span>'; continue; }
+    const c = b.commits[ci] || {};
+    const label = zero.test(c.sha || '') ? t('blame_uncommitted') : `${String(c.sha).slice(0, 7)} ${c.author} · ${relTime(c.time)}`;
+    out += `<span class="${zero.test(c.sha || '') ? 'unc' : 'c'}" data-sha="${esc(c.sha || '')}" title="${esc(`${c.summary || ''}${c.author ? `\n${c.author}` : ''}`)}">${esc(label)}</span>`;
+  }
+  col.innerHTML = out;
+  // match the code's actual line pitch (fonts can make it differ from the CSS value)
+  const g = body.querySelectorAll('.fv-gutter span');
+  if (g.length > 1) {
+    const pitch = (g[g.length - 1].getBoundingClientRect().top - g[0].getBoundingClientRect().top) / (g.length - 1);
+    if (pitch > 0) col.style.setProperty('--row-h', `${pitch}px`);
+  }
+  col.onclick = async (e) => {
+    const sp = e.target.closest('span.c');
+    if (!sp) return;
+    const hist = await import('./history.js');
+    hist.showCommit(sp.dataset.sha);
+  };
 }
 
 function draw(el, ctx) {

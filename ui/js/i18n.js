@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  fv_blame: "Blame: who last changed each line",
+  blame_uncommitted: "not committed yet",
   fv_explain: "Explain this file",
   fv_review: "Review this file",
   fv_tests: "Write tests for it",
@@ -510,6 +512,8 @@ const en = {
 };
 
 const tr = {
+  fv_blame: "Blame: her satırı en son kim değiştirdi",
+  blame_uncommitted: "henüz commit edilmedi",
   fv_explain: "Bu dosyayı açıkla",
   fv_review: "Bu dosyayı incele",
   fv_tests: "Bunun için test yaz",

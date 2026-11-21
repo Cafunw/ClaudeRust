@@ -240,9 +240,61 @@ pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// `git blame --porcelain` output as `{commits: [{sha, author, time,
+/// summary}], lines: [index into commits, one per line]}`. Lines not
+/// committed yet point at a commit with an all-zero sha.
+pub fn parse_blame(out: &str) -> Value {
+    let mut commits: Vec<Value> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut lines: Vec<usize> = Vec::new();
+    let mut cur: Option<usize> = None;
+    for l in out.lines() {
+        if l.starts_with('\t') {
+            if let Some(i) = cur {
+                lines.push(i);
+            }
+            continue;
+        }
+        let mut parts = l.split(' ');
+        let first = parts.next().unwrap_or("");
+        if first.len() == 40 && first.chars().all(|c| c.is_ascii_hexdigit()) {
+            let i = *index.entry(first.to_string()).or_insert_with(|| {
+                commits.push(json!({"sha": first, "author": "", "time": 0, "summary": ""}));
+                commits.len() - 1
+            });
+            cur = Some(i);
+            continue;
+        }
+        let Some(i) = cur else { continue };
+        let rest = l.split_once(' ').map(|(_, r)| r).unwrap_or("");
+        match first {
+            "author" => commits[i]["author"] = json!(rest),
+            "author-time" => commits[i]["time"] = json!(rest.parse::<i64>().unwrap_or(0) * 1000),
+            "summary" => commits[i]["summary"] = json!(rest),
+            _ => {}
+        }
+    }
+    json!({"commits": commits, "lines": lines})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blame_porcelain() {
+        let a = "a".repeat(40);
+        let z = "0".repeat(40);
+        let out = format!(
+            "{a} 1 1 2\nauthor Ada\nauthor-time 1700000000\nsummary Add parser\nfilename x.rs\n\tfn a() {{}}\n{a} 2 2\n\tfn b() {{}}\n{z} 3 3 1\nauthor Not Committed Yet\nauthor-time 1800000000\nsummary Version of x.rs from x.rs\nfilename x.rs\n\tnew line\n"
+        );
+        let v = parse_blame(&out);
+        assert_eq!(v["lines"], json!([0, 0, 1]));
+        assert_eq!(v["commits"][0]["author"], "Ada");
+        assert_eq!(v["commits"][0]["time"], 1_700_000_000_000i64);
+        assert_eq!(v["commits"][0]["summary"], "Add parser");
+        assert_eq!(v["commits"][1]["sha"], z);
+    }
 
     #[test]
     fn porcelain_parsing() {

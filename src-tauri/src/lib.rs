@@ -380,6 +380,7 @@ pub fn run() {
             commands::project_dir,
             commands::project_file,
             commands::scan_todos,
+            commands::file_blame,
             commands::search_in_files,
             commands::prompt_history,
             commands::pr_info,

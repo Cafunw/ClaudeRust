@@ -4,7 +4,7 @@ import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
 import { h, esc, errorToast, confirmDialog, toast, relTime } from '../util.js';
-import { registerPane, context, refresh } from '../workspace.js';
+import { registerPane, context, refresh, show } from '../workspace.js';
 import { parseUnified } from './changes.js';
 
 const open = new Map(); // convId -> sha
@@ -70,3 +70,12 @@ registerPane({
 });
 
 on('files-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) refresh('history'); });
+
+/** Open the History pane on a commit (e.g. from the Files viewer's blame). */
+export function showCommit(sha) {
+  const c = context();
+  if (!c) return;
+  open.set(c.convId, sha);
+  show('history');
+  refresh('history');
+}
