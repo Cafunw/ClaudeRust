@@ -1,6 +1,41 @@
 // Global app state with a tiny pub/sub.
 const listeners = new Map();
 
+const DRAFTS_KEY = 'clauderust-drafts';
+
+/** Unsent drafts, kept in local storage so they survive a restart. */
+class Drafts extends Map {
+  constructor() {
+    super();
+    try {
+      const saved = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '[]');
+      for (const [k, v] of saved) if (typeof v === 'string' && v.trim()) super.set(k, v);
+    } catch { /* storage unavailable */ }
+    this.timer = null;
+  }
+  persist() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      try {
+        const keep = [...this.entries()].filter(([, v]) => v && v.trim() && v.length <= 100_000).slice(-50);
+        localStorage.setItem(DRAFTS_KEY, JSON.stringify(keep));
+      } catch { /* storage full or unavailable */ }
+    }, 400);
+  }
+  set(k, v) {
+    // re-insert so the newest drafts are kept when trimming
+    super.delete(k);
+    if (v && v.trim()) super.set(k, v);
+    if (this.timer !== undefined) this.persist();
+    return this;
+  }
+  delete(k) {
+    const r = super.delete(k);
+    this.persist();
+    return r;
+  }
+}
+
 export const store = {
   settings: {},
   models: [],
@@ -13,7 +48,7 @@ export const store = {
   route: { name: 'new', params: {} },
   running: new Set(),
   permissions: new Map(), // request_id -> payload
-  drafts: new Map(), // conversation id | 'new' -> text
+  drafts: new Drafts(), // conversation id | 'new' -> text (persisted)
   sidebarCollapsed: false,
   mcpServers: [],
   artifactPanel: null, // {conversationId, identifier, version}
