@@ -1281,14 +1281,25 @@ pub async fn open_external(app: AppHandle, url: String) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub async fn open_path(app: AppHandle, path: String) -> AppResult<()> {
+pub async fn open_path(app: AppHandle, state: St<'_>, path: String) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    crate::pathguard::openable(&path, &state.data_dir, &state.mcp.config_path)?;
     app.opener().open_path(path, None::<&str>).map_err(|e| AppError::msg(e.to_string()))
 }
 
 #[tauri::command]
-pub async fn reveal_path(app: AppHandle, path: String) -> AppResult<()> {
+pub async fn reveal_path(app: AppHandle, state: St<'_>, path: String) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let st = state.inner().clone();
+    let p = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut roots: Vec<String> = st.db.conv_list(None, None)?.into_iter().filter_map(|c| c.cwd).collect();
+        roots.sort();
+        roots.dedup();
+        crate::pathguard::revealable(&p, &st.data_dir, &st.mcp.config_path, &roots)
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))??;
     app.opener().reveal_item_in_dir(path).map_err(|e| AppError::msg(e.to_string()))
 }
 

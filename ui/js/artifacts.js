@@ -5,6 +5,7 @@ import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
 import { $, esc, h, showMenu, errorToast, relTime, searchToggle } from './util.js';
 import { copyText, decorate } from './parts.js';
+import { storageCall } from './artifact_storage.js';
 
 let panel = null;
 let renderTimer = null;
@@ -154,6 +155,8 @@ async function render() {
       const frame = document.createElement('iframe');
       frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals allow-downloads allow-popups-to-escape-sandbox');
       frame.setAttribute('referrerpolicy', 'no-referrer');
+      // whose window.storage this frame's calls use (not the panel's: it may show another artifact by then)
+      frame.dataset.scope = `${panel.convId}/${myId}`;
       frame.src = artifactUrl(token);
       if (a.type !== 'text/html') frame.classList.add('dark-ok');
       body.appendChild(frame);
@@ -238,3 +241,14 @@ export { store };
 
 // one side panel at a time
 window.addEventListener('workspace-opened', () => { if (panel) close(); });
+
+// window.storage calls of the previewed artifact (only from our own frame)
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__artifactStorage !== 'call') return;
+  const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
+  if (!frame) return;
+  let reply;
+  try { reply = { result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }; } catch (err) { reply = { error: String((err && err.message) || err) }; }
+  e.source.postMessage({ __artifactStorage: 'reply', id: d.id, ...reply }, '*');
+});

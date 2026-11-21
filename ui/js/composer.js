@@ -3,7 +3,7 @@ import * as keymap from './keymap.js';
 import * as slash from './slash.js';
 import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
-import { t } from './i18n.js';
+import { t, tOr } from './i18n.js';
 import { call } from './api.js';
 import { store, modelInfo, emit } from './store.js';
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast } from './util.js';
@@ -291,7 +291,7 @@ export function createComposer(opts) {
     const featured = avail.filter((x) => x.featured);
     const others = avail.filter((x) => !x.featured);
     const items = [];
-    for (const x of featured) items.push({ label: x.name, sub: x.description, checked: x.id === st.model, onClick: () => { persist({ model: x.id }); } });
+    for (const x of featured) items.push({ label: x.name, sub: tOr(`model_d_${x.id}`, x.description), checked: x.id === st.model, onClick: () => { persist({ model: x.id }); } });
     if (others.length) {
       items.push({
         label: t('more_models'), icon: 'chevRight', keepOpen: true,
@@ -357,7 +357,9 @@ export function createComposer(opts) {
       for (const [id, name] of styles) items.push({ label: name, checked: (st.style || 'normal') === id, onClick: () => persist({ style: id }) });
       items.push({ label: t('create_style'), icon: 'edit', onClick: () => emit('open-settings', 'profile') });
     }
-    const servers = store.mcpServers.filter((s) => s.status === 'connected');
+    // Claude Code sessions use the CLI's own MCP config, not the app's servers
+    const ccCode = mode === 'code' && ((opts.context && opts.context()) || {}).engine === 'claude-code';
+    const servers = ccCode ? [] : store.mcpServers.filter((s) => s.status === 'connected');
     if (servers.length) {
       items.push({ sep: true }, { header: 'MCP' });
       for (const s of servers) {

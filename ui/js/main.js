@@ -41,6 +41,7 @@ import { renderCode, renderChats, renderSessions } from './code.js';
 import { openSettings } from './settings.js';
 import { openSearch } from './search.js';
 import { renderOnboarding } from './onboarding.js';
+import { linkTarget } from './deeplink.js';
 
 const mq = window.matchMedia('(prefers-color-scheme: dark)');
 
@@ -56,6 +57,7 @@ mq.addEventListener('change', applyAppearance);
 function layout() {
   document.body.innerHTML = `<div class="app" id="app">
     <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
     <main class="main"><div class="view" id="view"></div></main>
     <aside class="workspace-panel hidden" id="workspace-panel"></aside>
     <aside class="artifact-panel hidden" id="artifact-panel"></aside>
@@ -91,7 +93,7 @@ async function navigate({ name, params = {} }) {
       case 'projects': await renderProjects(view); break;
       case 'project': await renderProject(view, params.id); break;
       case 'artifacts': await artifacts.renderGallery(view); break;
-      case 'code': await renderCode(view); break;
+      case 'code': await renderCode(view, params); break;
       case 'sessions': await renderSessions(view); break;
       default: renderNewChat(view, params); store.route = { name: 'new', params };
     }
@@ -140,6 +142,7 @@ async function refreshMcp() {
 }
 
 function startOnboarding() {
+  linksReady = false;
   $('#sidebar').classList.add('hidden');
   renderOnboarding($('#view'), (target) => {
     $('#sidebar').classList.remove('hidden');
@@ -149,8 +152,19 @@ function startOnboarding() {
       mountSidebar();
       refreshModels();
       navigate({ name: target === 'code' ? 'code' : 'new' });
+      linksReady = true;
+      takeDeepLink();
     });
   });
+}
+
+// a clauderust:// link waits in the backend until onboarding is over
+let linksReady = false;
+async function takeDeepLink() {
+  if (!linksReady) return;
+  const to = linkTarget(await call('deep_link_take').catch(() => null));
+  if (to && to.settings) openSettings('general');
+  else if (to) navigate(to);
 }
 
 /** A field that takes typed text: its Esc and its right-click menu are its own. */
@@ -214,6 +228,7 @@ function bindBackend() {
   onBackend('permission-resolved', (p) => chat.onPermissionResolved(p));
   onBackend('mcp-changed', () => refreshMcp());
   onBackend('menu-new-chat', () => navigate({ name: 'new' }));
+  onBackend('deep-link', takeDeepLink);
   // things the backend finished in the background (e.g. where a deleted
   // session's work was kept)
   onBackend('notice', (n) => toast(n.message, n.error ? 'error' : '', { duration: 12000 }));
@@ -284,6 +299,8 @@ async function init() {
   const last = local.lastRoute;
   if (last && last.name === 'chat' && last.params && last.params.id) navigate(last);
   else navigate({ name: last && last.name === 'code' ? 'code' : (store.appMode === 'code' ? 'code' : 'new') });
+  linksReady = true;
+  takeDeepLink();
   void currentLanguage;
 }
 

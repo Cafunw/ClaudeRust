@@ -95,6 +95,21 @@ export function fmtUsd(n) {
   return `$${v > 0 && v < 0.01 ? v.toPrecision(2) : v.toFixed(2)}`;
 }
 
+/** `p` relative to the folder `root` ('.' for the folder itself), with '/'
+ *  separators; `p` as it is when it lies outside. */
+export function relPath(p, root) {
+  const norm = (s) => String(s || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const f = norm(p);
+  const r = norm(root);
+  if (!r) return p;
+  // Windows paths compare without case (C:\Src and c:/src are one folder)
+  const win = /^[a-z]:\//i.test(r);
+  const fc = win ? f.toLowerCase() : f;
+  const rc = win ? r.toLowerCase() : r;
+  if (fc === rc) return '.';
+  return fc.startsWith(rc + '/') ? f.slice(r.length + 1) : p;
+}
+
 export function humanSize(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

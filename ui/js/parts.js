@@ -1,7 +1,8 @@
 // Rendering of assistant message parts (text, thinking, tools, notices).
 import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
-import { esc, h, morph, toast, fmtUsd, snapshot, sameSnapshot } from './util.js';
+import { esc, h, morph, toast, fmtUsd, snapshot, sameSnapshot, relPath } from './util.js';
+import { lineDiff } from './diffstat.js';
 import { call } from './api.js';
 import { store, modelInfo } from './store.js';
 
@@ -140,30 +141,7 @@ export async function copyText(text) {
 // ------------------------------------------------------------- tool labels
 
 function shortPath(p) {
-  if (!p) return '';
-  const root = store.codeRoot;
-  if (root && p.startsWith(root)) {
-    const r = p.slice(root.length).replace(/^[\\/]/, '');
-    return r || '.';
-  }
-  return p;
-}
-
-function lineDiff(oldS, newS) {
-  const a = String(oldS || '').split('\n');
-  const b = String(newS || '').split('\n');
-  // trim common prefix/suffix for compact display
-  let s = 0;
-  while (s < a.length && s < b.length && a[s] === b[s]) s++;
-  let ea = a.length - 1, eb = b.length - 1;
-  while (ea >= s && eb >= s && a[ea] === b[eb]) { ea--; eb--; }
-  const out = [];
-  const ctxStart = Math.max(0, s - 2);
-  for (let i = ctxStart; i < s; i++) out.push(['ctx', a[i]]);
-  for (let i = s; i <= ea; i++) out.push(['del', a[i]]);
-  for (let i = s; i <= eb; i++) out.push(['add', b[i]]);
-  for (let i = ea + 1; i < Math.min(a.length, ea + 3); i++) out.push(['ctx', a[i]]);
-  return out;
+  return p ? relPath(p, store.codeRoot) : '';
 }
 
 export function diffHtml(rows) {
@@ -380,11 +358,11 @@ function renderFetch(el, p) {
 function errorMessage(err) {
   if (!err) return '';
   const k = err.kind;
-  if (k === 'no_api_key') return err.message;
-  if (err.status === 401 || k === 'authentication_error') return 'Your API key was rejected. Check it in Settings → Account.';
-  if (err.status === 429 || k === 'rate_limit_error') return 'Rate limited by the API. Wait a moment and retry.';
-  if (err.status === 529 || k === 'overloaded_error') return 'The API is temporarily overloaded. Please retry in a moment.';
-  if (k === 'network') return `Network error: ${err.message}`;
+  if (k === 'no_api_key') return t('err_no_api_key');
+  if (err.status === 401 || k === 'authentication_error') return t('err_auth');
+  if (err.status === 429 || k === 'rate_limit_error') return t('err_rate_limit');
+  if (err.status === 529 || k === 'overloaded_error') return t('err_overloaded');
+  if (k === 'network') return t('err_network', { msg: err.message });
   return err.message || t('error_title');
 }
 

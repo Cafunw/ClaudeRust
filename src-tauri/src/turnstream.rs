@@ -15,6 +15,12 @@
 //! - delta: `{conversation_id, turn, seq, base, same}`, where `base` is the
 //!   `seq` of the event it was computed against
 //!
+//! Protocol 2 (once the page asks for it with [`turn_stream_protocol`]): a
+//! changed element of `parts` or `artifacts` whose other fields stayed the
+//! same, such as the growing text or thinking part, is written as an array of
+//! `[key, kept, appended]` edits instead: the new string is the first `kept`
+//! UTF-16 units of the old one followed by `appended`.
+//!
 //! `seq` grows across all conversations and never repeats while the app
 //! runs, so a delta can only be expanded with the exact event it was made
 //! from. `ui/js/turnstream.js` expands it into the full turn and drops the
@@ -54,6 +60,12 @@ pub fn end(conv_id: &str) {
     ENCODER.lock().unwrap_or_else(|e| e.into_inner()).end(conv_id);
 }
 
+/// The page's decoder says which payloads it expands; 2 adds string edits.
+#[tauri::command]
+pub fn turn_stream_protocol(version: u32) {
+    ENCODER.lock().unwrap_or_else(|e| e.into_inner()).edits = version >= 2;
+}
+
 static ENCODER: LazyLock<Mutex<Encoder>> = LazyLock::new(|| Mutex::new(Encoder::default()));
 
 /// What the readers of one conversation's stream last received.
@@ -68,10 +80,19 @@ struct Sent {
     at: Instant,
 }
 
+/// How a delta writes one element of an `ELIDED` list.
+enum Elem<'a> {
+    /// as the reader has it: `null`
+    Same,
+    /// `[key, kept, appended]` edits of the reader's copy
+    Edits(Vec<(&'a str, usize, &'a str)>),
+    Whole,
+}
+
 /// What a delta leaves out.
-struct Same {
+struct Same<'a> {
     /// per element of each `ELIDED` list
-    lists: [Vec<bool>; 2],
+    lists: [Vec<Elem<'a>>; 2],
     /// per `KEPT` value
     kept: [bool; 3],
 }
@@ -81,6 +102,29 @@ struct Encoder {
     seq: u64,
     convs: HashMap<String, Sent>,
     swept_at: Option<Instant>,
+    /// the reader expands protocol 2 (string edits)
+    edits: bool,
+}
+
+/// `new` as edits of `old`'s strings, or None when anything else changed.
+/// `kept` counts UTF-16 units (a JS string's length), whole characters only.
+fn edits<'a>(old: &Value, new: &'a Value) -> Option<Vec<(&'a str, usize, &'a str)>> {
+    let (old, new) = (old.as_object()?, new.as_object()?);
+    if old.len() != new.len() {
+        return None;
+    }
+    new.iter()
+        .filter(|(k, v)| old.get(*k) != Some(v))
+        .map(|(k, v)| {
+            let (a, b) = (old.get(k)?.as_str()?, v.as_str()?);
+            let (units, bytes) = a
+                .chars()
+                .zip(b.chars())
+                .take_while(|(x, y)| x == y)
+                .fold((0, 0), |(u, n), (c, _)| (u + c.len_utf16(), n + c.len_utf8()));
+            Some((k.as_str(), units, &b[bytes..]))
+        })
+        .collect()
 }
 
 impl Encoder {
@@ -106,11 +150,18 @@ impl Encoder {
             .map(|s| Same {
                 lists: [0, 1].map(|i| {
                     let new = lists[i].map(Vec::as_slice).unwrap_or(&[]);
-                    new.iter().enumerate().map(|(j, v)| s.lists[i].get(j) == Some(v)).collect()
+                    new.iter()
+                        .enumerate()
+                        .map(|(j, v)| match s.lists[i].get(j) {
+                            Some(old) if old == v => Elem::Same,
+                            Some(old) if self.edits => edits(old, v).map_or(Elem::Whole, Elem::Edits),
+                            _ => Elem::Whole,
+                        })
+                        .collect()
                 }),
                 kept: [0, 1, 2].map(|i| turn.get(KEPT[i]).is_some_and(|v| !v.is_null() && *v == s.kept[i])),
             })
-            .filter(|m| m.lists.iter().flatten().any(|&b| b));
+            .filter(|m| m.lists.iter().flatten().any(|e| !matches!(e, Elem::Whole)));
         let base_seq = same.as_ref().and(base.map(|s| s.seq));
         let kept: Vec<&str> = same.as_ref().map(|m| (0..3).filter(|&i| m.kept[i]).map(|i| KEPT[i]).collect()).unwrap_or_default();
         let json = serde_json::to_string(&Payload {
@@ -187,7 +238,7 @@ struct Payload<'a> {
 /// A turn, with what `same` marks written as `null`.
 struct TurnOut<'a> {
     turn: &'a Value,
-    same: Option<&'a Same>,
+    same: Option<&'a Same<'a>>,
 }
 
 impl Serialize for TurnOut<'_> {
@@ -209,7 +260,7 @@ impl Serialize for TurnOut<'_> {
     }
 }
 
-struct Elided<'a>(&'a Value, &'a [bool]);
+struct Elided<'a>(&'a Value, &'a [Elem<'a>]);
 
 impl Serialize for Elided<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -218,10 +269,10 @@ impl Serialize for Elided<'_> {
         };
         let mut seq = s.serialize_seq(Some(items.len()))?;
         for (i, v) in items.iter().enumerate() {
-            if self.1.get(i) == Some(&true) {
-                seq.serialize_element(&())?;
-            } else {
-                seq.serialize_element(v)?;
+            match self.1.get(i) {
+                Some(Elem::Same) => seq.serialize_element(&())?,
+                Some(Elem::Edits(e)) => seq.serialize_element(e)?,
+                _ => seq.serialize_element(v)?,
             }
         }
         seq.end()
@@ -256,6 +307,14 @@ mod tests {
                     for (i, v) in items.iter_mut().enumerate() {
                         if v.is_null() {
                             *v = prev[k][i].clone();
+                        } else if let Some(ops) = v.as_array() {
+                            let mut el = prev[k][i].clone();
+                            for op in ops {
+                                let units: Vec<u16> = el[op[0].as_str().unwrap()].as_str().unwrap().encode_utf16().collect();
+                                let kept = String::from_utf16(&units[..op[1].as_u64().unwrap() as usize]).unwrap();
+                                el[op[0].as_str().unwrap()] = json!(kept + op[2].as_str().unwrap());
+                            }
+                            *v = el;
                         }
                     }
                 }
@@ -298,35 +357,88 @@ mod tests {
         json!({"conversation_id": conv, "turn": t})
     }
 
+    fn encoder(edits: bool) -> Encoder {
+        Encoder { edits, ..Default::default() }
+    }
+
     #[test]
     fn deltas_expand_to_the_full_turn() {
-        let mut e = Encoder::default();
+        for edits in [false, true] {
+            let mut e = encoder(edits);
+            let mut r = Reader::default();
+            let t0 = Instant::now();
+            let big = "x".repeat(5000);
+            let mut turns = vec![];
+            for i in 0..30 {
+                let mut parts = vec![text("Looking"), tool("t1", "done", &big)];
+                if i > 10 {
+                    parts.push(tool("t2", if i > 20 { "done" } else { "running" }, if i > 20 { "ok" } else { "" }));
+                }
+                parts.push(text(&"streamed ".repeat(i + 1)));
+                turns.push(turn("a1", parts, true));
+            }
+            let mut keys = vec![];
+            for (i, t) in turns.iter().enumerate() {
+                let now = t0 + Duration::from_millis(45 * i as u64);
+                let json = e.encode("c1", t, now);
+                let key = !json.contains("\"base\"");
+                // deltas leave out the 5 kB tool output
+                assert!(if key { json.len() > 5000 } else { json.len() < 1500 }, "event {i}: {}", json.len());
+                if key {
+                    keys.push(i);
+                }
+                assert_eq!(r.read(&json).unwrap(), full("c1", t), "event {i}");
+            }
+            // a keyframe at least every second
+            assert_eq!(keys, [0, 23], "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn a_growing_part_is_sent_as_its_new_end() {
+        let mut e = encoder(true);
         let mut r = Reader::default();
         let t0 = Instant::now();
-        let big = "x".repeat(5000);
-        let mut turns = vec![];
-        for i in 0..30 {
-            let mut parts = vec![text("Looking"), tool("t1", "done", &big)];
-            if i > 10 {
-                parts.push(tool("t2", if i > 20 { "done" } else { "running" }, if i > 20 { "ok" } else { "" }));
+        // multi-unit characters before and at the cut, html that changes before its end
+        let chunks = ["Ça ", "😀 ", "ğüş ", "**bold** ", "😁", "漢字 ", "done. "];
+        let mut raw = String::new();
+        let mut thought = String::new();
+        for i in 0..14u64 {
+            let c = chunks[i as usize % chunks.len()];
+            if i < 7 { thought.push_str(c) } else { raw.push_str(c) }
+            let mut parts = vec![json!({"kind": "thinking", "raw": thought, "html": format!("<p>{thought}</p>"), "redacted": false, "streaming": i < 7})];
+            if i >= 7 {
+                parts.push(text(&raw));
             }
-            parts.push(text(&"streamed ".repeat(i + 1)));
-            turns.push(turn("a1", parts, true));
-        }
-        let mut keys = vec![];
-        for (i, t) in turns.iter().enumerate() {
-            let now = t0 + Duration::from_millis(45 * i as u64);
-            let json = e.encode("c1", t, now);
-            let key = !json.contains("\"base\"");
-            // deltas leave out the 5 kB tool output
-            assert!(if key { json.len() > 5000 } else { json.len() < 1500 }, "event {i}: {}", json.len());
-            if key {
-                keys.push(i);
+            let t = turn("a1", parts, true);
+            let json = e.encode("c1", &t, t0 + Duration::from_millis(45 * i));
+            assert_eq!(r.read(&json).unwrap(), full("c1", &t), "event {i}: {json}");
+            let p: Value = serde_json::from_str(&json).unwrap();
+            if i > 0 && i != 7 {
+                let grown = if i < 7 { 0 } else { 1 };
+                let ops = p["turn"]["parts"][grown].as_array().unwrap_or_else(|| panic!("event {i}: {json}"));
+                // only the new end, never the whole string again
+                assert!(ops.iter().all(|op| op[2].as_str().unwrap().chars().count() <= c.chars().count() + 4), "event {i}: {json}");
             }
-            assert_eq!(r.read(&json).unwrap(), full("c1", t), "event {i}");
         }
-        // a keyframe at least every second
-        assert_eq!(keys, [0, 23], "{keys:?}");
+        // the thinking part stops streaming at event 7: a non-string change is sent whole
+        assert_eq!(edits(&json!({"a": "x", "b": true}), &json!({"a": "xy", "b": false})), None);
+        assert_eq!(edits(&json!({"a": "x"}), &json!({"a": "x", "b": "y"})), None);
+        assert_eq!(edits(&json!({"a": "x", "c": "z"}), &json!({"a": "x", "b": "z"})), None);
+        // U+1F600 and U+1F601 share their first UTF-16 unit: the cut stays before the whole character
+        assert_eq!(edits(&json!({"a": "a😀b"}), &json!({"a": "a😁b"})), Some(vec![("a", 1, "😁b")]));
+        assert_eq!(edits(&json!({"a": "ğ😀b", "n": 1}), &json!({"a": "ğ😀bc", "n": 1})), Some(vec![("a", 4, "c")]));
+    }
+
+    #[test]
+    fn protocol_1_readers_never_get_edits() {
+        let mut e = Encoder::default();
+        let t0 = Instant::now();
+        for i in 0..10u64 {
+            let t = turn("a1", vec![text("same"), text(&"grows ".repeat(i as usize + 1))], true);
+            let p: Value = serde_json::from_str(&e.encode("c1", &t, t0 + Duration::from_millis(45 * i))).unwrap();
+            assert!(p["turn"]["parts"].as_array().unwrap().iter().all(|v| v.is_null() || v.is_object()), "{p}");
+        }
     }
 
     #[test]
@@ -645,6 +757,128 @@ mod tests {
         emit("cb", &again, false, &mut e, &mut r, &mut out);
         emit("cb", &b[6], false, &mut e, &mut r, &mut out);
         std::fs::write(path, serde_json::to_string(&out).unwrap()).unwrap();
+    }
+
+    /// A 5,000-character reply (alone, then after 1,500 characters of thinking)
+    /// streamed 15 characters per 45 ms event, rendered as the engine does, in each protocol.
+    /// `cargo test --no-default-features --lib turnstream::tests::measure_reply -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_reply() {
+        use crate::render::{assistant_turn, ArtifactTracker, RenderCtx};
+        let mut r = Rng(7);
+        let mut reply = String::new();
+        for i in 0.. {
+            if reply.len() >= 6500 {
+                break;
+            }
+            reply.push_str(&prose(&mut r, 30, 90));
+            reply.push_str(if i % 3 == 1 { "\n\n```rust\n" } else { "\n\n" });
+            if i % 3 == 1 {
+                reply.push_str(&code(&mut r, 8, 12));
+                reply.push_str("\n```\n\n");
+            }
+        }
+        let (live, streaming_tools, mcp) = (HashMap::new(), std::collections::HashSet::new(), HashMap::new());
+        for thought in [0, 1500] {
+            let (thinking, answer): (String, String) = (reply.chars().take(thought).collect(), reply.chars().skip(thought).take(5000).collect());
+            let end = thought + 5000;
+            let mut turns = vec![];
+            for (i, at) in (15..end).step_by(15).chain([end]).enumerate() {
+                let mut content = vec![];
+                if thought > 0 {
+                    content.push(json!({"type": "thinking", "thinking": thinking.chars().take(at).collect::<String>()}));
+                }
+                if at > thought {
+                    content.push(json!({"type": "text", "text": answer.chars().take(at - thought).collect::<String>()}));
+                }
+                let m = msg("a0".into(), "assistant", json!(content));
+                let ctx = RenderCtx { math: false, live_tools: &live, streaming_tools: &streaming_tools, mcp_names: &mcp, streaming_msg: (at < end).then_some("a0") };
+                turns.push((i, assistant_turn(&[&m], &ctx, &mut ArtifactTracker::default())));
+            }
+            let t0 = Instant::now();
+            let full_bytes: usize = turns.iter().map(|(_, t)| serde_json::to_string(&full("c1", t)).unwrap().len()).sum();
+            println!("{thought} thinking + 5000 reply characters, {} events; whole turn every event: {full_bytes} B", turns.len());
+            for edits in [false, true] {
+                let (mut e, mut rd) = (encoder(edits), Reader::default());
+                let (mut total, mut keys, mut key_bytes) = (0, 0, 0);
+                for (i, t) in &turns {
+                    let json = e.encode("c1", t, t0 + Duration::from_millis(45 * *i as u64));
+                    assert_eq!(rd.read(&json).unwrap(), full("c1", t));
+                    total += json.len();
+                    if !json.contains("\"base\"") {
+                        keys += 1;
+                        key_bytes += json.len();
+                    }
+                }
+                println!("  protocol {}: {total} B ({:.1}%), {keys} keyframes {key_bytes} B", 1 + edits as u8, 100.0 * total as f64 / full_bytes as f64);
+            }
+        }
+    }
+
+    /// Payloads for `ui/test/turnstream_delta.test.mjs`, each with the full
+    /// payload the decoder must make of it (null: it must drop it): growing
+    /// thinking and text with multi-unit characters, two conversations, a
+    /// lost event, the end of a turn and `end`.
+    fn delta_fixture() -> Vec<Value> {
+        let mut e = encoder(true);
+        let mut r = Reader::default();
+        let t0 = Instant::now();
+        let mut out = vec![];
+        let mut n = 0u64;
+        let mut emit = |conv: &str, t: &Value, lost: bool, e: &mut Encoder, r: &mut Reader, out: &mut Vec<Value>| {
+            n += 1;
+            let json = e.encode(conv, t, t0 + Duration::from_millis(100 * n));
+            if lost {
+                return;
+            }
+            let got = r.read(&json);
+            if let Some(g) = &got {
+                assert_eq!(*g, full(conv, t));
+            }
+            out.push(json!({"payload": json, "full": got}));
+        };
+        let words = ["Ça ", "😀 ", "ğüş ", "<b>&amp;</b> ", "😁", "漢字 ", "\"q\"\n"];
+        let (mut grown, mut thought, mut other) = (String::new(), String::new(), String::new());
+        for i in 0..22usize {
+            grown.push_str(words[i % words.len()]);
+            if i < 6 {
+                thought = grown.clone();
+            }
+            let mut parts = vec![json!({"kind": "thinking", "raw": thought, "html": format!("<p>{thought}</p>"), "redacted": false, "streaming": i < 6})];
+            if i >= 6 {
+                parts.push(text(&grown[thought.len()..]));
+            }
+            emit("ca", &turn("a1", parts, true), i == 10, &mut e, &mut r, &mut out);
+            if i % 2 == 0 {
+                other.push_str(words[words.len() - 1 - i % words.len()]);
+                emit("cb", &turn("b1", vec![text("fixed"), text(&other)], true), false, &mut e, &mut r, &mut out);
+            }
+        }
+        emit("ca", &turn("a1", vec![text(&grown)], false), false, &mut e, &mut r, &mut out);
+        e.end("cb");
+        emit("cb", &turn("b1", vec![text("fixed"), text(&other)], true), false, &mut e, &mut r, &mut out);
+        out
+    }
+
+    /// The JS test reads what the encoder writes today.
+    /// `WRITE_FIXTURES=1 cargo test --no-default-features --lib turnstream` rewrites it.
+    #[test]
+    fn the_js_fixture_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/test/turnstream_delta.fixture.json");
+        let events = delta_fixture();
+        if std::env::var_os("WRITE_FIXTURES").is_some() {
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&path, format!("[\n{}\n]\n", lines.join(",\n"))).unwrap();
+        }
+        let out = Value::Array(events);
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(disk == out, "{} is stale: run with WRITE_FIXTURES=1", path.display());
+        // it covers edits, dropped deltas and keyframes
+        let payloads: Vec<&str> = out.as_array().unwrap().iter().map(|v| v["payload"].as_str().unwrap()).collect();
+        assert!(payloads.iter().any(|p| p.contains("[[\"")));
+        assert!(out.as_array().unwrap().iter().any(|v| v["full"].is_null()));
+        assert!(payloads.iter().filter(|p| !p.contains("\"base\"")).count() >= 4);
     }
 
     #[test]

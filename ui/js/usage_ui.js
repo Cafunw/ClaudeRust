@@ -2,10 +2,8 @@
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { emit } from './store.js';
-import { h, esc, modal, fmtTokens, errorToast } from './util.js';
+import { h, esc, modal, fmtTokens, fmtUsd as money, errorToast } from './util.js';
 import { registerCommand } from './slash.js';
-
-const money = (v) => `$${(v || 0) < 0.01 && v > 0 ? v.toFixed(4) : (v || 0).toFixed(2)}`;
 
 function chart(byDay, days) {
   const map = new Map(byDay.map((d) => [d.date, d]));

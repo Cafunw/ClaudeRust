@@ -12,6 +12,7 @@ use crate::anthropic::Accumulator;
 use crate::db::Message;
 use crate::engine::{emit_conv_updated, emit_turn, update_conv_options};
 use crate::error::{AppError, AppResult};
+use crate::mcp::McpTool;
 use crate::render::{self, ArtifactTracker, RenderCtx};
 use crate::state::{AppState, LiveRun, PermissionReply};
 use crate::util::{new_id, now_ms, truncate_chars};
@@ -216,6 +217,47 @@ pub async fn auth_logout(override_path: &str) -> AppResult<()> {
     }
 }
 
+/// A short title for a conversation that runs on the Claude account (no API key to ask), from the CLI's
+/// smallest model: one call with no tools, settings or saved session, no thinking, at most 64 tokens out and
+/// about 600 in. None when the conversation doesn't run through the CLI or the call fails.
+pub async fn title(st: &AppState, conv: &crate::db::Conversation, user_text: &str, assistant_text: &str) -> Option<String> {
+    if !uses_cli(st, conv).await {
+        return None;
+    }
+    let cli = find_cli(&st.settings.read().claude_code_path)?;
+    let args: Vec<String> = [
+        "-p", "--model", "haiku", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
+        "--disable-slash-commands", "--no-session-persistence", "--system-prompt", crate::prompts::TITLE_PROMPT,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+    cmd.current_dir(chat_dir(st)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+        cmd.env_remove(k);
+    }
+    cmd.env("MAX_THINKING_TOKENS", "0").env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64");
+    let mut child = cmd.spawn().ok()?;
+    // the conversation goes in on stdin: no command-line quoting for what the person wrote
+    let text = format!("<conversation>\nUser: {}\n\nAssistant: {}\n</conversation>", truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
+    let mut stdin = child.stdin.take()?;
+    let _ = stdin.write_all(text.as_bytes()).await;
+    drop(stdin);
+    let out = tokio::time::timeout(Duration::from_secs(45), child.wait_with_output()).await.ok()?.ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    if v["is_error"] == true {
+        return None;
+    }
+    clean_title(v["result"].as_str()?)
+}
+
+/// The title in a model's reply: its first line without quotes, markdown or a closing period.
+fn clean_title(reply: &str) -> Option<String> {
+    let t = reply.lines().find(|l| !l.trim().is_empty())?.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '*' | '#')).trim_end_matches('.');
+    (!t.is_empty()).then(|| truncate_chars(t, 80))
+}
+
 /// An empty folder of ours where chat conversations run the CLI, so no
 /// project's files, memory or settings are within its reach.
 fn chat_dir(st: &AppState) -> String {
@@ -351,7 +393,7 @@ struct TurnState {
     siblings: Value,
     tracker: ArtifactTracker,
     last_emit: Instant,
-    /// What the CLI had spent before this turn: its results report a running total.
+    /// The CLI's running total before this turn: its results report one, a resumed session's earlier turns included.
     cost_before: f64,
 }
 
@@ -549,6 +591,8 @@ struct PermDone {
     input: Value,
     tool_use_id: String,
     suggestions: Value,
+    /// "server/tool" of an app MCP tool, for an "allow always" to set its policy
+    mcp_key: Option<String>,
     reply: Option<PermissionReply>,
 }
 
@@ -560,7 +604,7 @@ fn is_resume_lost(text: &str) -> bool {
 /// through: one left from another model is dropped, as the built-in engine does.
 /// Ultracode lives only as long as the CLI process (`--resume` doesn't bring it
 /// back), so a choice goes with every spawn: on, or off over settings that turn
-/// it on for every session; none leaves the CLI's own. Chats have no tools, so no Workflow tool.
+/// it on for every session; none leaves the CLI's own. Chats have no Workflow tool.
 pub fn cli_session_flags(options: &Value, model: &str, chat: bool, data_dir: &std::path::Path) -> Vec<String> {
     let m = crate::models::info(model);
     let mut out = vec![];
@@ -571,6 +615,86 @@ pub fn cli_session_flags(options: &Value, model: &str, chat: bool, data_dir: &st
         out.extend(["--settings".to_string(), ultracode_settings_file(data_dir, on).display().to_string()]);
     }
     out
+}
+
+/// A name in the characters the CLI keeps in an MCP tool's name (`mcp__<server>__<tool>`); it replaces the rest.
+fn cli_safe(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+}
+
+/// The app's MCP tools as a chat on the account offers them: SDK-hosted servers the CLI reaches through us
+/// (`initialize`, then `mcp_message`), relayed to the app's own connections. Each is (server, tool, the app's
+/// tool), named in the CLI's characters, so the CLI calls it `mcp__<server>__<tool>`.
+type ChatTools = Vec<(String, String, McpTool)>;
+
+fn chat_tools(tools: Vec<McpTool>) -> ChatTools {
+    let mut out: ChatTools = vec![];
+    for t in tools {
+        let (s, n) = (cli_safe(&t.server), cli_safe(&t.name));
+        // shortcut: of two tools whose names differ only in characters the CLI replaces, the second is left out
+        if !out.iter().any(|(a, b, _)| *a == s && *b == n) {
+            out.push((s, n, t));
+        }
+    }
+    out
+}
+
+/// What a chat on the account switches on in the CLI besides its prompt: web search and fetch while the
+/// conversation's web search is on, and its MCP tools; none of Claude Code's own tools, skills, MCP servers,
+/// settings or hooks. The second list runs without asking: web search (as on the API), and the MCP tools set to
+/// Allow in Settings or allowed for this chat. Web fetch and the other MCP tools ask; Block ones aren't offered.
+fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, Value>, chat_allowed: &[String]) -> (Vec<String>, Vec<String>) {
+    let flags = ["--tools", if web { "WebSearch,WebFetch" } else { "" }, "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut allowed: Vec<String> = if web { vec!["WebSearch".into()] } else { vec![] };
+    for (s, n, t) in tools {
+        if policies.get(&format!("{}/{}", t.server, t.name)).and_then(Value::as_str) == Some("allow") || chat_allowed.contains(&t.api_name) {
+            allowed.push(format!("mcp__{s}__{n}"));
+        }
+    }
+    (flags, allowed)
+}
+
+/// The SDK-hosted `server`'s answer to a JSON-RPC message from the CLI; `None` for a tool call, which the
+/// app's connection to the real server answers.
+fn sdk_mcp_reply(tools: &ChatTools, server: &str, msg: &Value) -> Option<Value> {
+    let result = match msg["method"].as_str().unwrap_or("") {
+        "tools/call" => return None,
+        "initialize" => json!({"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")}}),
+        "tools/list" => json!({"tools": tools.iter().filter(|(s, ..)| s == server).map(|(_, n, t)| json!({"name": n, "description": t.description, "inputSchema": t.input_schema})).collect::<Vec<_>>()}),
+        // a notification (no id) is answered with an empty result
+        m if m == "ping" || msg["id"].is_null() => json!({}),
+        m => return Some(json!({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": format!("Method not found: {m}")}})),
+    };
+    Some(json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}))
+}
+
+/// A tool call the CLI sent to an SDK-hosted server, run on the app's MCP connection and answered in MCP's terms.
+async fn sdk_mcp_call(st: &AppState, tools: &ChatTools, server: &str, msg: &Value) -> Value {
+    let name = msg["params"]["name"].as_str().unwrap_or("");
+    let failed = |text: String| (vec![json!({"type": "text", "text": text})], true);
+    let (blocks, is_error) = match tools.iter().find(|(s, n, _)| s == server && n == name) {
+        Some((.., t)) => st.mcp.call(&t.api_name, &msg["params"]["arguments"]).await.unwrap_or_else(|e| failed(format!("Error: {e}"))),
+        None => failed(format!("Tool {name} is not available.")),
+    };
+    json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"content": mcp_content(&blocks), "isError": is_error}})
+}
+
+/// The app's MCP results (tool_result blocks: text and images) back in MCP's content shape.
+fn mcp_content(blocks: &[Value]) -> Vec<Value> {
+    blocks
+        .iter()
+        .map(|b| match b["type"].as_str() {
+            Some("image") => json!({"type": "image", "data": b["source"]["data"], "mimeType": b["source"]["media_type"]}),
+            _ => json!({"type": "text", "text": b["text"].as_str().unwrap_or_default()}),
+        })
+        .collect()
+}
+
+fn mcp_response(request_id: &Value, reply: Value) -> Value {
+    json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": {"mcp_response": reply}}})
 }
 
 /// The settings file that switches ultracode on or off. `--settings` takes a path or
@@ -786,23 +910,27 @@ async fn run_once(
     let flags = cli_session_flags(&conv.options, &conv.model, chat, &st.data_dir);
     let ultracode_asked = conv.options["ultracode"] == true && flags.iter().any(|a| a == "--settings");
     args.extend(flags);
+    let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
+    let mut sdk_tools: Arc<ChatTools> = Arc::default();
+    let mut chat_allowed: Vec<String> = vec![];
     if chat {
-        // our chat prompt (instructions, style, project knowledge) replaces the coding one, and
-        // nothing else is switched on: no tools, skills, MCP servers or the CLI's own settings and hooks.
+        // our chat prompt (instructions, style, project knowledge) replaces the coding one.
         // The prompt goes by file: a project's knowledge can pass the command-line limit.
-        // shortcut: no web search or memory search in these chats; the CLI would ask permission for them
-        let mut c = conv.clone();
-        c.options["web_search"] = json!(false);
+        // shortcut: no memory search in these chats (the API engine runs it in-process)
         let mut s = settings.clone();
         s.chat_search = false;
-        let rc = crate::engine::build_request_context(st, &c, &s).await?;
+        let rc = crate::engine::build_request_context(st, &conv, &s).await?;
         let file = std::path::Path::new(&cwd).join(format!("system-{conv_id}.txt"));
         if let Err(e) = std::fs::write(&file, rc.system) {
             return fail(format!("Could not write the chat prompt ({}): {e}", file.display()));
         }
-        for a in ["--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""] {
-            args.push(a.into());
-        }
+        // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
+        let tools = chat_tools(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)).collect());
+        let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
+        let (f, allowed) = chat_flags(web, &tools, &settings.tool_policies, &opt_strs("allowed_tools"));
+        args.extend(f);
+        chat_allowed = allowed;
+        sdk_tools = Arc::new(tools);
         args.push("--system-prompt-file".into());
         args.push(file.display().to_string());
     } else if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
@@ -817,6 +945,7 @@ async fn run_once(
     // earlier messages but no CLI session to resume (a fork into another
     // folder, or a conversation begun with the built-in engine): replay them
     let mut with_history = prev.is_none() && path.len() > 1;
+    let mut cost_before = 0.0;
     if let Some(p) = prev {
         if let Some(sid) = p.meta["cc_session"].as_str() {
             if fresh || !transcript_exists(sid) {
@@ -825,6 +954,7 @@ async fn run_once(
                 args.push("--resume".into());
                 args.push(sid.to_string());
                 let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
+                cost_before = resumed_cost(at_tip, &p.meta, || restored_cost(sid));
                 if !at_tip {
                     args.push("--resume-session-at".into());
                     args.push(p.meta["cc_uuid"].as_str().unwrap_or("").to_string());
@@ -842,22 +972,13 @@ async fn run_once(
     });
     // Grants from "allow for this session" (kept in this chat, not written
     // to the project's Claude Code settings). Variadic flags go last.
-    let dirs: Vec<String> = conv.options["cc_add_dirs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|d| d.as_str().map(String::from))
-        .collect();
+    let dirs = opt_strs("cc_add_dirs");
     if !dirs.is_empty() {
         args.push("--add-dir".into());
         args.extend(dirs);
     }
-    let rules: Vec<String> = conv.options["cc_allowed_tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|d| d.as_str().map(String::from))
-        .collect();
+    let mut rules = opt_strs("cc_allowed_tools");
+    rules.extend(chat_allowed);
     if !rules.is_empty() {
         args.push("--allowedTools".into());
         args.extend(rules);
@@ -932,6 +1053,12 @@ async fn run_once(
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
     st.cc_ctl.lock().insert(conv_id.to_string(), Ctl { tx: ctl_tx, waiting: false, spare: false });
     let _ctl = CtlGuard { st: st.clone(), conv_id: conv_id.to_string() };
+    let mut servers: Vec<&str> = sdk_tools.iter().map(|(s, ..)| s.as_str()).collect();
+    servers.sort_unstable();
+    servers.dedup();
+    if !servers.is_empty() {
+        write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "initialize", "sdkMcpServers": servers}})).await;
+    }
     write_line(&mut stdin, &first_line).await;
     // The CLI drops ultracode without a word when the account has dynamic
     // workflows off: ask what it applied.
@@ -952,7 +1079,7 @@ async fn run_once(
         siblings: json!({"index": 0, "count": 1, "ids": []}),
         tracker: view::tracker_for(&path[..turn_start]),
         last_emit: Instant::now() - Duration::from_secs(1),
-        cost_before: 0.0,
+        cost_before,
     };
     let mcp: HashMap<String, (String, String)> = HashMap::new();
     let math = settings.latex_enabled;
@@ -988,6 +1115,8 @@ async fn run_once(
     let mut lines = BufReader::new(stdout).lines();
     let mut awaiting: HashMap<String, String> = HashMap::new();
     let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<PermDone>();
+    // answers to the CLI from tasks that run beside the event loop (MCP tool calls)
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     // Open permission prompts: CLI request id → (our request id, tool_use_id).
     let mut open_perms: HashMap<String, (String, String)> = HashMap::new();
     let rid_key = |v: &Value| v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
@@ -1103,6 +1232,10 @@ async fn run_once(
                     let response = permission_response(app, st, conv_id, &done);
                     write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": done.cli_request_id, "response": response}})).await;
                     emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
+                    continue;
+                }
+                Some(line) = out_rx.recv() => {
+                    write_line(&mut stdin, &line).await;
                     continue;
                 }
                 Some(cmd) = ctl_rx.recv() => {
@@ -1249,7 +1382,13 @@ async fn run_once(
                         let tool = req["tool_name"].as_str().unwrap_or("").to_string();
                         let input = req["input"].clone();
                         let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
-                        let kind = if tool == "ExitPlanMode" { "plan" } else { "code" };
+                        let mcp_tool = sdk_tools.iter().find(|(s, n, _)| tool == format!("mcp__{s}__{n}")).map(|(.., t)| t);
+                        let kind = match tool.as_str() {
+                            "ExitPlanMode" => "plan",
+                            "AskUserQuestion" => "question",
+                            _ if mcp_tool.is_some() => "mcp",
+                            _ => "code",
+                        };
                         // Auto mode: approve safe requests without asking.
                         let mode_now = st.db.conv_get(conv_id).ok().and_then(|c| c.options["permission_mode"].as_str().map(String::from)).unwrap_or_default();
                         if mode_now == "auto" && tool != "ExitPlanMode" {
@@ -1277,7 +1416,9 @@ async fn run_once(
                             "kind": kind, "tool": tool, "input": input, "diff": diff, "cwd": cwd,
                             "request_id": req_id, "conversation_id": conv_id, "tool_use_id": tool_use_id,
                             "description": req["description"],
+                            "server": mcp_tool.map(|t| &t.server), "tool_name": mcp_tool.map(|t| &t.name),
                         });
+                        let mcp_key = mcp_tool.map(|t| format!("{}/{}", t.server, t.name));
                         st.pending_perms.lock().insert(req_id.clone(), payload.clone());
                         awaiting.insert(tool_use_id.clone(), "awaiting_permission".into());
                         open_perms.insert(rid_key(&rid), (req_id.clone(), tool_use_id.clone()));
@@ -1293,8 +1434,24 @@ async fn run_once(
                                 r = rx => r.ok(),
                                 _ = cancel.cancelled() => None,
                             };
-                            let _ = tx.send(PermDone { cli_request_id: rid, req_id, tool, input, tool_use_id, suggestions, reply });
+                            let _ = tx.send(PermDone { cli_request_id: rid, req_id, tool, input, tool_use_id, suggestions, mcp_key, reply });
                         });
+                    } else if req["subtype"] == "mcp_message" {
+                        let server = req["server_name"].as_str().unwrap_or("").to_string();
+                        let msg = req["message"].clone();
+                        match sdk_mcp_reply(&sdk_tools, &server, &msg) {
+                            Some(r) => write_line(&mut stdin, &mcp_response(&rid, r)).await,
+                            // a tool call can take minutes: beside the loop, which keeps answering
+                            None => {
+                                let (st, tools, tx, cancel) = (st.clone(), sdk_tools.clone(), out_tx.clone(), cancel.clone());
+                                tokio::spawn(async move {
+                                    tokio::select! {
+                                        r = sdk_mcp_call(&st, &tools, &server, &msg) => { let _ = tx.send(mcp_response(&rid, r)); }
+                                        _ = cancel.cancelled() => {}
+                                    }
+                                });
+                            }
+                        }
                     } else {
                         write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "error", "request_id": rid, "error": "Not supported by ClaudeRust"}})).await;
                     }
@@ -1378,7 +1535,7 @@ async fn run_once(
     match &result {
         // the CLI stopped at the spending limit: a pause, not a failure
         Some(r) if r["subtype"].as_str().is_some_and(|t| t.contains("budget")) && !interrupted => {
-            budget_stop = Some(json!({"budget": crate::engine::turn_budget(&conv, &st.settings.read()), "spent": r["total_cost_usd"]}));
+            budget_stop = Some(json!({"budget": crate::engine::turn_budget(&conv, &st.settings.read()), "spent": turn_cost(r, ts.cost_before)}));
         }
         Some(r) => {
             if r["is_error"].as_bool() == Some(true) && !stopped {
@@ -1470,10 +1627,13 @@ fn settle_rows(
     }
     let row = &mut ts.rows[i];
     if let Some(r) = result {
-        if !r["usage"].is_null() {
+        // a budget stop reports no usage (all zeros): the streamed one stays
+        if r["usage"]["output_tokens"].as_u64().is_some_and(|n| n > 0) {
             row.meta["usage"] = r["usage"].clone();
         }
         row.meta["cost_usd"] = turn_cost(r, ts.cost_before);
+        // the session's running total, which the next resume starts from
+        row.meta["cc_cost_total"] = r["total_cost_usd"].clone();
         row.meta["duration_ms"] = wall_ms.map(|ms| json!(ms)).unwrap_or_else(|| r["duration_ms"].clone());
     }
     row.meta["stop_reason"] = json!(if interrupted { Value::Null } else { json!("end_turn") });
@@ -1492,9 +1652,50 @@ fn settle_rows(
     Ok(true)
 }
 
-/// A turn's own cost, from a result whose `total_cost_usd` is what the CLI process spent so far.
+/// A turn's own cost, from a result whose `total_cost_usd` is the session's running total so far.
 fn turn_cost(result: &Value, before: f64) -> Value {
     result["total_cost_usd"].as_f64().map_or(Value::Null, |t| json!((t - before).max(0.0)))
+}
+
+/// The running total a resumed session starts from: the one stored with the session's tip, else what the
+/// CLI restores from its transcript (a fork restores the session's latest total, not the fork point's;
+/// rows from before the total was stored have none), else none known.
+fn resumed_cost(at_tip: bool, tip_meta: &Value, transcript: impl FnOnce() -> Option<f64>) -> f64 {
+    tip_meta["cc_cost_total"].as_f64().filter(|_| at_tip).or_else(transcript).unwrap_or(0.0)
+}
+
+/// The running total in a session's transcript: its last cost record, which the CLI writes as a run ends.
+fn restored_cost(session_id: &str) -> Option<f64> {
+    let file = format!("{session_id}.jsonl");
+    let projects = std::fs::read_dir(crate::import::claude_code_dir()?.join("projects")).ok()?;
+    let path = projects.flatten().map(|p| p.path().join(&file)).find(|p| p.is_file())?;
+    transcript_cost(&path)
+}
+
+fn transcript_cost(path: &std::path::Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    // shortcut: only the last 256 KB are read; a run that died after writing more than that falls back to none
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(256 * 1024))).ok()?;
+    let mut tail = vec![];
+    f.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let rec = text.lines().rev().filter(|l| l.contains("\"cost-state\"")).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["type"] == "cost-state")?;
+    rec["totalCostUSD"].as_f64()
+}
+
+/// AskUserQuestion's input with the person's answers, as the CLI takes them: question text → the option
+/// picked, several comma-separated, or what they typed. `message` is the question card's JSON object;
+/// anything in it that isn't text is dropped (the CLI refuses the whole answer over it).
+fn answered(input: &Value, message: Option<&str>) -> Value {
+    let picked: Value = message.and_then(|m| serde_json::from_str(m).ok()).unwrap_or_default();
+    let answers: serde_json::Map<String, Value> = picked.as_object().into_iter().flatten().filter(|(_, v)| v.is_string()).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut out = input.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.insert("answers".into(), Value::Object(answers));
+    }
+    out
 }
 
 /// The CLI's answer for a permission prompt the user (or Stop) resolved.
@@ -1503,7 +1704,18 @@ fn permission_response(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, done:
     let input = &done.input;
     let mut response = match decision {
         Some("once") | Some("approve") => json!({"behavior": "allow", "updatedInput": input}),
+        Some("answer") if done.tool == "AskUserQuestion" => json!({"behavior": "allow", "updatedInput": answered(input, done.reply.as_ref().and_then(|r| r.message.as_deref()))}),
         Some("session") | Some("chat") | Some("always") => {
+            if let (Some("always"), Some(key)) = (decision, &done.mcp_key) {
+                let mut s = st.settings.write();
+                s.tool_policies.insert(key.clone(), json!("allow"));
+                if let Err(e) = s.save(&st.db) {
+                    log::warn!("saving the tool policy failed: {e}");
+                }
+                drop(s);
+                // the settings window shows (and saves) its own copy
+                let _ = app.emit("settings-updated", ());
+            }
             // The CLI suggests rules saved to the project's
             // .claude/settings.local.json; keep them to this chat instead.
             let mut updates: Vec<Value> = done
@@ -1570,7 +1782,7 @@ fn permission_response(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, done:
                    "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]})
         }
         _ => {
-            let mut msg = String::from("The user denied this tool call.");
+            let mut msg = String::from(if done.tool == "AskUserQuestion" { "The user dismissed the question without answering." } else { "The user denied this tool call." });
             if let Some(m) = done.reply.as_ref().and_then(|r| r.message.clone()).filter(|m| !m.trim().is_empty()) {
                 msg.push_str(&format!(" The user said: {}", m.trim()));
             }
@@ -1665,6 +1877,165 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn tool(server: &str, name: &str) -> McpTool {
+        McpTool {
+            server: server.into(), name: name.into(), api_name: crate::mcp::api_tool_name(server, name), title: None,
+            description: format!("{name} of {server}"), input_schema: json!({"type": "object"}), read_only: false,
+        }
+    }
+
+    #[test]
+    fn a_chat_gets_web_search_and_its_mcp_tools_but_no_coding_tools() {
+        let tools = chat_tools(vec![tool("weather", "get_forecast"), tool("my files", "read.text"), tool("my_files", "read_text"), tool("db", "query")]);
+        // named in the CLI's characters; a name that only differs in replaced characters keeps the first tool
+        let names: Vec<(&str, &str, &str)> = tools.iter().map(|(s, n, t)| (s.as_str(), n.as_str(), t.server.as_str())).collect();
+        assert_eq!(names, vec![("weather", "get_forecast", "weather"), ("my_files", "read_text", "my files"), ("db", "query", "db")]);
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let mut policies = serde_json::Map::new();
+        policies.insert("weather/get_forecast".into(), json!("allow"));
+        policies.insert("db/query".into(), json!("ask"));
+        let (flags, allowed) = chat_flags(true, &tools, &policies, &[]);
+        assert_eq!(flags, s(&["--tools", "WebSearch,WebFetch", "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""]));
+        // web search and Allow tools run without asking; web fetch and Ask tools ask
+        assert_eq!(allowed, s(&["WebSearch", "mcp__weather__get_forecast"]));
+        // web search off: no web tools at all; a tool allowed for this chat (by its API name) runs too
+        let (flags, allowed) = chat_flags(false, &tools, &policies, &s(&["my_files__read_text", "db__other"]));
+        assert_eq!(flags, s(&["--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""]));
+        assert_eq!(allowed, s(&["mcp__weather__get_forecast", "mcp__my_files__read_text"]));
+        assert!(chat_flags(false, &vec![], &serde_json::Map::new(), &[]).1.is_empty());
+    }
+
+    #[test]
+    fn the_sdk_servers_answer_the_cli() {
+        let tools = chat_tools(vec![tool("weather", "get_forecast"), tool("db", "query")]);
+        let init = sdk_mcp_reply(&tools, "weather", &json!({"jsonrpc": "2.0", "id": "a:0", "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})).unwrap();
+        assert_eq!((init["id"].as_str(), init["result"]["protocolVersion"].as_str(), init["result"]["serverInfo"]["name"].as_str()), (Some("a:0"), Some("2025-11-25"), Some("weather")));
+        assert!(init["result"]["capabilities"]["tools"].is_object());
+        let list = sdk_mcp_reply(&tools, "weather", &json!({"id": 1, "method": "tools/list"})).unwrap();
+        assert_eq!(list["result"]["tools"], json!([{"name": "get_forecast", "description": "get_forecast of weather", "inputSchema": {"type": "object"}}]));
+        // a notification and a ping get an empty result, an unknown request an error; a tool call is the connection's
+        assert_eq!(sdk_mcp_reply(&tools, "weather", &json!({"method": "notifications/initialized"})).unwrap()["result"], json!({}));
+        assert_eq!(sdk_mcp_reply(&tools, "weather", &json!({"id": 2, "method": "ping"})).unwrap()["result"], json!({}));
+        assert_eq!(sdk_mcp_reply(&tools, "weather", &json!({"id": 3, "method": "resources/list"})).unwrap()["error"]["code"], -32601);
+        assert!(sdk_mcp_reply(&tools, "weather", &json!({"id": 4, "method": "tools/call", "params": {"name": "get_forecast"}})).is_none());
+        let r = mcp_response(&json!("req1"), json!({"id": 1}));
+        assert_eq!((r["type"].as_str(), r["response"]["request_id"].as_str(), r["response"]["response"]["mcp_response"]["id"].as_i64()), (Some("control_response"), Some("req1"), Some(1)));
+        assert_eq!(
+            mcp_content(&[json!({"type": "text", "text": "sunny"}), json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}})]),
+            vec![json!({"type": "text", "text": "sunny"}), json!({"type": "image", "data": "iVBO", "mimeType": "image/png"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_sdk_tool_call_goes_to_the_apps_connection() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-sdk-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let tools = chat_tools(vec![tool("weather", "get_forecast")]);
+        // a tool the conversation has, whose server isn't connected (any more): the connection's error
+        let r = sdk_mcp_call(&st, &tools, "weather", &json!({"id": 7, "method": "tools/call", "params": {"name": "get_forecast", "arguments": {}}})).await;
+        assert_eq!((r["id"].as_i64(), r["result"]["isError"].as_bool()), (Some(7), Some(true)));
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("Error: "), "{r}");
+        // one it doesn't have (another server's, or Blocked): never called
+        let r = sdk_mcp_call(&st, &tools, "db", &json!({"id": 8, "params": {"name": "get_forecast"}})).await;
+        assert_eq!(r["result"], json!({"content": [{"type": "text", "text": "Tool get_forecast is not available."}], "isError": true}));
+        // a title is asked of the CLI only for a conversation that runs on it (the call can go in a spawned task)
+        let conv = st.db.conv_create("chat", &format!("{}llama3", crate::oai::PREFIX), None, None, &json!({})).unwrap();
+        let ask = title(&st, &conv, "hi", "hello");
+        fn spawnable<T: Send>(_: &T) {}
+        spawnable(&ask);
+        assert_eq!(ask.await, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The installed CLI, with no model call: a chat's flags, and its SDK-hosted servers answered as a turn does.
+    /// `cargo test --no-default-features a_real_cli_connects_the_chat_tools -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn a_real_cli_connects_the_chat_tools() {
+        crate::shellenv::ready().await;
+        let cli = find_cli("").expect("Claude Code isn't installed");
+        let tools = chat_tools(vec![tool("weather", "get_forecast")]);
+        let (flags, allowed) = chat_flags(true, &tools, &serde_json::Map::new(), &[]);
+        let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--permission-prompt-tool=stdio"].map(String::from).to_vec();
+        args.extend(flags);
+        args.push("--allowedTools".into());
+        args.extend(allowed);
+        let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+        cmd.current_dir(std::env::temp_dir()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+            cmd.env_remove(k);
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take();
+        write_line(&mut stdin, &json!({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize", "sdkMcpServers": ["weather"]}})).await;
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let status = tokio::time::timeout(Duration::from_secs(60), async {
+            while let Ok(Some(l)) = lines.next_line().await {
+                let ev: Value = serde_json::from_str(&l).unwrap_or_default();
+                let req = &ev["request"];
+                if req["subtype"] == "mcp_message" {
+                    let reply = sdk_mcp_reply(&tools, req["server_name"].as_str().unwrap_or(""), &req["message"]).unwrap();
+                    write_line(&mut stdin, &mcp_response(&ev["request_id"], reply)).await;
+                    if req["message"]["method"] == "tools/list" {
+                        write_line(&mut stdin, &json!({"type": "control_request", "request_id": "s", "request": {"subtype": "mcp_status"}})).await;
+                    }
+                } else if ev["response"]["request_id"] == "s" {
+                    // the server is listed once its connection settles, a moment after the handshake
+                    if ev["response"]["response"]["mcpServers"].as_array().is_some_and(|a| !a.is_empty()) {
+                        return ev["response"]["response"].clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    write_line(&mut stdin, &json!({"type": "control_request", "request_id": "s", "request": {"subtype": "mcp_status"}})).await;
+                }
+            }
+            Value::Null
+        })
+        .await
+        .expect("the CLI didn't report its MCP servers");
+        stop_cli(child, stdin, true).await;
+        let server = &status["mcpServers"][0];
+        assert_eq!((server["name"].as_str(), server["status"].as_str(), server["transport"].as_str()), (Some("weather"), Some("connected"), Some("sdk")), "{status}");
+        assert_eq!(server["tools"][0]["name"], "get_forecast");
+    }
+
+    /// The installed CLI, signed in, writes a title: one Haiku call of about $0.0002.
+    /// `cargo test --no-default-features a_real_cli_writes_a_title -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn a_real_cli_writes_a_title() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-title-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        st.settings.write().chat_engine = "claude-code".into();
+        let conv = st.db.conv_create("chat", "claude-sonnet-5-5", None, None, &json!({})).unwrap();
+        let t = title(&st, &conv, "How do I make soft-boiled eggs for breakfast?", "Boil water, cook the eggs for six minutes, then cool them.").await;
+        let _ = std::fs::remove_dir_all(dir);
+        let t = t.expect("no title");
+        assert!((1..=10).contains(&t.split_whitespace().count()), "{t}");
+    }
+
+    #[test]
+    fn answers_go_into_the_question_input() {
+        let input = json!({"questions": [{"question": "Colour?", "header": "Colour", "options": [{"label": "Red"}, {"label": "Blue"}], "multiSelect": false}]});
+        let out = answered(&input, Some(r#"{"Colour?": "Blue", "Fruit?": "Apple, Plum", "bad": 3, "worse": ["x"]}"#));
+        assert_eq!(out["answers"], json!({"Colour?": "Blue", "Fruit?": "Apple, Plum"}));
+        assert_eq!(out["questions"], input["questions"]);
+        for m in [None, Some("not json"), Some("[1]")] {
+            assert_eq!(answered(&input, m)["answers"], json!({}));
+        }
+        assert_eq!(answered(&json!([1]), Some(r#"{"a": "b"}"#)), json!([1]));
+    }
+
+    #[test]
+    fn a_title_is_the_replys_first_line() {
+        assert_eq!(clean_title("\n\"Soft Boiled Eggs.\"\nmore").as_deref(), Some("Soft Boiled Eggs"));
+        assert_eq!(clean_title("## **Az Pişmiş Yumurta**").as_deref(), Some("Az Pişmiş Yumurta"));
+        assert_eq!(clean_title(&"x".repeat(100)), Some(truncate_chars(&"x".repeat(100), 80)));
+        assert_eq!(clean_title("  \n\"\"\n"), None);
+        assert_eq!(clean_title(""), None);
+    }
+
     #[test]
     fn a_workflow_is_recorded_from_its_events() {
         let mut list = vec![];
@@ -1727,6 +2098,67 @@ mod tests {
         assert!((cost(json!(0.153), 0.142).unwrap() - 0.011).abs() < 1e-9);
         assert_eq!(cost(json!(0.1), 0.2), Some(0.0));
         assert!(turn_cost(&json!({}), 0.1).is_null());
+    }
+
+    #[test]
+    fn a_resumed_run_starts_from_the_sessions_running_total() {
+        let tip = json!({"cc_cost_total": 0.0168});
+        // at the session's tip: the stored total, the transcript left unread
+        assert_eq!(resumed_cost(true, &tip, || panic!("read the transcript")), 0.0168);
+        // a fork: the CLI restores the session's latest total, which the fork point's row doesn't have
+        assert_eq!(resumed_cost(false, &tip, || Some(0.0578)), 0.0578);
+        // a row from before the total was stored
+        assert_eq!(resumed_cost(true, &json!({"cost_usd": 0.01}), || Some(0.03)), 0.03);
+        // neither known
+        assert_eq!(resumed_cost(true, &json!({}), || None), 0.0);
+        assert_eq!(resumed_cost(false, &tip, || None), 0.0);
+    }
+
+    #[test]
+    fn the_transcripts_last_cost_record_is_its_running_total() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-cost-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rec = |t: f64| format!("{}\n", json!({"type": "cost-state", "sessionId": "s", "totalCostUSD": t}));
+        let filler = format!("{}\n", json!({"type": "user", "message": {"content": "x".repeat(1000)}})).repeat(300);
+        let file = |name: &str, text: String| {
+            let p = dir.join(name);
+            std::fs::write(&p, text).unwrap();
+            transcript_cost(&p)
+        };
+        // a message that talks about cost records isn't one
+        let talk = format!("{}\n", json!({"type": "user", "message": {"content": "cost-state"}}));
+        assert_eq!(file("a.jsonl", format!("{}{}{}{talk}", rec(0.0017), filler, rec(0.0028))), Some(0.0028));
+        // longer than what is read: the first line read is cut, the records near the end still found
+        assert_eq!(file("b.jsonl", format!("{}{}{}", rec(0.0017), filler, rec(0.0058))), Some(0.0058));
+        // none near the end (a run that died after writing much more), or none at all
+        assert_eq!(file("c.jsonl", format!("{}{}", rec(0.0017), filler)), None);
+        assert_eq!(file("d.jsonl", talk), None);
+        assert_eq!(transcript_cost(&dir.join("missing.jsonl")), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_resumed_turn_is_stored_with_its_own_cost() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-turncost-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let conv = st.db.conv_create("code", "m", None, None, &json!({})).unwrap();
+        let streamed = json!({"input_tokens": 2, "output_tokens": 74});
+        let row = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([]), meta: json!({"engine": ENGINE, "usage": streamed}), created_at: 1 };
+        st.db.msg_insert(&row).unwrap();
+        let mut ts = TurnState { rows: vec![row], current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.00514374 };
+        // what the CLI reported at a budget stop on a resumed session: the running total, and no usage
+        let r = json!({"subtype": "error_max_budget_usd", "total_cost_usd": 0.00578797, "usage": {"input_tokens": 0, "output_tokens": 0}});
+        assert!(settle_rows(&st, &conv.id, &mut ts, &Some(r), None, false, None, None).unwrap());
+        let meta = st.db.msg_get(&ts.rows[0].id).unwrap().meta;
+        assert!((meta["cost_usd"].as_f64().unwrap() - 0.00064423).abs() < 1e-12);
+        assert_eq!(meta["cc_cost_total"], json!(0.00578797));
+        assert_eq!(meta["usage"], streamed);
+        // a result with usage replaces the streamed one
+        let r = json!({"total_cost_usd": 0.006, "usage": {"input_tokens": 4, "output_tokens": 77}});
+        assert!(settle_rows(&st, &conv.id, &mut ts, &Some(r), None, false, None, None).unwrap());
+        assert_eq!(st.db.msg_get(&ts.rows[0].id).unwrap().meta["usage"]["output_tokens"], json!(77));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(target_os = "linux")]

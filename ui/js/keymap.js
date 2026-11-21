@@ -32,16 +32,15 @@ const CODE_KEYS = {
 /** The key of an event, independent of Shift and (for letters/digits) of the layout. */
 function eventKeys(e) {
   const out = new Set();
-  if (e.key) out.add(e.key.toLowerCase());
+  if (e.key) out.add(e.key === ' ' ? 'space' : e.key.toLowerCase());
   // the physical key only stands in when the layout gives a non-Latin
   // character (e.g. Cyrillic, Greek): on Dvorak / Colemak `e.key` is right,
   // and the key at that position means something else (Ctrl+V is at `.`)
-  if (e.key && /^[\x20-\x7e]$/.test(e.key)) return out;
+  if (e.key && /^[\x21-\x7e]$/.test(e.key)) return out;
   const c = e.code || '';
   if (/^Key[A-Z]$/.test(c)) out.add(c.slice(3).toLowerCase());
   else if (/^Digit\d$/.test(c)) out.add(c.slice(5));
   else if (CODE_KEYS[c]) out.add(CODE_KEYS[c]);
-  if (e.key === ' ') out.add('space');
   return out;
 }
 

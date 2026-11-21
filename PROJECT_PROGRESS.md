@@ -1,17 +1,17 @@
 # PROJECT_PROGRESS.md
 
-Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabilir üretim olgunluğuna (**>= 90/100**) taşıyan döngünün hafızasıdır. Lider ajan her turda burayı okur ve günceller. Kanıtların tamamı: [docs/audit-1.md](docs/audit-1.md).
+Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabilir üretim olgunluğuna (**>= 90/100**) taşıyan döngünün hafızasıdır. Lider ajan her turda burayı okur ve günceller. Kanıtlar: [docs/audit-1.md](docs/audit-1.md) (Denetim 1), [docs/eval-1.md](docs/eval-1.md) (Puanlayıcı 1).
 
 ## Durum
 
 | Alan | Değer |
 |---|---|
-| **Release sayacı** | **14/12** (10–15 düzeltmede bir otomatik release; 12 hedef orta nokta) |
-| **Güncel puan** | **henüz puanlanmadı (bağımsız puanlayıcı Tur 1 release'inden sonra çalışacak). Lider tahmini: ≈62/100, bu bir puan değildir** |
+| **Release sayacı** | **17/12** (10–15 düzeltmede bir otomatik release; 12 hedef orta nokta) |
+| **Güncel puan** | **71/100 (Puanlayıcı 1, v0.1.1); Tur 2 sonrası puanlama bekliyor** |
 | Hedef | >= 90/100 |
-| Tur | 1 |
-| Son yayın | yok (v0.1.0 hâlâ taslak); Tur 1 release'i hazırlanıyor |
-| Backlog | 93 madde: 74 açık, 16 yapıldı |
+| Tur | 2 |
+| Son yayın | v0.1.1 (2026-11-22); v0.1.2 hazırlanıyor |
+| Backlog | 116 madde: 74 açık, 32 yapıldı |
 
 ## Puanlama ölçeği (bağımsız puanlayıcı, 100 üzerinden)
 
@@ -41,11 +41,11 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 
 ## Bu turun planı
 
-Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-04). Kapı: lint 0 sorun, `cargo check --all-targets` 0 uyarı, `clippy -D warnings` 0 uyarı, `cargo test` 199 geçti / 0 düştü / 12 yok sayıldı (önceden 182/6), `npm run test:ui` 3/3. Kapı ajanı BE-01 için ek 5 delik buldu ve kapattı (PowerShell `-a.b` bölünmesi, `uniq` ve `sort --files0-from`, POSIX süslü parantez/nokta globları, UNC yolları, auto modda .git/.claude). Sıradaki: Release alt ajanı (v0.1.1), sonra bağımsız puanlayıcı.
+**Tur 2 tamamlandı:** 16 madde + canlı QA düzeltmeleri (başlık, MCP araç etiketi) + devam edilen oturumlarda tur maliyeti düzeltmesi + SSRF/yönlendirme/keymap düzeltmeleri. Kapı: lint 0, test:ui 56/56, check 0 uyarı, clippy -D warnings 0 uyarı, cargo test 241 + 9 geçti / 0 düştü. Canlı QA (gerçek CLI, Haiku): hesap sohbeti araçları, soru kartı, başlıklar, Code regresyonu PASS. Sıradaki: release v0.1.2, sonra Puanlayıcı 2 (ayrı hedef dizinde release derlemesi ve ölçüm serbest).
 
 ## Backlog
 
-### Backend / Stabilite (18)
+### Backend / Stabilite (22)
 
 | ID | Önem | Efor | Başlık | Dosyalar | Durum |
 |---|---|---|---|---|---|
@@ -57,9 +57,12 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | BE-06 | medium | S | Staged attachments leak in AppState.staged when the composer is dropped without sending; the workflows map is not cleared on delete | `commands.rs` `state.rs` `ui/js/composer.js` … | AÇIK |
 | BE-09 | medium | S | Chats that run on the Claude account (CLI chat engine) silently drop project PDFs and images | `claudecode.rs` `engine.rs` | AÇIK |
 | BE-11 | medium | S | change_revert can delete any file on disk: abs_in accepts absolute paths outside the repo | `gitops.rs` `commands.rs` | YAPILDI (Tur 1) |
+| EV-06 | medium | S | A reply being streamed is not saved until it finishes, so a crash loses it | `engine.rs` | YAPILDI (Tur 2) |
+| EV-08 | medium | S | MCP connections do not recover, and tool-list changes are ignored | `mcp.rs` | YAPILDI (Tur 2) |
 | BE-07 | medium | M | Code sessions keep every edited file's original bytes, and finished background shells keep 1 MB buffers, for the whole app lifetime | `codetools.rs` `state.rs` `shells.rs` … | AÇIK |
 | BE-08 | medium | M | Checkpoint shadow repos grow forever: one commit per code turn, never pruned, not removed with their sessions | `checkpoints.rs` `engine.rs` `commands.rs` | AÇIK |
 | BE-10 | medium | M | MCP: a crashed stdio server is neither reported nor restarted, and tools/list_changed notifications are ignored | `mcp.rs` `commands.rs` | AÇIK |
+| EV-07 | medium | M | Child processes are orphaned if the app crashes or is killed | `lib.rs` `codetools.rs` `mcp.rs` … | YAPILDI (Tur 2): Windows Job Object; açık kalan: Linux/macOS ebeveyn-ölümü sinyali belgelendi |
 | BE-12 | low | S | CLI chats leave the full system prompt (project instructions and knowledge) on disk forever, even after the chat is deleted | `claudecode.rs` `commands.rs` | AÇIK |
 | BE-13 | low | S | Fork is not transactional: a failure mid-copy leaves a partial, untitled conversation | `db.rs` `commands.rs` | AÇIK |
 | BE-14 | low | S | A stalled API stream (dead TCP connection, no RST) hangs the turn for 10 minutes before erroring | `anthropic.rs` | AÇIK |
@@ -67,8 +70,9 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | BE-16 | low | S | Project files (full base64) are re-read from SQLite and re-hashed on every tool step of a chat turn, on the async runtime | `engine.rs` `db.rs` | AÇIK |
 | BE-17 | low | S | Whole-file reads before size checks: archmap and claude.ai import can load huge inputs into memory | `archmap.rs` `import.rs` | AÇIK |
 | BE-18 | low | S | Dead IPC surface: 4 registered commands are never called, so PTYs are orphaned after a webview reload | `lib.rs` `commands.rs` `ui/js/panes/terminal.js` | KISMEN: term_list kullanımda (kalan 3 komut: delete_artifact, code_info, worktree_commit) |
+| EV-20 | low | S | open_path and reveal_path accept any path from the webview | `commands.rs` | YAPILDI (Tur 2) |
 
-### Frontend / IPC (20)
+### Frontend / IPC (25)
 
 | ID | Önem | Efor | Başlık | Dosyalar | Durum |
 |---|---|---|---|---|---|
@@ -90,10 +94,15 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | FE-17 | low | S | Permission prompts have no keyboard path, and the card is removed before the response is confirmed | `ui/js/chat.js` | AÇIK |
 | FE-19 | low | S | Worktree base-branch name is interpolated into HTML unescaped | `ui/js/panes/worktree_actions.js` | AÇIK |
 | FE-20 | low | S | Quick Entry drops the typed text on a failed submit and never follows theme changes | `ui/js/quick.js` | AÇIK |
+| EV-14 | low | S | The terminal 'Ask Claude' bar covers terminal output | `ui/js/panes/terminal.js` `ui/css/app.css` | YAPILDI (Tur 2) |
+| EV-15 | low | S | The 'N files edited' summary miscounts lines and shows absolute Windows paths | `ui/js/chat.js` | YAPILDI (Tur 2) |
+| EV-22 | low | S | Account-mode chats get no generated titles | `engine.rs` | YAPILDI (Tur 2) |
+| EV-23 | low | S | Layout nits: clipped engine chip, inconsistent cost display, narrow-window sidebar without backdrop | `ui/css/app.css` `ui/js/chat.js` `ui/js/sidebar.js` | YAPILDI (Tur 2) |
 | FE-15 | low | M | Accessibility basics: modals without focus trap or restore, no live regions, non-focusable 'more' menus, unlabeled icon buttons | `ui/js/util.js` `ui/js/sidebar.js` `ui/js/code.js` … | AÇIK |
 | FE-18 | low | M | Composer stubs: 'Add screenshot' is a permanently disabled item, and MCP prompt arguments use window.prompt() | `ui/js/composer.js` | AÇIK |
+| EV-16 | low | M | Mixed-language UI: English model descriptions and backend errors in a localized UI | `models.rs` `error.rs` `ui/js/i18n.js` | KISMEN (Tur 2): model açıklamaları ve hata türleri çevrildi; kalan sabit İngilizce arka uç metinleri açık |
 
-### Performans (13)
+### Performans (15)
 
 | ID | Önem | Efor | Başlık | Dosyalar | Durum |
 |---|---|---|---|---|---|
@@ -110,8 +119,10 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | PERF-12 | low | S | Two HTTP client stacks and two HTML parsers are linked into the binary | `src-tauri/Cargo.toml` `Cargo.lock` | AÇIK |
 | PERF-09 | low | M | The built-in agent keeps each edited file's original bytes for the app's lifetime with no total cap, and the Changes pane deep-copies all of them on every refresh | `codetools.rs` `gitops.rs` `state.rs` | AÇIK |
 | PERF-13 | low | M | No code splitting in the UI: 51 of 53 modules (530 KB) load and run at startup | `ui/js/main.js` `ui/js/settings.js` `ui/js/importer.js` … | AÇIK |
+| EV-12 | low | M | Streaming IPC re-sends the whole growing text part on every tick | `turnstream.rs` `ui/js/turnstream.js` | YAPILDI (Tur 2) |
+| EV-13 | low | M | A new Claude Code CLI process is spawned for every turn | `claudecode.rs` | AÇIK (ertelendi: sonraki tur) |
 
-### Test / Build / Kalite (17)
+### Test / Build / Kalite (20)
 
 | ID | Önem | Efor | Başlık | Dosyalar | Durum |
 |---|---|---|---|---|---|
@@ -126,6 +137,9 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | QA-08 | medium | M | Windows, the owner's platform, has no coverage for process-tree kill, hooks execution or the PTY terminal | `codetools.rs` `hooks.rs` `terminal.rs` … | AÇIK |
 | QA-09 | medium | M | Import flow: branch trees, projects and the MCP merge have no tests | `import.rs` | AÇIK |
 | QA-10 | medium | M | UI has zero automated tests; README claims e2e checks that are not in the repo, and the JS turnstream decoder is never checked against the Rust encoder | `ui/js/turnstream.js` `turnstream.rs` `.github/workflows/ci.yml` … | AÇIK |
+| EV-17 | medium | M | No end-to-end test of the turn loop (stream, persist, tools, drop, stop) | `engine.rs` `claudecode.rs` `dev/mock_api.py` | YAPILDI (Tur 2) |
+| EV-18 | medium | M | About 10k lines of UI JavaScript have almost no tests | `ui/js/turnstream.js` `ui/js/chat.js` `ui/js/composer.js` … | YAPILDI (Tur 2) |
+| EV-19 | medium | M | Installers are not code-signed (Authenticode, notarization) | `.github/workflows/release.yml` `src-tauri/tauri.conf.json` | AÇIK (ertelendi: dış bağımlılık/çok büyük) |
 | QA-12 | low | S | Declared MSRV is false: rust-version 1.80, but the resolved dependencies need Rust 1.91 | `src-tauri/Cargo.toml` | YAPILDI (Tur 1) |
 | QA-13 | low | S | `npm run build` fails without the signing key; the local release build must use its own target dir | `package.json` `README.md` | AÇIK |
 | QA-14 | low | S | Tests call std::env::set_var while other test threads run | `anthropic.rs` `filesearch.rs` `mcp.rs` … | AÇIK |
@@ -133,7 +147,7 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | QA-16 | low | S | Four Tauri commands are registered but never called from the UI | `commands.rs` `lib.rs` | GEÇERSİZ OLDU: term_list artık terminal.js tarafından kullanılıyor, kaldırılmamalı |
 | QA-17 | low | S | CSP img-src is wider than the app needs | `src-tauri/tauri.conf.json` | AÇIK |
 
-### Claude Desktop paritesi (25)
+### Claude Desktop paritesi (34)
 
 | ID | Önem | Efor | Başlık | Dosyalar | Durum |
 |---|---|---|---|---|---|
@@ -142,8 +156,12 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | FP-03 | high | M | Claude's questions (AskUserQuestion) cannot be answered in Code sessions; other CLI dialog requests are rejected | `claudecode.rs` `ui/js/chat.js` `ui/js/parts.js` | AÇIK |
 | FP-05 | high | M | MCP servers configured in ClaudeRust are missing from Claude Code engine sessions (the default code engine) | `claudecode.rs` `mcp.rs` | AÇIK |
 | FP-06 | high | M | Chat cannot read spreadsheets or presentations and cannot create files (no code execution / file creation) | `attachments.rs` `models.rs` `engine.rs` … | AÇIK |
+| EV-01 | high | M | Account-mode chat has no tools: MCP, web search and chat search are dead, but the composer still offers them | `claudecode.rs` `ui/js/composer.js` `engine.rs` | YAPILDI (Tur 2) |
 | FP-04 | high | L | No OAuth and no 'Add custom connector' flow for remote MCP servers; any server that needs sign-in fails with HTTP 401 | `mcp.rs` `ui/js/settings.js` `commands.rs` | AÇIK |
 | FP-07 | high | L | Desktop's Cowork mode (autonomous non-coding agent in a sandboxed workspace) has no equivalent | `ui/js/sidebar.js` `engine.rs` `codetools.rs` | AÇIK |
+| EV-02 | high | L | No sync of chats and projects with the Claude account | `db.rs` `import.rs` | AÇIK (ertelendi: dış bağımlılık/çok büyük) |
+| EV-03 | high | L | Remote MCP lacks OAuth, custom connectors, MCP Apps and an extension directory | `mcp.rs` `ui/js/settings.js` | YAPILDI (Tur 2): OAuth tam akış + SSRF/yönlendirme açıkları kapatıldı; açık kalan: "özel bağlayıcı ekle" penceresi, MCP Apps, Linux'ta kalıcı anahtarlık |
+| EV-05 | medium | S | AskUserQuestion is treated as a permission and never answered in the Code tab | `claudecode.rs` `ui/js/chat.js` | YAPILDI (Tur 2) |
 | FP-08 | medium | M | No subscription usage-limit display: the CLI's rate_limit_event is dropped and the usage page only shows API cost | `claudecode.rs` `ui/js/usage_ui.js` `ui/js/sidebar.js` | AÇIK |
 | FP-09 | medium | M | No chat memory (synthesized, editable, per-project) and no incognito chats | `settings.rs` `engine.rs` `prompts.rs` … | AÇIK |
 | FP-10 | medium | M | 'Add screenshot' is a permanently disabled menu item; Quick Entry is text-only | `ui/js/composer.js` `ui/js/quick.js` `ui/quick.html` … | AÇIK |
@@ -153,17 +171,25 @@ Tur 1 tamamlandı: 14 düzeltme (12 madde tam + QA-02 ve QA-12) ve 1 kısmi (FE-
 | FP-16 | medium | M | Pull requests end at creation: no CI/check status, review comments, or auto-merge | `pullrequest.rs` `ui/js/panes/changes.js` `ui/js/panes/pr_util.js` | AÇIK |
 | FP-18 | medium | M | Screen-reader support is minimal: no live regions for streaming answers, toasts or errors | `ui/index.html` `ui/js/chat.js` `ui/js/util.js` … | AÇIK |
 | FP-19 | medium | M | Desktop extensions can be installed but not uninstalled, reconfigured, updated or browsed | `extensions.rs` `commands.rs` `ui/js/settings.js` | AÇIK |
+| EV-09 | medium | M | React artifacts cannot import shadcn/ui and have no window.claude or storage APIs | `artifacts.rs` | YAPILDI (Tur 2) |
 | FP-14 | medium | L | Single main window: no 'Open in new window' and no split view | `lib.rs` `ui/js/main.js` `ui/js/store.js` | AÇIK |
 | FP-15 | medium | L | Claude cannot see or operate the Code tab's Preview pane, so it cannot check its own UI changes | `ui/js/panes/preview.js` `codetools.rs` `claudecode.rs` | AÇIK |
 | FP-17 | medium | L | Code sessions are local only: no SSH hosts, cloud sessions or Remote Control | `ui/js/code.js` `claudecode.rs` `terminal.rs` | AÇIK |
+| EV-04 | medium | L | Missing desktop integrations: dictation, computer use, Claude in Chrome, Cowork | `ui/js/composer.js` `lib.rs` | AÇIK (ertelendi: dış bağımlılık/çok büyük) |
 | FP-20 | low | S | Session lists have star and delete only: no archive, no pinned code sessions, no unread markers | `ui/js/sidebar.js` `ui/js/code.js` `db.rs` | AÇIK |
 | FP-21 | low | S | No fast mode toggle | `claudecode.rs` `ui/js/composer.js` `models.rs` | AÇIK |
 | FP-22 | low | S | No 'keep computer awake' while agents, workflows or routines run | `engine.rs` `claudecode.rs` `routines.rs` … | AÇIK |
 | FP-24 | low | S | MCP tools/list_changed notifications are ignored, so a server's new tools appear only after a manual Reload | `mcp.rs` | AÇIK |
+| EV-10 | low | S | No deep links | `lib.rs` `src-tauri/Cargo.toml` `src-tauri/tauri.conf.json` | YAPILDI (Tur 2): clauderust:// derin bağlantıları |
 | FP-23 | low | M | No URL protocol handler (deep links) | `src-tauri/Cargo.toml` `src-tauri/tauri.conf.json` `lib.rs` | AÇIK |
 | FP-25 | low | M | Only two interface languages (English, Turkish) against Desktop's eleven | `ui/js/i18n.js` | AÇIK |
+| EV-11 | low | M | Only English and Turkish | `ui/js/i18n.js` | AÇIK (ertelendi: sonraki tur) |
+| EV-21 | low | L | Code tab has no remote, SSH or cloud environments | `claudecode.rs` `ui/js/code.js` | AÇIK (ertelendi: dış bağımlılık/çok büyük) |
 
 ## Tur günlüğü
 
 - **Denetim 1**: beş bağımsız denetçi, 93 madde (1 kritik, 13 yüksek).
 - **Tur 1**: 5 uzman + kapı ajanı. Düzeltilenler: BE-01 (kritik, Windows PowerShell izin atlatması + 5 ek delik), BE-03 (CRLF/UTF-16), BE-11 (change_revert yol sınırı), QA-01 (6 düşen test), QA-02 (dosya günlüğü + panik kancası), QA-04 (şema sürümleme), QA-12 (rust-version 1.91), PERF-01 (vurgulanmış kod HTML'i 17-34x → 2.5-3.4x), PERF-06 (başlangıç taraması 73 ms → 11 ms @48k mesaj), PERF-10, FE-03, FE-05, FE-06, FE-07. FE-04 kısmen. Lider bağımsız doğrulama: lint, check, clippy -D warnings, test (199/0) ve geliştirme kopyasında açılış + günlük dosyası yazımı temiz.
+- **Release v0.1.1** yayınlandı (Latest): iki yükleyici (8.16 MB, 10.96 MB), etiket 3c2543c. release.yml etiketten tetiklenen iki çalıştırma iptal edildi (imza ortamı yok); GitHub boş bir release ortamı oluşturdu. v0.1.0 taslağına dokunulmadı.
+- **Puanlayıcı 1 (v0.1.1): 71/100.** Claude Desktop feature parity 16/30; Stability and crash resistance 21.5/25; Native performance and resource use 17/20; UI/UX polish and interaction quality 11/15; Code quality, tests and packaging 5.5/10. En büyük kayıplar: hesap sohbetinde araçlar yok (-3.5), hesap senkronu (-2, ertelendi), uzak MCP OAuth yok (-2), entegrasyonlar (-2), imzasız yükleyici (-1). Puanlayıcının "ölçülemedi" sınırları (release derlemesi çalıştırılamadı, tam derleme yasaktı) bir sonraki puanlamada ayrı hedef dizinle giderilecek. Tur 2 başladı.
+- **Tur 2** (5 uzman + kapı + canlı QA + maliyet düzeltmesi): EV-01 hesap sohbetinde MCP + web araması (CLI'a SDK-barındırmalı MCP; canlı doğrulandı), EV-03 uzak MCP OAuth (PKCE, RFC 9728/8414/7591, loopback, SSRF korumalı), EV-05 AskUserQuestion kartı (canlı doğrulandı), EV-06 kısmi yanıt kaydı, EV-07 Job Object, EV-08 MCP yeniden bağlanma + list_changed, EV-09 shadcn/ui + window.storage, EV-10 derin bağlantılar, EV-12 IPC delta (2.29 MB → 0.21 MB), EV-14/15/23 arayüz düzeltmeleri, EV-17 tur döngüsü entegrasyon testleri (9), EV-18 UI testleri (3 → 56), EV-20 open_path sınırı, EV-22 başlık. Canlı QA iki hata buldu ve düzeltti (araçla başlayan yanıtta başlık, MCP araç etiketi). Maliyet hatası (devam edilen oturumda toplam kaydediliyor) düzeltildi. Testler: 241 + 9, 0 düştü.

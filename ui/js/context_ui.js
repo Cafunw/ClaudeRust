@@ -2,7 +2,7 @@
 // summarized" divider.
 import { t } from './i18n.js';
 import { call, on } from './api.js';
-import { h, esc, toast, errorToast, fmtTokens, modal } from './util.js';
+import { h, esc, toast, errorToast, fmtTokens, fmtUsd, modal } from './util.js';
 import { registerCommand } from './slash.js';
 
 /** A topbar element showing context use and cost; refreshes itself. */
@@ -28,8 +28,8 @@ export async function updateMeter(el) {
   el.classList.toggle('full', !!(u.auto_compact_pct && pct >= u.auto_compact_pct));
   el.classList.toggle('empty', !used);
   el.querySelector('.pct').textContent = used ? `${pct}%` : '';
-  el.querySelector('.cost').textContent = u.cost_usd ? `$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(3) : u.cost_usd.toFixed(2)}` : '';
-  el.title = `${t('context_used')}: ${fmtTokens(used)} / ${fmtTokens(win)}${u.pending_compact ? ` · ${t('compact_pending')}` : ''}\n${t('cost')}: $${(u.cost_usd || 0).toFixed(4)}`;
+  el.querySelector('.cost').textContent = u.cost_usd ? fmtUsd(u.cost_usd) : '';
+  el.title = `${t('context_used')}: ${fmtTokens(used)} / ${fmtTokens(win)}${u.pending_compact ? ` · ${t('compact_pending')}` : ''}\n${t('cost')}: ${fmtUsd(u.cost_usd)}`;
 }
 
 /** Refresh the meters of `convId` (all of them without one): a session

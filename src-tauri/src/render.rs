@@ -21,6 +21,20 @@ pub struct RenderCtx<'a> {
     pub streaming_msg: Option<&'a str>,
 }
 
+impl RenderCtx<'_> {
+    /// A tool call's server (MCP tools only) and tool name: the app's MCP tools by their API name, Claude Code's
+    /// by its `mcp__<server>__<tool>`.
+    fn tool_names(&self, name: &str) -> (Option<String>, String) {
+        if let Some((s, t)) = self.mcp_names.get(name) {
+            return (Some(s.clone()), t.clone());
+        }
+        match name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
+            Some((s, t)) if !s.is_empty() && !t.is_empty() => (Some(s.into()), t.into()),
+            _ => (None, name.into()),
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct ArtifactTracker {
     versions: HashMap<String, u32>,
@@ -645,10 +659,7 @@ impl TurnBuilder {
                     self.flush_text(ctx);
                     let id = b["id"].as_str().unwrap_or("").to_string();
                     let name = b["name"].as_str().unwrap_or("").to_string();
-                    let (server, tool) = match ctx.mcp_names.get(&name) {
-                        Some((s, t)) => (Some(s.clone()), t.clone()),
-                        None => (None, name.clone()),
-                    };
+                    let (server, tool) = ctx.tool_names(&name);
                     let (status, result) = match results.get(id.as_str()) {
                         Some(r) => {
                             let rv = tool_result_view(r);
@@ -936,6 +947,22 @@ mod tests {
         assert_eq!(close_partial_json(r#"{"a": [1, 2"#).unwrap()["a"][1], 2);
         assert_eq!(close_partial_json(r#"{"a": "x\"#).unwrap()["a"], "x");
         assert!(close_partial_json("").unwrap().is_object());
+    }
+
+    #[test]
+    fn mcp_tools_show_their_server_and_tool() {
+        let (lt, st) = (HashMap::new(), HashSet::new());
+        let mut mn = HashMap::new();
+        mn.insert("weather__get_forecast".to_string(), ("my weather".to_string(), "get_forecast".to_string()));
+        let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg: None };
+        let names = |n: &str| ctx.tool_names(n);
+        assert_eq!(names("weather__get_forecast"), (Some("my weather".into()), "get_forecast".into()));
+        // Claude Code's name for an MCP tool (a chat's SDK server, or a Code session's own server)
+        assert_eq!(names("mcp__weather__get_forecast"), (Some("weather".into()), "get_forecast".into()));
+        assert_eq!(names("mcp__claude_ai_Gmail__search__threads"), (Some("claude_ai_Gmail".into()), "search__threads".into()));
+        for plain in ["Bash", "AskUserQuestion", "mcp__", "mcp__x", "mcp____t", "mcp__s__"] {
+            assert_eq!(names(plain), (None, plain.into()), "{plain}");
+        }
     }
 
     fn msg(id: &str, role: &str, content: Value, meta: Value) -> Message {
@@ -1679,10 +1706,7 @@ pub(crate) mod reference {
                         flush_text!();
                         let id = b["id"].as_str().unwrap_or("").to_string();
                         let name = b["name"].as_str().unwrap_or("").to_string();
-                        let (server, tool) = match ctx.mcp_names.get(&name) {
-                            Some((s, t)) => (Some(s.clone()), t.clone()),
-                            None => (None, name.clone()),
-                        };
+                        let (server, tool) = ctx.tool_names(&name);
                         let (status, result) = match results.get(&id) {
                             Some(r) => {
                                 let rv = tool_result_view(r);

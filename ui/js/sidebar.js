@@ -106,9 +106,11 @@ export function mountSidebar() {
     }
     if (e.target.closest('[data-act=toggle]')) toggleSidebar();
   });
+  $('#sidebar-scrim').addEventListener('click', closeOverlay);
+  narrow.addEventListener('change', closeOverlay);
   on('conversations-changed', refreshSidebar);
   on('running-changed', renderLists);
-  on('route-changed', () => { rememberRoute(); highlight(); });
+  on('route-changed', () => { rememberRoute(); highlight(); closeOverlay(); });
   // a conversation's kind is only known once it's loaded
   // (the list may not hold a conversation created a moment ago, so the
   // event's kind is used rather than looking it up)
@@ -138,6 +140,17 @@ export function toggleSidebar() {
   store.sidebarCollapsed = !store.sidebarCollapsed;
   $('#sidebar').classList.toggle('collapsed', store.sidebarCollapsed);
   saveLocal({ sidebarCollapsed: store.sidebarCollapsed });
+}
+
+// as wide as app.css's narrow layout, where the open sidebar lies over the page
+const narrow = window.matchMedia('(max-width: 760px)');
+
+/** In a narrow window, fold the sidebar that covers the page (not saved, so
+ *  a later start in a wide window opens it as you left it). */
+function closeOverlay() {
+  if (!narrow.matches || store.sidebarCollapsed) return;
+  store.sidebarCollapsed = true;
+  $('#sidebar').classList.add('collapsed');
 }
 
 function renderUserCard() {

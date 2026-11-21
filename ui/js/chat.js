@@ -5,12 +5,14 @@ import { contextMeter, compactDivider } from './context_ui.js';
 import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
-import { t, currentLanguage } from './i18n.js';
+import { t, tOr, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
 import { store, emit, modelInfo, displayName } from './store.js';
 import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot } from './util.js';
 import { createComposer } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
+import { editedFiles } from './diffstat.js';
+import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
 
 let cur = null;
@@ -147,7 +149,7 @@ function renderTopbar() {
       { label: t('fv_copy_abs'), icon: 'copy', onClick: () => copyText(c.cwd).then(() => toast(t('copied'))) },
     ], { placement: 'bottom-start', width: 280 });
     cur.topEl.append(chip, h(`<span class="muted">/</span>`));
-    if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool" title="${esc(t('engine_cc'))}">${icon('terminal', 12)} Claude Code</span>`));
+    if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool eng" title="${esc(t('engine_cc'))}">${icon('terminal', 12)}<span class="lbl"> Claude Code</span></span>`));
     if (c.options && c.options.worktree && c.options.worktree.branch) cur.topEl.append(h(`<span class="active-tool wt" title="${esc(t('worktree_topbar', { path: c.options.worktree.path }))}">${icon('code', 12)} ${esc(c.options.worktree.branch)}</span>`));
   }
   const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
@@ -176,7 +178,7 @@ async function showUsage(anchor) {
       { header: `${t('usage')} · ${modelInfo(cur.conv.model).name}` },
       { label: `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`, icon: 'zap', disabled: true },
       { label: `cache: ${fmtTokens(u.cache_read_input_tokens)} read · ${fmtTokens(u.cache_creation_input_tokens)} write`, icon: 'history', disabled: true },
-      { label: `${t('cost')}: $${u.cost_usd.toFixed(4)}`, icon: 'info', disabled: true },
+      { label: `${t('cost')}: ${fmtUsd(u.cost_usd)}`, icon: 'info', disabled: true },
     ], { placement: 'bottom-end', width: 260 });
   } catch (e) { errorToast(e); }
 }
@@ -604,30 +606,6 @@ function editLastUserMessage() {
   }
 }
 
-const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
-const lineCount = (s) => (s ? String(s).replace(/\n$/, '').split('\n').length : 0);
-
-/** Files a turn wrote or edited, with rough +/- line counts from the tool inputs. */
-export function editedFiles(parts, cwd) {
-  const files = new Map();
-  for (const p of parts || []) {
-    if (p.kind !== 'tool' || !EDIT_TOOLS.has(p.name) || p.status === 'error' || p.status === 'cancelled' || p.status === 'denied') continue;
-    if (p.result && p.result.is_error) continue;
-    const inp = p.input || {};
-    const abs = inp.file_path || inp.notebook_path;
-    if (!abs) continue;
-    let rel = String(abs);
-    if (cwd && rel.startsWith(cwd.replace(/\/$/, '') + '/')) rel = rel.slice(cwd.replace(/\/$/, '').length + 1);
-    const f = files.get(rel) || { path: rel, added: 0, removed: 0, created: false };
-    if (/File created successfully/.test((p.result && p.result.text) || '')) f.created = true;
-    if (p.name === 'Write') f.added += lineCount(inp.content);
-    else if (p.name === 'Edit') { f.added += lineCount(inp.new_string); f.removed += lineCount(inp.old_string); }
-    else if (p.name === 'MultiEdit') for (const e of inp.edits || []) { f.added += lineCount(e.new_string); f.removed += lineCount(e.old_string); }
-    files.set(rel, f);
-  }
-  return [...files.values()];
-}
-
 /** "Edited N files" summary under a finished code-session turn. */
 function renderTurnFiles(el, turn, streaming) {
   let box = el.querySelector('.turn-files');
@@ -724,7 +702,7 @@ function renderAssistantTurn(el, turn) {
   const rb = h(`<button class="icon-btn sm" title="${t('retry')}">${icon('retry', 15)}</button>`);
   rb.onclick = () => retry(turn);
   const rm = h(`<button class="icon-btn sm" title="${t('retry_with')}" style="width:18px;margin-left:-4px">${icon('chevDown', 12)}</button>`);
-  rm.onclick = () => showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: m.description, checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
+  rm.onclick = () => showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: tOr(`model_d_${m.id}`, m.description), checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
   actions.append(up, down, rb, rm);
   const model = turn.meta && turn.meta.model;
   if (model) actions.appendChild(h(`<span class="small muted model-label">${esc(modelInfo(model).name)}</span>`));
@@ -853,6 +831,7 @@ function respond(p, decision, message) {
 
 function showPermission(p) {
   if (!cur || document.querySelector(`.perm-card[data-req="${CSS.escape(p.request_id)}"]`)) return;
+  if (p.kind === 'question') { cur.permEl.appendChild(questionCard(p, (d, m) => respond(p, d, m))); scrollToBottom(true); return; }
   const input = p.input || {};
   let title = '', desc = '', detail = '';
   let buttons = [];

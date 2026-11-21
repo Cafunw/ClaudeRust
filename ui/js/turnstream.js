@@ -4,7 +4,8 @@
 // null, so are the unchanged values named in `same`, and `base` is that
 // event's `seq`. Listeners always get the full { conversation_id, turn }
 // payload, as if every event carried it.
-import { on } from './api.js';
+import { on, call } from './api.js';
+import { element, PROTOCOL } from './turnstream_delta.js';
 
 const ELIDED = ['parts', 'artifacts'];
 const last = new Map(); // conversation id -> { seq, turn } of the previous event
@@ -31,9 +32,9 @@ export function expand(p, state = last) {
       if (!Array.isArray(items)) continue;
       const out = new Array(items.length);
       for (let i = 0; i < items.length; i++) {
-        if (items[i] !== null) { out[i] = items[i]; continue; }
-        if (!Array.isArray(old) || old[i] === undefined) { state.delete(conv); return null; }
-        out[i] = old[i];
+        const v = element(items[i], Array.isArray(old) ? old[i] : undefined);
+        if (v === undefined) { state.delete(conv); return null; }
+        out[i] = v;
       }
       full[k] = out;
     }
@@ -58,6 +59,7 @@ export function onTurn(fn) {
   handlers.add(fn);
   if (!listening) {
     listening = true;
+    call('turn_stream_protocol', { version: PROTOCOL }).catch(() => {});
     on('turn', (p) => {
       const full = expand(p);
       if (!full) return;

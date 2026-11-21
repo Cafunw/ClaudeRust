@@ -8,6 +8,7 @@ import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
 import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
+import { oauthControls } from './mcp_oauth_ui.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -273,7 +274,9 @@ const RENDER = {
     body.appendChild(row(t('latex_toggle'), t('latex_toggle_d'), toggle('latex_enabled')));
     body.appendChild(row(t('websearch_default'), t('websearch_default_d'), toggle('web_search_default')));
     body.appendChild(row(t('thinking_default'), t('thinking_default_d'), toggle('thinking_default')));
-    body.appendChild(row(t('chat_search_toggle'), t('chat_search_toggle_d'), toggle('chat_search')));
+    // past-chat search runs only in the API engine (claudecode.rs leaves it off)
+    const onAccount = store.settings.chat_engine === 'claude-code' || (store.settings.chat_engine !== 'api' && !store.settings.has_api_key);
+    body.appendChild(row(t('chat_search_toggle'), onAccount ? `${t('chat_search_toggle_d')} ${t('chat_search_cc_note')}` : t('chat_search_toggle_d'), toggle('chat_search')));
     body.appendChild(row(t('send_enter'), t('send_enter_d'), toggle('send_on_enter')));
     body.appendChild(h(`<h4>API</h4>`));
     body.appendChild(row(t('fallbacks_toggle'), t('fallbacks_toggle_d'), toggle('refusal_fallbacks')));
@@ -491,6 +494,7 @@ function serverCard(s, redraw) {
     setTimeout(redraw, 1500);
   });
   if (s.error) card.appendChild(h(`<div class="notice error" style="margin:10px 0 0">${icon('alert', 15)}<div class="grow small mono">${esc(s.error)}</div></div>`));
+  card.appendChild(oauthControls(s, redraw));
   if (s.tools.length) {
     const tl = h('<div class="tools-list"></div>');
     for (const tool of s.tools) {

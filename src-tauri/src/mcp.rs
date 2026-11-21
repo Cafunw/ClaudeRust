@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{UnboundedSender, WeakUnboundedSender};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -29,6 +29,15 @@ const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
 /// How long a stdio server gets to exit by itself once its stdin is closed,
 /// before it and everything it started are killed.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// A stdio server whose process exits is started again after 1, 2, 4, 8
+/// and 16 s; after that many failed tries in a row it stays failed.
+const RESTART_TRIES: u32 = 5;
+#[cfg(not(test))]
+const RESTART_FIRST_WAIT: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const RESTART_FIRST_WAIT: Duration = Duration::from_millis(20);
+/// A server that ran this long before it exited gets all its tries back.
+const RESTART_RESET: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct McpTool {
@@ -51,10 +60,21 @@ pub struct ServerStatus {
     pub server_info: Value,
     pub logs: Vec<String>,
     pub disabled: bool,
+    /// OAuth tokens are stored for this remote server.
+    pub signed_in: bool,
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>>;
 type State = Arc<Mutex<(String, Option<String>)>>;
+type Logs = Arc<Mutex<VecDeque<String>>>;
+type Servers = Arc<tokio::sync::RwLock<HashMap<String, Arc<McpServer>>>>;
+
+/// The OAuth sign-in of a remote server (none when its config sets an
+/// Authorization header of its own).
+struct OAuth {
+    key: String,
+    tokens: tokio::sync::Mutex<Option<crate::mcp_oauth::Tokens>>,
+}
 
 enum Transport {
     Stdio {
@@ -75,6 +95,8 @@ enum Transport {
         session: Mutex<Option<String>>,
         /// Held while a new session replaces one the server expired.
         renewing: tokio::sync::Mutex<()>,
+        // boxed like `child`: the tokens are large (clippy::large_enum_variant)
+        oauth: Option<Box<OAuth>>,
     },
 }
 
@@ -85,7 +107,11 @@ pub struct McpServer {
     state: State,
     tools: Mutex<Vec<McpTool>>,
     info: Mutex<Value>,
-    logs: Arc<Mutex<VecDeque<String>>>,
+    logs: Logs,
+    /// Told whenever the server changes by itself (see McpManager::changed).
+    changed: Arc<Notify>,
+    /// The server said its tool list changed (`notifications/tools/list_changed`).
+    tools_changed: UnboundedSender<()>,
 }
 
 fn push_log(logs: &Mutex<VecDeque<String>>, line: String) {
@@ -230,6 +256,8 @@ enum Reply {
     /// HTTP 404 to a request that carried this session id: the server ended
     /// the session, and a new one has to be negotiated.
     SessionExpired(String),
+    /// HTTP 401 to a request that carried this access token (or none).
+    Unauthorized(Option<String>),
 }
 
 /// A request waiting for its answer. Dropped before the answer came (the
@@ -276,6 +304,7 @@ fn http_post(
     client: &reqwest::Client,
     url: &str,
     headers: &[(String, String)],
+    bearer: Option<&str>,
     session: Option<&str>,
     body: String,
     timeout: Duration,
@@ -290,16 +319,21 @@ fn http_post(
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
+    if let Some(b) = bearer {
+        req = req.bearer_auth(b);
+    }
     if let Some(s) = session {
         req = req.header("Mcp-Session-Id", s);
     }
     req
 }
 
+const TOOLS_CHANGED: &str = "notifications/tools/list_changed";
+
 /// Read a `text/event-stream` answer until the reply to `id` arrives.
 /// Events are delimited by blank lines with LF or CRLF line endings (the
 /// official Python SDK sends CRLF).
-async fn read_sse_reply(resp: reqwest::Response, id: i64) -> Result<Option<Value>, reqwest::Error> {
+async fn read_sse_reply(resp: reqwest::Response, id: i64, tools_changed: &UnboundedSender<()>) -> Result<Option<Value>, reqwest::Error> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut parser = crate::anthropic::SseParser::default();
@@ -307,7 +341,13 @@ async fn read_sse_reply(resp: reqwest::Response, id: i64) -> Result<Option<Value
         events
             .into_iter()
             .filter(|ev| !ev.data.is_empty())
-            .find_map(|ev| serde_json::from_str::<Value>(&ev.data).ok().and_then(|v| find_reply(v, id)))
+            .filter_map(|ev| serde_json::from_str::<Value>(&ev.data).ok())
+            .find_map(|v| {
+                if v["method"] == TOOLS_CHANGED {
+                    let _ = tools_changed.send(());
+                }
+                find_reply(v, id)
+            })
     };
     while let Some(chunk) = stream.next().await {
         buf.extend_from_slice(&chunk?);
@@ -351,6 +391,7 @@ impl McpServer {
 
     /// Send one request and wait for its answer (no session renewal).
     async fn request_raw(&self, method: &str, params: &Value, timeout: Duration) -> AppResult<Reply> {
+        let bearer = self.bearer().await;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let mut flight = InFlight { server: self, id, notify: method != "initialize", finished: false };
@@ -384,10 +425,11 @@ impl McpServer {
                 url,
                 headers,
                 session,
+                oauth,
                 ..
             } => {
                 let sent_session = session.lock().clone();
-                let resp = match http_post(client, url, headers, sent_session.as_deref(), msg.to_string(), timeout).send().await {
+                let resp = match http_post(client, url, headers, bearer.as_deref(), sent_session.as_deref(), msg.to_string(), timeout).send().await {
                     Ok(r) => r,
                     Err(e) => {
                         // a request that timed out is withdrawn; one that never
@@ -406,6 +448,10 @@ impl McpServer {
                         return Ok(Reply::SessionExpired(old));
                     }
                 }
+                if status == reqwest::StatusCode::UNAUTHORIZED && oauth.is_some() {
+                    flight.finished = true;
+                    return Ok(Reply::Unauthorized(bearer));
+                }
                 if !status.is_success() {
                     flight.finished = true;
                     let t = resp.text().await.unwrap_or_default();
@@ -418,7 +464,7 @@ impl McpServer {
                     .unwrap_or("")
                     .to_string();
                 let found = if ctype.contains("text/event-stream") {
-                    read_sse_reply(resp, id).await
+                    read_sse_reply(resp, id, &self.tools_changed).await
                 } else {
                     resp.text().await.map(|body| serde_json::from_str::<Value>(&body).ok().and_then(|v| find_reply(v, id)))
                 };
@@ -455,12 +501,15 @@ impl McpServer {
                 url,
                 headers,
                 session,
+                oauth,
                 ..
             } => {
                 if !notify {
                     return;
                 }
-                let req = http_post(client, url, headers, session.lock().as_deref(), note.to_string(), Duration::from_secs(15));
+                // no refresh here: a token being refreshed is skipped
+                let bearer = oauth.as_ref().and_then(|o| o.tokens.try_lock().ok()?.as_ref().map(|t| t.access_token.clone()));
+                let req = http_post(client, url, headers, bearer.as_deref(), session.lock().as_deref(), note.to_string(), Duration::from_secs(15));
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     rt.spawn(async move {
                         let _ = req.send().await;
@@ -470,20 +519,102 @@ impl McpServer {
         }
     }
 
+    /// `request_raw`, sent once more with a refreshed token when the server
+    /// turned down the one it got (HTTP 401). Never `Reply::Unauthorized`.
+    async fn request_authorized(&self, method: &str, params: &Value, timeout: Duration) -> AppResult<Reply> {
+        match self.request_raw(method, params, timeout).await? {
+            Reply::Unauthorized(used) => {
+                self.reauthorize(used.as_deref()).await?;
+                match self.request_raw(method, params, timeout).await? {
+                    Reply::Unauthorized(_) => Err(self.sign_in_needed()),
+                    r => Ok(r),
+                }
+            }
+            r => Ok(r),
+        }
+    }
+
     async fn request(&self, method: &str, params: Value, timeout: Duration) -> AppResult<Value> {
-        let old = match self.request_raw(method, &params, timeout).await? {
-            Reply::Done(v) => return Ok(v),
+        let old = match self.request_authorized(method, &params, timeout).await? {
             Reply::SessionExpired(old) => old,
+            Reply::Done(v) => return Ok(v),
+            Reply::Unauthorized(_) => return Err(self.sign_in_needed()),
         };
         // The server ended the session (it restarted, or expired it): the spec
         // says to start a new one, after which the request is sent once more.
         self.renew_session(&old).await?;
-        match self.request_raw(method, &params, timeout).await? {
+        match self.request_authorized(method, &params, timeout).await? {
             Reply::Done(v) => Ok(v),
             Reply::SessionExpired(_) => Err(AppError::msg(format!(
                 "MCP server '{}' ended its session again right after a new one started. Reload it in Settings → Developer.",
                 self.name
             ))),
+            Reply::Unauthorized(_) => Err(self.sign_in_needed()),
+        }
+    }
+
+    /// The access token to send, refreshed first when it is about to expire.
+    async fn bearer(&self) -> Option<String> {
+        let Transport::Http { url, oauth: Some(o), .. } = &self.transport else { return None };
+        let mut slot = o.tokens.lock().await;
+        if slot.as_ref().is_some_and(|t| t.expires_soon()) {
+            // a failed refresh keeps the old token: the server says whether it still works
+            if let Err(e) = self.refresh(url, o, &mut slot).await {
+                push_log(&self.logs, format!("[refreshing the sign-in failed: {e}]"));
+            }
+        }
+        slot.as_ref().map(|t| t.access_token.clone())
+    }
+
+    /// Replace `slot`'s tokens with new ones from the authorization server.
+    /// `Ok(false)`: it refused, and the sign-in is forgotten.
+    async fn refresh(&self, url: &str, o: &OAuth, slot: &mut Option<crate::mcp_oauth::Tokens>) -> AppResult<bool> {
+        let Some(cur) = slot.as_ref() else { return Ok(false) };
+        match crate::mcp_oauth::refresh(url, cur).await? {
+            Some(new) => {
+                if let Err(e) = crate::mcp_oauth::save(&o.key, &new) {
+                    push_log(&self.logs, format!("[{e}]"));
+                }
+                *slot = Some(new);
+                Ok(true)
+            }
+            None => {
+                crate::mcp_oauth::forget(&o.key);
+                *slot = None;
+                Ok(false)
+            }
+        }
+    }
+
+    /// After a 401 to a request sent with `used`: Ok once there is a token
+    /// worth trying again.
+    async fn reauthorize(&self, used: Option<&str>) -> AppResult<()> {
+        let Transport::Http { url, oauth: Some(o), .. } = &self.transport else { return Err(self.sign_in_needed()) };
+        let mut slot = o.tokens.lock().await;
+        match slot.as_ref() {
+            // another request got a new one meanwhile
+            Some(t) if Some(t.access_token.as_str()) != used => return Ok(()),
+            Some(t) if t.refresh_token.is_some() => {
+                if self.refresh(url, o, &mut slot).await? {
+                    return Ok(());
+                }
+            }
+            Some(_) => {
+                crate::mcp_oauth::forget(&o.key);
+                *slot = None;
+            }
+            None => {}
+        }
+        Err(self.sign_in_needed())
+    }
+
+    fn sign_in_needed(&self) -> AppError {
+        *self.state.lock() = ("needs_auth".into(), Some("Sign in to use this server.".into()));
+        self.changed.notify_one();
+        AppError::Api {
+            status: 401,
+            kind: "needs_auth".into(),
+            message: format!("MCP server '{}' needs you to sign in (Settings → Developer).", self.name),
         }
     }
 
@@ -515,8 +646,9 @@ impl McpServer {
                 session,
                 ..
             } => {
+                let bearer = self.bearer().await;
                 let s = session.lock().clone();
-                let _ = http_post(client, url, headers, s.as_deref(), msg.to_string(), Duration::from_secs(15)).send().await;
+                let _ = http_post(client, url, headers, bearer.as_deref(), s.as_deref(), msg.to_string(), Duration::from_secs(15)).send().await;
             }
         }
     }
@@ -528,10 +660,11 @@ impl McpServer {
             "capabilities": {"roots": {"listChanged": false}},
             "clientInfo": {"name": "ClaudeRust", "version": env!("CARGO_PKG_VERSION")}
         });
-        let r = match self.request_raw("initialize", &params, Duration::from_secs(60)).await? {
+        let r = match self.request_authorized("initialize", &params, Duration::from_secs(60)).await? {
             Reply::Done(v) => v,
             // only a request that carried a session id can see one expire
             Reply::SessionExpired(_) => return Err(AppError::msg("the server rejected the new session")),
+            Reply::Unauthorized(_) => return Err(self.sign_in_needed()),
         };
         *self.info.lock() = json!({"serverInfo": r["serverInfo"], "capabilities": r["capabilities"], "instructions": r["instructions"]});
         self.notify("notifications/initialized", json!({})).await;
@@ -622,6 +755,11 @@ impl McpServer {
             server_info: self.info.lock().clone(),
             logs: self.logs.lock().iter().cloned().collect(),
             disabled,
+            // busy: a refresh is under way, so there are tokens
+            signed_in: match &self.transport {
+                Transport::Http { oauth: Some(o), .. } => o.tokens.try_lock().map_or(true, |t| t.is_some()),
+                _ => false,
+            },
         }
     }
 }
@@ -629,7 +767,9 @@ impl McpServer {
 // ------------------------------------------------------------------ manager
 
 pub struct McpManager {
-    servers: tokio::sync::RwLock<HashMap<String, Arc<McpServer>>>,
+    servers: Servers,
+    /// See `changed`.
+    changed: Arc<Notify>,
     failed: Mutex<Vec<ServerStatus>>,
     /// Servers still connecting: (name, transport).
     starting: Mutex<Vec<(String, String)>>,
@@ -756,7 +896,8 @@ pub fn ensure_config(path: &Path) -> AppResult<()> {
 impl McpManager {
     pub fn new(config_path: PathBuf) -> Self {
         McpManager {
-            servers: tokio::sync::RwLock::new(HashMap::new()),
+            servers: Servers::default(),
+            changed: Arc::new(Notify::new()),
             failed: Mutex::new(vec![]),
             starting: Mutex::new(vec![]),
             generation: std::sync::atomic::AtomicU64::new(0),
@@ -764,9 +905,14 @@ impl McpManager {
         }
     }
 
+    /// Returns once a server changed by itself since the last call: it was
+    /// restarted or given up, needs a sign-in, or has new tools.
+    pub async fn changed(&self) {
+        self.changed.notified().await
+    }
+
     /// (Re)start every configured server that is not disabled.
     pub async fn start_all(&self, disabled: &[String]) {
-        use std::sync::atomic::Ordering;
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_all().await;
         let cfg = read_config(&self.config_path);
@@ -777,49 +923,94 @@ impl McpManager {
             if disabled.contains(&name) || conf["disabled"].as_bool() == Some(true) {
                 self.failed.lock().push(ServerStatus {
                     name: name.clone(),
-                    transport: if conf["url"].is_string() { "http".into() } else { "stdio".into() },
+                    transport: transport_of(&conf).into(),
                     status: "disabled".into(),
                     error: None,
                     tools: vec![],
                     server_info: Value::Null,
                     logs: vec![],
                     disabled: true,
+                    signed_in: false,
                 });
                 continue;
             }
-            starting.push((name.clone(), if conf["url"].is_string() { "http".to_string() } else { "stdio".to_string() }));
-            tasks.push(async move { (name.clone(), connect(&name, &conf).await) });
+            starting.push((name.clone(), transport_of(&conf).to_string()));
+            let changed = self.changed.clone();
+            tasks.push(async move {
+                let res = connect(&name, &conf, changed, Logs::default()).await;
+                (name, conf, res)
+            });
         }
         *self.starting.lock() = starting;
         // Register each server as soon as it connects, so one slow server
         // doesn't hold back the others.
         let mut pending: futures_util::stream::FuturesUnordered<_> = tasks.into_iter().collect();
-        use futures_util::StreamExt;
-        while let Some((name, res)) = pending.next().await {
-            if self.generation.load(Ordering::SeqCst) != gen {
-                // A newer reload started; it owns the server list now.
-                if let Ok(s) = res {
-                    s.shutdown().await;
-                }
-                continue;
+        while let Some((name, conf, res)) = pending.next().await {
+            // a newer reload owns the list of servers still starting
+            if self.generation.load(Ordering::SeqCst) == gen {
+                self.starting.lock().retain(|(n, _)| *n != name);
             }
-            self.starting.lock().retain(|(n, _)| *n != name);
-            match res {
-                Ok(s) => {
-                    self.servers.write().await.insert(name, s);
+            self.register(gen, name, conf, res).await;
+        }
+    }
+
+    /// Put a server that connected (or failed to) in its place, unless a
+    /// newer start_all began meanwhile, and keep a stdio one running.
+    async fn register(&self, gen: u64, name: String, conf: Value, res: Result<Arc<McpServer>, (AppError, Vec<String>)>) {
+        match res {
+            Ok(s) => {
+                let mut servers = self.servers.write().await;
+                if self.generation.load(Ordering::SeqCst) != gen {
+                    drop(servers);
+                    s.shutdown().await;
+                    return;
                 }
-                Err((e, logs)) => self.failed.lock().push(ServerStatus {
-                    name,
-                    transport: String::new(),
-                    status: "failed".into(),
+                let old = servers.insert(name.clone(), s.clone());
+                drop(servers);
+                if let Some(old) = old {
+                    old.shutdown().await;
+                }
+                if matches!(s.transport, Transport::Stdio { .. }) {
+                    tokio::spawn(supervise(self.servers.clone(), name, conf, s));
+                }
+            }
+            Err((e, logs)) if self.generation.load(Ordering::SeqCst) == gen => {
+                let signed_in = conf["url"].as_str().is_some_and(|u| crate::mcp_oauth::load(&crate::mcp_oauth::token_key(&name, u)).is_some());
+                self.failed.lock().push(ServerStatus {
+                    transport: transport_of(&conf).into(),
+                    status: if matches!(&e, AppError::Api { kind, .. } if kind == "needs_auth") { "needs_auth" } else { "failed" }.into(),
                     error: Some(e.to_string()),
                     tools: vec![],
                     server_info: Value::Null,
                     logs,
                     disabled: false,
-                }),
+                    signed_in,
+                    name,
+                })
             }
+            Err(_) => {}
         }
+    }
+
+    /// Reconnect server `name` alone (after a sign-in or sign-out), leaving
+    /// the others running.
+    pub async fn restart(&self, name: &str, disabled: &[String]) {
+        let gen = self.generation.load(Ordering::SeqCst);
+        let conf = read_config(&self.config_path)["mcpServers"][name].clone();
+        if !conf.is_object() || disabled.iter().any(|d| d == name) || conf["disabled"].as_bool() == Some(true) {
+            return;
+        }
+        self.failed.lock().retain(|s| s.name != name);
+        let old = self.servers.write().await.remove(name);
+        if let Some(old) = old {
+            old.shutdown().await;
+        }
+        self.starting.lock().push((name.to_string(), transport_of(&conf).into()));
+        self.changed.notify_one();
+        let res = connect(name, &conf, self.changed.clone(), Logs::default()).await;
+        self.starting.lock().retain(|(n, _)| n != name);
+        self.register(gen, name.to_string(), conf, res).await;
+        self.changed.notify_one();
     }
 
     pub async fn stop_all(&self) {
@@ -841,6 +1032,7 @@ impl McpManager {
             server_info: Value::Null,
             logs: vec![],
             disabled: false,
+            signed_in: false,
         }));
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
@@ -1023,8 +1215,9 @@ pub fn convert_result(r: &Value) -> (Vec<Value>, bool) {
 
 
 /// One line of a stdio server's stdout: an answer to one of our requests, a
-/// request from the server (answered through `replies`), or log output.
-fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>, replies: &WeakUnboundedSender<String>) {
+/// request from the server (answered through `replies`), a notification, or
+/// log output.
+fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>, replies: &WeakUnboundedSender<String>, tools_changed: &UnboundedSender<()>) {
     let Ok(v) = serde_json::from_str::<Value>(l) else {
         push_log(logs, format!("[stdout] {}", truncate_middle(l, MAX_LOG_LINE_BYTES)));
         return;
@@ -1041,6 +1234,8 @@ fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>
             if let Some(tx) = replies.upgrade() {
                 let _ = tx.send(format!("{reply}\n"));
             }
+        } else if method == TOOLS_CHANGED {
+            let _ = tools_changed.send(());
         }
         return;
     }
@@ -1056,9 +1251,17 @@ fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>
     }
 }
 
-async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, Vec<String>)> {
-    let logs: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+fn transport_of(conf: &Value) -> &'static str {
+    if conf["url"].is_string() {
+        "http"
+    } else {
+        "stdio"
+    }
+}
+
+async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> Result<Arc<McpServer>, (AppError, Vec<String>)> {
     let state: State = Arc::new(Mutex::new(("starting".into(), None)));
+    let (tools_changed, mut tools_changed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let transport = if let Some(url) = conf["url"].as_str() {
         let headers: Vec<(String, String)> = conf["headers"]
             .as_object()
@@ -1072,12 +1275,17 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
             .connect_timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| (AppError::Http(e), vec![]))?;
+        let oauth = (!headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))).then(|| {
+            let key = crate::mcp_oauth::token_key(name, url);
+            Box::new(OAuth { tokens: tokio::sync::Mutex::new(crate::mcp_oauth::load(&key)), key })
+        });
         Transport::Http {
             client,
             url: url.to_string(),
             headers,
             session: Mutex::new(None),
             renewing: tokio::sync::Mutex::new(()),
+            oauth,
         }
     } else {
         let command = conf["command"]
@@ -1147,12 +1355,13 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
             let replies = tx.downgrade();
             let state = state.clone();
             let closed = closed.clone();
+            let tools_changed = tools_changed.clone();
             tokio::spawn(async move {
                 let mut r = BufReader::new(stdout);
                 let why = loop {
                     match read_line_lossy(&mut r, MAX_MESSAGE_BYTES).await {
                         Ok(Some((_, true))) => push_log(&logs, format!("[stdout] dropped a message over {} MB", MAX_MESSAGE_BYTES >> 20)),
-                        Ok(Some((l, false))) => handle_stdout_line(&l, &pending, &logs, &replies),
+                        Ok(Some((l, false))) => handle_stdout_line(&l, &pending, &logs, &replies, &tools_changed),
                         Ok(None) => break "the server process exited".to_string(),
                         Err(e) => break format!("reading the server's output failed: {e}"),
                     }
@@ -1180,6 +1389,8 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
         tools: Mutex::new(vec![]),
         info: Mutex::new(Value::Null),
         logs: logs.clone(),
+        changed,
+        tools_changed,
     });
     match server.initialize().await {
         Ok(()) => {
@@ -1189,6 +1400,19 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
                 *st = ("connected".into(), None);
             }
             drop(st);
+            // Fetch the tools again when the server says they changed. Weak:
+            // this ends once the server is dropped (and its stdout closed).
+            let weak = Arc::downgrade(&server);
+            tokio::spawn(async move {
+                while tools_changed_rx.recv().await.is_some() {
+                    while tools_changed_rx.try_recv().is_ok() {}
+                    let Some(s) = weak.upgrade() else { break };
+                    match s.refresh_tools().await {
+                        Ok(()) => s.changed.notify_one(),
+                        Err(e) => push_log(&s.logs, format!("[fetching the changed tool list failed: {e}]")),
+                    }
+                }
+            });
             Ok(server)
         }
         Err(e) => {
@@ -1196,6 +1420,63 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
             let l: Vec<String> = logs.lock().iter().cloned().collect();
             Err((e, l))
         }
+    }
+}
+
+async fn is_current(servers: &Servers, name: &str, server: &Arc<McpServer>) -> bool {
+    servers.read().await.get(name).is_some_and(|s| Arc::ptr_eq(s, server))
+}
+
+/// Keep a stdio server running: when its process exits, start it again after
+/// 1, 2, 4… s, until it stays up or RESTART_TRIES tries in a row failed.
+/// Ends once the server isn't the manager's any more (stopped, reloaded or
+/// replaced), so a restart never races a reload.
+async fn supervise(servers: Servers, name: String, conf: Value, mut server: Arc<McpServer>) {
+    let mut tries = 0;
+    loop {
+        let Transport::Stdio { closed, .. } = &server.transport else { return };
+        let closed = closed.clone();
+        let up = Instant::now();
+        closed.cancelled().await;
+        if !is_current(&servers, &name, &server).await {
+            return;
+        }
+        // reap it, and kill anything it left running
+        server.shutdown().await;
+        if up.elapsed() >= RESTART_RESET {
+            tries = 0;
+        }
+        let new = loop {
+            let why = server.state.lock().1.clone().unwrap_or_default();
+            if tries == RESTART_TRIES {
+                *server.state.lock() = ("failed".into(), Some(format!("{why} (gave up after {RESTART_TRIES} restarts)")));
+                server.changed.notify_one();
+                return;
+            }
+            let wait = RESTART_FIRST_WAIT * 2u32.pow(tries);
+            tries += 1;
+            *server.state.lock() = ("reconnecting".into(), Some(format!("{why}; restarting in {wait:?} (try {tries} of {RESTART_TRIES})")));
+            server.changed.notify_one();
+            tokio::time::sleep(wait).await;
+            if !is_current(&servers, &name, &server).await {
+                return;
+            }
+            push_log(&server.logs, format!("[restarting: try {tries} of {RESTART_TRIES}]"));
+            match connect(&name, &conf, server.changed.clone(), server.logs.clone()).await {
+                Ok(new) => break new,
+                Err((e, _)) => *server.state.lock() = ("failed".into(), Some(e.to_string())),
+            }
+        };
+        let mut map = servers.write().await;
+        if !map.get(&name).is_some_and(|s| Arc::ptr_eq(s, &server)) {
+            drop(map);
+            new.shutdown().await;
+            return;
+        }
+        map.insert(name.clone(), new.clone());
+        drop(map);
+        server = new;
+        server.changed.notify_one();
     }
 }
 
@@ -1331,14 +1612,20 @@ mod tests {
     /// A small MCP server. argv: tag, comma-separated tool names. Tools:
     /// `slow` never answers, `cancelled` lists the ids of cancelled requests,
     /// `noisy` logs bytes that aren't UTF-8 (and more than a pipe holds),
-    /// `exit` exits without answering, `image` answers a 1x1 PNG and a text;
+    /// `exit` exits without answering, `image` answers a 1x1 PNG and a text,
+    /// `grow` adds a tool `grown` and says its tool list changed;
     /// any other tool answers "tag:name:text".
     /// Env: MCP_TEST_PIDFILE (write its pid), MCP_TEST_EOFFILE (written on
-    /// stdin EOF), MCP_TEST_STUBBORN=1 (keep running after stdin EOF).
+    /// stdin EOF), MCP_TEST_STUBBORN=1 (keep running after stdin EOF),
+    /// MCP_TEST_ONCE (a file: exit at once if it exists, else create it).
     const FAKE_SERVER: &str = r#"
 import sys, json, os, time
 tag = sys.argv[1] if len(sys.argv) > 1 else 'srv'
 tools = sys.argv[2].split(',') if len(sys.argv) > 2 else ['echo']
+once = os.environ.get('MCP_TEST_ONCE')
+if once:
+    if os.path.exists(once): sys.exit(1)
+    open(once, 'w').close()
 if os.environ.get('MCP_TEST_PIDFILE'):
     with open(os.environ['MCP_TEST_PIDFILE'], 'w') as f: f.write(str(os.getpid()))
 out, err = sys.stdout.buffer, sys.stderr.buffer
@@ -1360,7 +1647,11 @@ for raw in sys.stdin.buffer:
         name = m['params']['name']
         if name == 'slow': continue
         if name == 'exit': sys.exit(0)
-        if name == 'cancelled': r = text(json.dumps(cancelled))
+        if name == 'grow':
+            tools.append('grown')
+            send({'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'})
+            r = text('grew')
+        elif name == 'cancelled': r = text(json.dumps(cancelled))
         elif name == 'image':
             png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
             r = {'content': [{'type': 'image', 'mimeType': 'image/png', 'data': png}, {'type': 'text', 'text': 'shot'}]}
@@ -1498,24 +1789,102 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Wait up to 20 s for `f` to hold.
+    async fn eventually<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
+        for _ in 0..400 {
+            if f().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting until {what}");
+    }
+
+    fn pid(file: &Path) -> String {
+        std::fs::read_to_string(file).unwrap_or_default().trim().to_string()
+    }
+
     #[tokio::test]
-    async fn a_server_that_exits_is_marked_failed_and_fails_fast() {
+    async fn a_server_that_exits_fails_fast_and_is_restarted() {
         if python().is_none() {
             return;
         }
         let dir = temp_dir("exit");
-        let m = manager(&dir, json!({"x": fake("x", "exit,echo")})).await;
+        let pidfile = dir.join("pid");
+        let mut conf = fake("x", "exit,echo");
+        conf["env"] = json!({"MCP_TEST_PIDFILE": pidfile});
+        let m = manager(&dir, json!({"x": conf})).await;
+        let first = m.servers.read().await.get("x").cloned().unwrap();
+        let first_pid = pid(&pidfile);
         let r = tokio::time::timeout(Duration::from_secs(10), m.call("x__exit", &json!({}))).await.expect("hung");
         assert!(r.is_err());
-        let st = m.statuses().await;
-        assert_eq!(st[0].status, "failed", "{:?}", st[0]);
-        assert!(st[0].error.as_deref().unwrap_or("").contains("exited"));
-        // its tools are gone, and asking it anything fails right away
-        assert!(m.tools().await.is_empty());
-        let server = m.servers.read().await.get("x").cloned().unwrap();
-        let r = tokio::time::timeout(Duration::from_secs(2), server.request("tools/list", json!({}), Duration::from_secs(600))).await.expect("waited for the timeout");
+        // asking the exited one anything fails right away
+        let r = tokio::time::timeout(Duration::from_secs(2), first.request("tools/list", json!({}), Duration::from_secs(600))).await.expect("waited for the timeout");
         assert!(r.unwrap_err().to_string().contains("not running"));
+        // a new process takes its place, and answers
+        let (mr, fr) = (&m, &first);
+        eventually("the server is back", || async move {
+            mr.statuses().await[0].status == "connected" && !mr.servers.read().await.get("x").is_some_and(|s| Arc::ptr_eq(s, fr))
+        })
+        .await;
+        assert_ne!(pid(&pidfile), first_pid);
+        let (b, _) = m.call("x__echo", &json!({"text": "back"})).await.unwrap();
+        assert_eq!(b[0]["text"], "x:echo:back");
+        assert!(m.statuses().await[0].logs.iter().any(|l| l.contains("restarting: try 1 of 5")));
+        #[cfg(unix)]
+        assert!(!alive(first_pid.parse().unwrap()));
+        // nothing holds on to the old one
+        let old = Arc::downgrade(&first);
+        drop(first);
+        let old = &old;
+        eventually("the old server is released", || async move { old.upgrade().is_none() }).await;
         m.stop_all().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_keeps_exiting_is_given_up() {
+        if python().is_none() {
+            return;
+        }
+        let dir = temp_dir("giveup");
+        // the first process starts; every later one exits at once
+        let mut conf = fake("x", "exit");
+        conf["env"] = json!({"MCP_TEST_ONCE": dir.join("started")});
+        let m = manager(&dir, json!({"x": conf})).await;
+        assert_eq!(m.statuses().await[0].status, "connected");
+        let _ = m.call("x__exit", &json!({})).await;
+        let mr = &m;
+        eventually("it is given up", || async move { mr.statuses().await[0].status == "failed" }).await;
+        let st = m.statuses().await;
+        assert!(st[0].error.as_deref().unwrap_or("").contains("gave up after 5 restarts"), "{:?}", st[0]);
+        assert!(st[0].logs.iter().any(|l| l.contains("try 5 of 5")), "{:?}", st[0].logs);
+        assert!(!st[0].logs.iter().any(|l| l.contains("try 6")));
+        assert!(m.tools().await.is_empty());
+        // the UI was told
+        tokio::time::timeout(Duration::from_secs(1), m.changed()).await.expect("no change announced");
+        m.stop_all().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_changed_tool_list_is_fetched_again() {
+        if python().is_none() {
+            return;
+        }
+        let dir = temp_dir("grow");
+        let m = manager(&dir, json!({"x": fake("x", "grow")})).await;
+        let names = |tools: Vec<McpTool>| tools.into_iter().map(|t| t.api_name).collect::<Vec<_>>();
+        assert_eq!(names(m.tools().await), ["x__grow"]);
+        let (b, _) = m.call("x__grow", &json!({})).await.unwrap();
+        assert_eq!(b[0]["text"], "grew");
+        tokio::time::timeout(Duration::from_secs(10), m.changed()).await.expect("no change announced");
+        assert_eq!(names(m.tools().await), ["x__grow", "x__grown"]);
+        // stopped, nothing (supervisor, tool-list task) keeps the server
+        let server = Arc::downgrade(&m.servers.read().await["x"]);
+        m.stop_all().await;
+        let server = &server;
+        eventually("the server is released", || async move { server.upgrade().is_none() }).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1678,7 +2047,7 @@ for line in sys.stdin:
             (200, Some("s1".into()), "text/event-stream", sse)
         })
         .await;
-        let s = connect("web", &json!({"url": url})).await.map_err(|(e, _)| e).unwrap();
+        let s = connect("web", &json!({"url": url}), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
         assert_eq!(s.tools.lock().len(), 1);
         let r = s.request("tools/call", json!({"name": "echo", "arguments": {"text": "hi"}}), Duration::from_secs(10)).await.unwrap();
         assert_eq!(r["content"][0]["text"], "hi");
@@ -1709,7 +2078,7 @@ for line in sys.stdin:
             (200, None, "application/json", json!({"jsonrpc": "2.0", "id": req.body["id"], "result": http_result(&method, &req.body)}).to_string())
         })
         .await;
-        let s = connect("web", &json!({"url": url})).await.map_err(|(e, _)| e).unwrap();
+        let s = connect("web", &json!({"url": url}), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
         assert_eq!(sessions.load(Ordering::SeqCst), 1);
         // the server restarts and forgets the session
         expired.store(true, Ordering::SeqCst);

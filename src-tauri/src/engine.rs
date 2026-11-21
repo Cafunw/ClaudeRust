@@ -19,11 +19,35 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+
+/// How often a reply that is streaming in is saved, so a crash or power
+/// loss keeps what had arrived (the next start marks the row stopped:
+/// `Db::mark_interrupted`).
+const SAVE_EVERY: Duration = Duration::from_secs(2);
+
+/// Is it time to save the streaming reply again: `SAVE_EVERY` since the
+/// last save, or a block finished (the next one started) since. `last` is
+/// the time of that save and the number of blocks then.
+fn save_due(last: &mut (Instant, usize), now: Instant, blocks: usize) -> bool {
+    if blocks <= last.1 && now.duration_since(last.0) < SAVE_EVERY {
+        return false;
+    }
+    *last = (now, blocks);
+    true
+}
+
+/// The app's own handle, for the engines that take it (the Claude Code CLI
+/// and sub-agents). shortcut: `None` only on the mock runtime of the turn
+/// loop's tests, which never reach them; make those engines generic over
+/// `Runtime` to drop this.
+fn wry_handle<R: Runtime>(app: &AppHandle<R>) -> Option<&AppHandle> {
+    (app as &dyn std::any::Any).downcast_ref()
+}
 
 pub struct ReqCtx {
     pub model_id: String,
@@ -41,19 +65,19 @@ pub struct ReqCtx {
 
 // ------------------------------------------------------------------ events
 
-pub fn emit_turn(app: &AppHandle, conv_id: &str, turn: &Value) {
+pub fn emit_turn<R: Runtime>(app: &AppHandle<R>, conv_id: &str, turn: &Value) {
     // keyframes and deltas (see turnstream.rs; ui/js/turnstream.js expands them)
     crate::turnstream::emit_turn(app, conv_id, turn);
 }
 
-fn emit_state(app: &AppHandle, conv_id: &str, running: bool, error: Option<&AppError>) {
+fn emit_state<R: Runtime>(app: &AppHandle<R>, conv_id: &str, running: bool, error: Option<&AppError>) {
     let _ = app.emit(
         "generation-state",
         json!({"conversation_id": conv_id, "running": running, "error": error}),
     );
 }
 
-pub fn emit_conv_updated(app: &AppHandle, conv_id: &str) {
+pub fn emit_conv_updated<R: Runtime>(app: &AppHandle<R>, conv_id: &str) {
     let _ = app.emit("conversation-updated", json!({"conversation_id": conv_id}));
 }
 
@@ -620,7 +644,7 @@ impl TurnRenderer {
     }
 
     /// Render the turn with `current` as its last message and send it.
-    fn emit(&self, app: &AppHandle, conv_id: &str, current: &Message, live: &LiveRun) {
+    fn emit<R: Runtime>(&self, app: &AppHandle<R>, conv_id: &str, current: &Message, live: &LiveRun) {
         let t = self.render(current, &live.live_tools, &live.streaming_tools);
         emit_turn(app, conv_id, &t);
         self.give_back(t);
@@ -706,14 +730,14 @@ impl Drop for RunSlot {
     }
 }
 
-pub fn start(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent_id: &str) -> AppResult<()> {
+pub fn start<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, parent_id: &str) -> AppResult<()> {
     let slot = RunSlot::reserve(st, conv_id, "Claude is already responding in this conversation.")?;
     start_reserved(app, slot, parent_id);
     Ok(())
 }
 
 /// Start the turn for a conversation reserved with `RunSlot::reserve`.
-pub fn start_reserved(app: &AppHandle, mut slot: RunSlot, parent_id: &str) {
+pub fn start_reserved<R: Runtime>(app: &AppHandle<R>, mut slot: RunSlot, parent_id: &str) {
     // the running turn owns the reservation from here (its task removes it)
     slot.held = false;
     let st = slot.st.clone();
@@ -751,7 +775,7 @@ pub fn start_reserved(app: &AppHandle, mut slot: RunSlot, parent_id: &str) {
 
 /// Desktop notification when a session needs the user (a permission
 /// prompt) while the app isn't in front.
-pub(crate) fn notify_attention(app: &AppHandle, st: &AppState, conv_id: &str, payload: &Value) {
+pub(crate) fn notify_attention<R: Runtime>(app: &AppHandle<R>, st: &AppState, conv_id: &str, payload: &Value) {
     if !st.settings.read().notifications {
         return;
     }
@@ -776,6 +800,7 @@ pub(crate) fn notify_attention(app: &AppHandle, st: &AppState, conv_id: &str, pa
         .unwrap_or_default();
     let body = match payload["kind"].as_str() {
         Some("plan") => "Claude has a plan ready for your review.".to_string(),
+        Some("question") => "Claude has a question for you.".to_string(),
         Some("budget") => format!("Paused: this turn reached its ${:.2} spending limit.", payload["budget"].as_f64().unwrap_or(0.0)),
         _ => format!("Claude wants to use {tool}{detail}"),
     };
@@ -783,7 +808,7 @@ pub(crate) fn notify_attention(app: &AppHandle, st: &AppState, conv_id: &str, pa
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
-fn notify_done(app: &AppHandle, st: &AppState, conv_id: &str, failed: bool) {
+fn notify_done<R: Runtime>(app: &AppHandle<R>, st: &AppState, conv_id: &str, failed: bool) {
     if !st.settings.read().notifications {
         return;
     }
@@ -870,7 +895,7 @@ async fn checkpoint_turn(st: &Arc<AppState>, conv_id: &str, parent: &str, cancel
 
 /// Before a turn of the built-in engine: if the context is nearly full,
 /// summarize everything before the new user message.
-async fn auto_compact(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: &str, cancel: &CancellationToken) {
+async fn auto_compact<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, parent: &str, cancel: &CancellationToken) {
     let pct = st.settings.read().auto_compact_pct;
     if pct == 0 {
         return;
@@ -950,7 +975,7 @@ pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
     if b.is_finite() && b > 0.0 { b } else { 0.0 }
 }
 
-async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
+async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
     checkpoint_turn(st, conv_id, &parent, cancel).await;
     auto_compact(app, st, conv_id, &parent, cancel).await;
     if cancel.is_cancelled() {
@@ -962,6 +987,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             return run_oai(app, st, conv_id, parent, cancel).await;
         }
         if crate::claudecode::uses_cli(st, &conv).await {
+            let app = wry_handle(app).ok_or_else(|| AppError::msg("The Claude Code engine needs the app window."))?;
             return crate::claudecode::run(app, st, conv_id, parent, cancel).await;
         }
     }
@@ -1059,7 +1085,16 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
             let app2 = app.clone();
             // the reply as rendered: `am` with the content streamed so far
             let mut cur = am.clone();
+            // the first block's start has nothing to save yet
+            let mut saved = (Instant::now(), 1);
             let mut on_event = |acc: &Accumulator, _changed: Option<usize>| {
+                if save_due(&mut saved, Instant::now(), acc.blocks.len()) {
+                    let mut c = base.clone();
+                    c.extend(acc.content());
+                    if let Err(e) = st2.db.msg_update(&cur.id, &Value::Array(c), &cur.meta) {
+                        log::warn!("saving the reply so far failed: {e}");
+                    }
+                }
                 if last_emit.elapsed() < Duration::from_millis(45) {
                     return;
                 }
@@ -1224,7 +1259,10 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
                 let rc = &rc;
                 let am_id = am_id.clone();
                 async move {
-                    let r = crate::subagent::run_task(app, st, conv_id, &am_id, &tid, rc, &t["input"], cancel).await;
+                    let r = match wry_handle(app) {
+                        Some(app) => crate::subagent::run_task(app, st, conv_id, &am_id, &tid, rc, &t["input"], cancel).await,
+                        None => (text_block("Sub-agents need the app window."), true),
+                    };
                     (tid, r)
                 }
             });
@@ -1316,7 +1354,7 @@ async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, mut parent: Str
 }
 
 /// A chat turn with a model from the OpenAI-compatible endpoint (text only).
-async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: String, cancel: &CancellationToken) -> AppResult<()> {
+async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, parent: String, cancel: &CancellationToken) -> AppResult<()> {
     let conv = st.db.conv_get(conv_id)?;
     let settings = st.settings.read().clone();
     let model = conv.model.trim_start_matches(crate::oai::PREFIX).to_string();
@@ -1348,7 +1386,13 @@ async fn run_oai(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, parent: Str
     let messages = crate::oai::to_messages(&rc.system, &path);
     let started = Instant::now();
     let mut last = Instant::now() - Duration::from_secs(1);
+    let mut saved = (Instant::now(), 1);
     let res = crate::oai::stream(&settings.oai_base_url, &settings.oai_api_key, &model, messages, settings.max_tokens, cancel, |text| {
+        if save_due(&mut saved, Instant::now(), 1) {
+            if let Err(e) = st.db.msg_update(&am_id, &json!([{"type": "text", "text": text}]), &am.meta) {
+                log::warn!("saving the reply so far failed: {e}");
+            }
+        }
         if last.elapsed() < Duration::from_millis(45) {
             return;
         }
@@ -1429,8 +1473,8 @@ pub(crate) fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &
 // ------------------------------------------------------------- tools
 
 #[allow(clippy::too_many_arguments)]
-async fn ask_permission(
-    app: &AppHandle,
+async fn ask_permission<R: Runtime>(
+    app: &AppHandle<R>,
     st: &AppState,
     conv_id: &str,
     tool_use_id: &str,
@@ -1509,8 +1553,8 @@ pub(crate) fn try_update_conv_options(st: &AppState, conv_id: &str, f: impl FnOn
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_tool(
-    app: &AppHandle,
+async fn execute_tool<R: Runtime>(
+    app: &AppHandle<R>,
     st: &Arc<AppState>,
     conv_id: &str,
     tu: &Value,
@@ -1719,33 +1763,32 @@ async fn execute_tool(
 
 // ------------------------------------------------------------- titles
 
-pub async fn generate_title(app: &AppHandle, st: &Arc<AppState>, conv_id: &str) {
+pub async fn generate_title<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str) {
     let Ok(conv) = st.db.conv_get(conv_id) else { return };
     let Some(leaf) = conv.current_leaf.clone() else { return };
     let Ok(path) = st.db.path_to(&leaf) else { return };
-    let user_text = path
-        .iter()
-        .find(|m| m.role == "user" && !render::is_tool_result_msg(m))
-        .map(|m| render::plain_text(&m.content))
-        .unwrap_or_default();
-    let assistant_text = path
-        .iter()
-        .find(|m| m.role == "assistant")
-        .map(|m| render::plain_text(&m.content))
-        .unwrap_or_default();
+    let (user_text, assistant_text) = first_exchange(&path);
     let fallback = {
         let first = user_text.lines().find(|l| !l.trim().is_empty()).unwrap_or("New chat").trim();
         crate::util::truncate_chars(first, 60)
     };
     let title = match title_via_api(st, &user_text, &assistant_text).await {
         Some(t) => t,
-        None => fallback,
+        None => crate::claudecode::title(st, &conv, &user_text, &assistant_text).await.unwrap_or(fallback),
     };
     // Only set if still untitled (user may have renamed meanwhile)
     if st.db.conv_get(conv_id).map(|c| c.title.is_empty()).unwrap_or(false) {
         let _ = st.db.conv_set_title(conv_id, &title);
         emit_conv_updated(app, conv_id);
     }
+}
+
+/// What a title is written from: the person's first message and the reply's first text. A reply that
+/// begins with a tool call (web search, an MCP tool, a question) has its text in a later row.
+fn first_exchange(path: &[Message]) -> (String, String) {
+    let user = path.iter().find(|m| m.role == "user" && !render::is_tool_result_msg(m)).map(|m| render::plain_text(&m.content));
+    let reply = path.iter().filter(|m| m.role == "assistant").map(|m| render::plain_text(&m.content)).find(|t| !t.trim().is_empty());
+    (user.unwrap_or_default(), reply.unwrap_or_default())
 }
 
 async fn title_via_api(st: &AppState, user_text: &str, assistant_text: &str) -> Option<String> {
@@ -1878,6 +1921,18 @@ mod tests {
     }
 
     #[test]
+    fn a_title_is_written_from_the_replys_first_text() {
+        let path = vec![
+            m("u", "user", json!([{"type": "text", "text": "Weather in Paris?"}]), json!({})),
+            m("a1", "assistant", json!([{"type": "tool_use", "id": "t1", "name": "mcp__weather__get_forecast", "input": {}}]), json!({})),
+            m("r", "user", json!([{"type": "tool_result", "tool_use_id": "t1", "content": "sunny"}]), json!({})),
+            m("a2", "assistant", json!([{"type": "text", "text": "It is sunny in Paris."}]), json!({})),
+        ];
+        assert_eq!(first_exchange(&path), ("Weather in Paris?".to_string(), "It is sunny in Paris.".to_string()));
+        assert_eq!(first_exchange(&path[..2]), ("Weather in Paris?".to_string(), String::new()));
+    }
+
+    #[test]
     fn fallback_echo_rule() {
         let c = json!([
             {"type":"thinking","thinking":"a","signature":"s1"},
@@ -1945,6 +2000,20 @@ mod tests {
         let last = msgs[2]["content"].as_array().unwrap();
         assert_eq!(last[0]["type"], "tool_result");
         assert_eq!(last[1]["text"], "Continue");
+    }
+
+    #[test]
+    fn a_streaming_reply_is_saved_per_finished_block_and_every_two_seconds() {
+        let t0 = Instant::now();
+        let mut last = (t0, 1);
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert!(!save_due(&mut last, ms(10), 0), "nothing streamed yet");
+        assert!(!save_due(&mut last, ms(20), 1), "the first block only started");
+        assert!(save_due(&mut last, ms(30), 2), "the first block finished");
+        assert!(!save_due(&mut last, ms(1000), 2));
+        assert!(save_due(&mut last, ms(2030), 2), "two seconds since the last save");
+        assert!(!save_due(&mut last, ms(2040), 2));
+        assert!(save_due(&mut last, ms(2050), 3));
     }
 
     #[test]

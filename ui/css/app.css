@@ -737,7 +737,8 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .server .st { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
 .server .st.connected { background: var(--ok-soft); color: var(--ok); }
 .server .st.failed { background: var(--danger-soft); color: var(--danger); }
-.server .st.disabled, .server .st.starting { background: var(--bg-2); color: var(--text-2); }
+.server .st.disabled, .server .st.starting, .server .st.reconnecting { background: var(--bg-2); color: var(--text-2); }
+.server .st.needs_auth { background: var(--accent-soft); color: var(--warn); }
 .server .tools-list { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
 .tool-policy { display: flex; align-items: center; gap: 10px; padding: 5px 6px; border-radius: 8px; font-size: 13px; }
 .tool-policy:hover { background: var(--bg-2); }
@@ -784,8 +785,10 @@ body.quick.opaque .quick-box { box-shadow: none; margin: 0 14px 6px; }
 .lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 8px; }
 
 /* responsive */
+.sidebar-scrim { display: none; }
 @media (max-width: 760px) {
-  .sidebar:not(.collapsed) { position: absolute; height: 100%; box-shadow: var(--shadow-lg); }
+  .sidebar:not(.collapsed) { position: absolute; height: 100%; box-shadow: var(--shadow-lg); z-index: 31; }
+  .sidebar:not(.collapsed):not(.hidden) + .sidebar-scrim { display: block; position: fixed; inset: 0; z-index: 30; background: var(--scrim); animation: fade .15s; }
   .artifact-panel { position: absolute; inset: 0; width: 100% !important; max-width: none; min-width: 0; z-index: 20; }
   .chat-col { padding: 12px 14px 20px; }
   .chat-bottom { padding: 0 12px; }
@@ -847,8 +850,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
 .pane-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-2); font-size: 13px; padding: 30px; text-align: center; }
 .term-pane { background: var(--bg-1); padding: 6px 0 0 8px; overflow: hidden; }
-.term-actions { position: absolute; top: 6px; right: 14px; z-index: 5; opacity: .85; }
-.term-actions:hover { opacity: 1; }
+/* a row of its own above the terminal, so it never covers the shell's output */
+.term-actions { flex-shrink: 0; display: flex; justify-content: flex-end; padding: 0 10px 6px 0; }
 .term-actions .btn { gap: 4px; background: var(--bg-0); box-shadow: var(--shadow-sm); }
 .term-host { flex: 1; min-height: 0; }
 .term-host .xterm { height: 100%; }
@@ -1277,6 +1280,10 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .topbar .crumb { flex-shrink: 1; min-width: 64px; overflow: hidden; }
 .topbar .crumb .ellipsis, .topbar .crumb .code-topinfo { min-width: 0; }
 .topbar .active-tool { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .active-tool.eng { flex-shrink: 0; }
+/* a narrow top bar keeps the engine's icon (its name in the tooltip) and the context % (the cost in the tooltip) */
+.topbar { container-type: inline-size; }
+@container (max-width: 580px) { .topbar .active-tool.eng .lbl, .topbar .ctx-meter .cost { display: none; } }
 .topbar .spacer { flex: 1 1 0; min-width: 0; }
 .hist-search .select { flex: none; width: auto; min-width: 120px; padding: 0 24px 0 8px; line-height: 26px; }
 :root[data-theme="dark"] .mode-btn.plan { color: var(--link); border-color: rgba(138, 180, 248, .35); background: rgba(138, 180, 248, .1); }

@@ -96,7 +96,7 @@ registerCommand({
           <tr><td>${t('input_tokens')}</td><td>${fmtTokens(u.input_tokens)}</td></tr>
           <tr><td>${t('output_tokens')}</td><td>${fmtTokens(u.output_tokens)}</td></tr>
           <tr><td>${t('cache_tokens')}</td><td>${fmtTokens(u.cache_read_input_tokens)} / ${fmtTokens(u.cache_creation_input_tokens)}</td></tr>
-          <tr><td><b>${t('cost')}</b></td><td><b>$${(u.cost_usd || 0).toFixed(4)}</b></td></tr>
+          <tr><td><b>${t('cost')}</b></td><td><b>${fmtUsd(u.cost_usd)}</b></td></tr>
           ${u.context_tokens != null ? `<tr><td>${t('context_used')}</td><td>${fmtTokens(u.context_tokens)} / ${fmtTokens(u.context_window || 0)}</td></tr>` : ''}
         </table>`,
       });

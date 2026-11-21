@@ -13,7 +13,7 @@ import { conversationMenu } from './chat.js';
 // a newer render (a double press, or leaving the page) supersedes this one
 let renderSeq = 0;
 
-export async function renderCode(view) {
+export async function renderCode(view, params = {}) {
   const seq = ++renderSeq;
   const stale = () => seq !== renderSeq || store.route.name !== 'code';
   let folder = loadLocal().codeFolder || '';
@@ -112,6 +112,7 @@ export async function renderCode(view) {
   $('.composer-bar', composer.el).prepend(envRow);
   $('.composer-slot', view).appendChild(composer.el);
   drawEnv();
+  if (params.text) composer.setText(params.text);
   composer.focus();
 }
 

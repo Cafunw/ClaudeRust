@@ -11,6 +11,7 @@ pub mod codetools;
 pub mod commands;
 pub mod compact;
 pub mod db;
+pub mod deeplink;
 pub mod devtools;
 pub mod display;
 pub mod engine;
@@ -22,12 +23,16 @@ pub mod grepsearch;
 pub mod highlight;
 pub mod hooks;
 pub mod import;
+#[cfg(windows)]
+pub mod jobobject;
 pub mod logdigest;
 pub mod markdown;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod memory;
 pub mod models;
 pub mod oai;
+pub mod pathguard;
 pub mod prompts;
 pub mod pullrequest;
 pub mod render;
@@ -240,6 +245,7 @@ pub fn run() {
     display::prepare();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_denylist(&["quick"])
@@ -268,6 +274,26 @@ pub fn run() {
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir()?;
             applog::init(&data_dir.join("logs"));
+            #[cfg(windows)]
+            if let Some(job) = jobobject::start() {
+                app.resources_table().add(job);
+            }
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // also for a copy that no installer registered (portable, AppImage); a dev build must not take the links over
+                #[cfg(all(not(debug_assertions), any(windows, target_os = "linux")))]
+                if let Err(e) = app.deep_link().register_all() {
+                    log::warn!("registering clauderust:// failed: {e}");
+                }
+                let h = handle.clone();
+                app.deep_link().on_open_url(move |e| {
+                    deeplink::open(&h, &e.urls());
+                    show_main(&h);
+                });
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    deeplink::open(&handle, &urls);
+                }
+            }
             std::fs::create_dir_all(&data_dir)?;
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
@@ -307,6 +333,17 @@ pub fn run() {
                     let disabled = st.settings.read().disabled_mcp_servers.clone();
                     st.mcp.start_all(&disabled).await;
                     let _ = handle.emit("mcp-changed", ());
+                });
+            }
+            // MCP servers that change by themselves (restarted, given up, need a sign-in, new tools)
+            {
+                let st = st.clone();
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        st.mcp.changed().await;
+                        let _ = handle.emit("mcp-changed", ());
+                    }
                 });
             }
 
@@ -400,6 +437,8 @@ pub fn run() {
             commands::mcp_list_prompts,
             commands::mcp_get_prompt,
             commands::mcp_read_resource,
+            mcp_oauth::mcp_oauth_sign_in,
+            mcp_oauth::mcp_oauth_sign_out,
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
@@ -508,6 +547,8 @@ pub fn run() {
             commands::quick_entry_submit,
             commands::quick_entry_hide,
             commands::code_info,
+            turnstream::turn_stream_protocol,
+            deeplink::deep_link_take,
             commands::usage_stats,
             commands::reset_onboarding,
         ]);

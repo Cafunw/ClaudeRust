@@ -238,6 +238,11 @@ const BASE_STYLE: &str = r#"<style>:root{color-scheme:light dark}html,body{margi
 /// libraries from public CDNs but run in an opaque, sandboxed origin.
 pub const ARTIFACT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh https://cdn.tailwindcss.com; style-src 'unsafe-inline' https:; img-src * data: blob:; font-src * data:; connect-src https: data: blob:; media-src * data: blob:; frame-src 'none'; worker-src blob:";
 
+/// The error overlay, and the APIs Claude's artifacts expect: `window.storage`
+/// asks the app over postMessage (the sandbox has no storage of its own; see
+/// ui/js/artifact_storage.js). `window.claude.complete` would spend the
+/// user's API credit from model-written code with no prompt, so it only says
+/// it isn't there.
 const ERROR_HOOK: &str = r#"<script>
 window.addEventListener('error', function (e) {
   var d = document.getElementById('__artifact_error') || document.createElement('pre');
@@ -246,6 +251,30 @@ window.addEventListener('error', function (e) {
   d.textContent = 'Error: ' + (e.message || e.error || 'unknown');
   document.body && document.body.appendChild(d);
 });
+(function () {
+  var seq = 0, waiting = {};
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (e.source !== window.parent || !d || d.__artifactStorage !== 'reply' || !waiting[d.id]) return;
+    var w = waiting[d.id];
+    delete waiting[d.id];
+    if (d.error) w[1](new Error(d.error)); else w[0](d.result);
+  });
+  function call(op, args) {
+    return new Promise(function (ok, fail) {
+      var id = ++seq;
+      waiting[id] = [ok, fail];
+      window.parent.postMessage({ __artifactStorage: 'call', id: id, op: op, args: args }, '*');
+    });
+  }
+  window.storage = {
+    get: function (key, shared) { return call('get', [key, !!shared]); },
+    set: function (key, value, shared) { return call('set', [key, value, !!shared]); },
+    delete: function (key, shared) { return call('delete', [key, !!shared]); },
+    list: function (prefix, shared) { return call('list', [prefix, !!shared]); }
+  };
+  window.claude = { complete: function () { return Promise.reject(new Error('window.claude.complete is not available in ClaudeRust artifacts.')); } };
+})();
 </script>"#;
 
 fn theme_attr(dark: bool) -> &'static str {
@@ -297,16 +326,46 @@ mermaid.initialize({{ startOnLoad: true, theme: '{mtheme}', securityLevel: 'stri
     }
 }
 
+/// shadcn/ui stand-ins (and cn) for React artifacts; see the file.
+const UI_SHIM: &str = include_str!("artifact_ui.js");
+
+/// The `@/components/ui/<name>` modules React artifacts can import, all served by UI_SHIM.
+const UI_MODULES: [&str; 16] = [
+    "alert", "badge", "button", "card", "checkbox", "dialog", "input", "label", "progress", "select", "separator", "slider",
+    "switch", "tabs", "textarea", "tooltip",
+];
+
+/// shadcn's theme variables in the colours of the app, for UI_SHIM and the
+/// artifact's own `bg-primary`, `text-muted-foreground`, ... classes.
+const THEME_LIGHT: &str = "--background:0 0% 100%;--foreground:60 3% 8%;--card:0 0% 100%;--card-foreground:60 3% 8%;--popover:0 0% 100%;--popover-foreground:60 3% 8%;--primary:15 63% 60%;--primary-foreground:0 0% 100%;--secondary:48 25% 92%;--secondary-foreground:60 3% 8%;--muted:48 25% 92%;--muted-foreground:51 3% 44%;--accent:48 25% 92%;--accent-foreground:60 3% 8%;--destructive:0 52% 50%;--destructive-foreground:0 0% 100%;--border:50 14% 87%;--input:50 14% 87%;--ring:15 63% 60%;--radius:0.5rem";
+const THEME_DARK: &str = "--background:60 3% 15%;--foreground:50 23% 95%;--card:60 3% 17%;--card-foreground:50 23% 95%;--popover:60 3% 17%;--popover-foreground:50 23% 95%;--primary:15 63% 60%;--primary-foreground:0 0% 100%;--secondary:60 2% 22%;--secondary-foreground:50 23% 95%;--muted:60 2% 22%;--muted-foreground:45 5% 63%;--accent:60 2% 22%;--accent-foreground:50 23% 95%;--destructive:0 78% 71%;--destructive-foreground:60 3% 8%;--border:60 2% 27%;--input:60 2% 27%;--ring:15 63% 60%;--radius:0.5rem";
+
 fn build_react(code: &str, dark: bool) -> String {
     // The component source is embedded as a JSON string so no escaping issue
     // can break out of the script element.
     let src = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/");
+    let shim = serde_json::to_string(UI_SHIM).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/");
+    let modules = serde_json::to_string(&UI_MODULES).unwrap_or_else(|_| "[]".into());
+    let vars = if dark { THEME_DARK } else { THEME_LIGHT };
     let deps = "?deps=react@18.3.1,react-dom@18.3.1";
+    // The import map is written by a script: the shadcn modules are a blob:
+    // URL made here (the CSP allows blob: scripts; a data: URL it would not).
     format!(
         r##"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-{BASE_STYLE}{theme}{ERROR_HOOK}
+{BASE_STYLE}{theme}{ERROR_HOOK}<style>:root{{{vars}}}</style>
 <script src="https://cdn.tailwindcss.com/3.4.16"></script>
-<script type="importmap">{{"imports":{{
+<script>
+(function () {{
+  if (!window.tailwind) return;
+  var c = function (n) {{ return 'hsl(var(--' + n + ') / <alpha-value>)'; }};
+  var colors = {{ border: c('border'), input: c('input'), ring: c('ring'), background: c('background'), foreground: c('foreground') }};
+  ['primary', 'secondary', 'destructive', 'muted', 'accent', 'popover', 'card'].forEach(function (n) {{ colors[n] = {{ DEFAULT: c(n), foreground: c(n + '-foreground') }}; }});
+  window.tailwind.config = {{ theme: {{ extend: {{ colors: colors, borderColor: {{ DEFAULT: 'hsl(var(--border))' }}, borderRadius: {{ lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' }} }} }} }};
+}})();
+</script>
+<script>
+(function () {{
+var imports = {{
  "react":"https://esm.sh/react@18.3.1",
  "react/jsx-runtime":"https://esm.sh/react@18.3.1/jsx-runtime",
  "react-dom":"https://esm.sh/react-dom@18.3.1{deps}",
@@ -321,8 +380,19 @@ fn build_react(code: &str, dark: bool) -> String {
  "chart.js":"https://esm.sh/chart.js@4.4.7",
  "framer-motion":"https://esm.sh/framer-motion@11.15.0{deps}",
  "clsx":"https://esm.sh/clsx@2.1.1",
+ "tailwind-merge":"https://esm.sh/tailwind-merge@2.6.0",
+ "class-variance-authority":"https://esm.sh/class-variance-authority@0.7.1",
  "date-fns":"https://esm.sh/date-fns@4.1.0"
-}}}}</script>
+}};
+var ui = URL.createObjectURL(new Blob([{shim}], {{ type: 'text/javascript' }}));
+{modules}.forEach(function (m) {{ imports['@/components/ui/' + m] = ui; }});
+imports['@/lib/utils'] = ui;
+var map = document.createElement('script');
+map.type = 'importmap';
+map.textContent = JSON.stringify({{ imports: imports }});
+document.currentScript.after(map);
+}})();
+</script>
 <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 </head><body><div id="root"></div>
 <script type="module">
@@ -383,5 +453,60 @@ mod tests {
     fn react_doc_escapes_script_close() {
         let d = build_document("application/vnd.ant.react", "const s = '</script>'; export default () => null", false);
         assert!(!d.contains("'</script>'"));
+    }
+
+    #[test]
+    fn react_doc_maps_shadcn_modules_to_the_shim() {
+        let d = build_document("application/vnd.ant.react", "export default () => null", true);
+        assert!(d.contains("imports['@/components/ui/' + m] = ui;"));
+        assert!(d.contains("imports['@/lib/utils'] = ui;"));
+        assert!(d.contains(&serde_json::to_string(&UI_MODULES).unwrap()));
+        assert!(d.contains("\"tailwind-merge\":\"https://esm.sh/tailwind-merge@"));
+        assert!(d.contains(THEME_DARK) && !d.contains(THEME_LIGHT));
+        // the shim is embedded whole, and can't close the script element it sits in
+        assert!(d.contains("export function cn("));
+        assert!(!UI_SHIM.contains("</script"));
+    }
+
+    #[test]
+    fn shim_exports_every_mapped_component() {
+        let exports: [(&str, &[&str]); 16] = [
+            ("alert", &["Alert", "AlertTitle", "AlertDescription"]),
+            ("badge", &["Badge", "badgeVariants"]),
+            ("button", &["Button", "buttonVariants"]),
+            ("card", &["Card", "CardHeader", "CardTitle", "CardDescription", "CardContent", "CardFooter"]),
+            ("checkbox", &["Checkbox"]),
+            ("dialog", &["Dialog", "DialogTrigger", "DialogContent", "DialogHeader", "DialogFooter", "DialogTitle", "DialogDescription", "DialogClose"]),
+            ("input", &["Input"]),
+            ("label", &["Label"]),
+            ("progress", &["Progress"]),
+            ("select", &["Select", "SelectTrigger", "SelectValue", "SelectContent", "SelectItem", "SelectGroup", "SelectLabel", "SelectSeparator"]),
+            ("separator", &["Separator"]),
+            ("slider", &["Slider"]),
+            ("switch", &["Switch"]),
+            ("tabs", &["Tabs", "TabsList", "TabsTrigger", "TabsContent"]),
+            ("textarea", &["Textarea"]),
+            ("tooltip", &["Tooltip", "TooltipTrigger", "TooltipContent", "TooltipProvider"]),
+        ];
+        for ((module, names), mapped) in exports.iter().zip(UI_MODULES) {
+            assert_eq!(*module, mapped);
+            for n in *names {
+                let found = [format!("export const {n} ="), format!("export function {n}(")].iter().any(|p| UI_SHIM.contains(p.as_str()));
+                assert!(found, "@/components/ui/{module} lacks {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn documents_get_storage_and_stay_sandboxed() {
+        for kind in ["text/html", "application/vnd.ant.react"] {
+            let d = build_document(kind, "<p>x</p>", false);
+            assert!(d.contains("window.storage = {"), "{kind}");
+            assert!(d.contains("__artifactStorage: 'call'"), "{kind}");
+        }
+        // the policy is as tight as before: nothing by default, no 'self', no nested frames
+        assert!(ARTIFACT_CSP.starts_with("default-src 'none';"));
+        assert!(ARTIFACT_CSP.contains("frame-src 'none'"));
+        assert!(!ARTIFACT_CSP.contains("'self'"));
     }
 }

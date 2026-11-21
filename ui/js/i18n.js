@@ -525,6 +525,16 @@ const en = {
   wants_to_use: 'Claude wants to use', from_server: 'from', approve_plan: 'Approve plan', approve_plan_edits: 'Approve & auto-accept edits', keep_planning: 'Keep planning',
   plan_ready: 'Claude has a plan ready', run_command: 'Run this command?', make_edit: 'Make this edit?', write_file: 'Create this file?',
   error_title: 'Something went wrong', open_settings: 'Open settings', stopped: 'Response stopped', max_tokens: 'Claude hit the maximum length for this response.',
+  err_no_api_key: 'Add your Anthropic API key in Settings → Account, or sign in with your Claude account, to start chatting.',
+  err_auth: 'Your API key was rejected. Check it in Settings → Account.', err_rate_limit: 'Rate limited by the API. Wait a moment and retry.',
+  err_overloaded: 'The API is temporarily overloaded. Please retry in a moment.', err_network: 'Network error: {msg}',
+  // model descriptions by id, as in the backend's catalog (models.rs); a model without one shows the backend's text
+  'model_d_claude-opus-5-5': 'Most capable for complex work', 'model_d_claude-sonnet-5-5': 'Smart, efficient model for everyday use',
+  'model_d_claude-haiku-5-5': 'Fastest model for daily tasks', 'model_d_claude-fable-5-2': 'Most intelligent model for the hardest problems',
+  'model_d_claude-fable-5-1': 'Previous Fable model', 'model_d_claude-fable-5': 'Earlier Fable model',
+  'model_d_claude-opus-5': 'Previous Opus model', 'model_d_claude-sonnet-5': 'Previous Sonnet model',
+  'model_d_claude-opus-4-8': 'Legacy model', 'model_d_claude-opus-4-7': 'Legacy model', 'model_d_claude-opus-4-6': 'Legacy model',
+  'model_d_claude-sonnet-4-6': 'Legacy model', 'model_d_claude-haiku-4-5': 'Legacy model', 'model_d_claude-opus-4-5': 'Legacy model',
   continue: 'Continue', refusal: 'Claude can’t help with this request.', compaction: 'Earlier context was summarized to keep the conversation going.',
   fallback_notice: 'Answered by {to} after {from} declined.',
   welcome_title: 'Welcome to ClaudeRust', welcome_desc: 'An unofficial, lightweight desktop client for Claude, written in Rust. Sign in with your Claude account or connect an Anthropic API key to get started.',
@@ -576,10 +586,13 @@ const en = {
   prompts_resources: 'Prompts & resources', nothing_here: 'Nothing here yet',
   current_dir: 'Working directory', claude_md: 'CLAUDE.md loaded',
   chat_search_toggle: 'Search and reference chats', chat_search_toggle_d: 'Let Claude search your past conversations in this app when it\u2019s helpful.',
+  chat_search_cc_note: 'Not available yet in chats that run on your Claude account; they use it once an API key runs them.',
   notifications_toggle: 'Notifications', notifications_toggle_d: 'Notify me when Claude finishes responding while the app is in the background.',
   searched_chats: 'Searched past chats', recent_chats_tool: 'Looked at recent chats',
   install_extension: 'Install extension…', install: 'Install', extension_installed: 'Installed {name}',
   st_connected: 'connected', st_failed: 'failed', st_disabled: 'disabled', st_starting: 'starting',
+  st_needs_auth: 'needs sign-in', st_reconnecting: 'reconnecting', mcp_sign_in: 'Sign in', mcp_signing_in: 'Waiting for the browser…', mcp_sign_out: 'Sign out',
+  aq_title: 'Claude has a question', aq_other: 'Something else…', aq_submit: 'Answer', aq_skip: 'Skip',
   engine_cc: 'Claude Code', engine_builtin: 'API key', engine_auto: 'Automatic (Claude Code if installed)',
   engine_builtin_d: 'Built-in agent using your Anthropic API key.',
   cc_found: '{v} · uses your Claude Code sign-in',
@@ -1145,6 +1158,15 @@ const tr = {
   wants_to_use: 'Claude şunu kullanmak istiyor:', from_server: 'kaynak', approve_plan: 'Planı onayla', approve_plan_edits: 'Onayla ve düzenlemeleri otomatik kabul et', keep_planning: 'Planlamaya devam et',
   plan_ready: 'Claude’un planı hazır', run_command: 'Bu komut çalıştırılsın mı?', make_edit: 'Bu düzenleme yapılsın mı?', write_file: 'Bu dosya oluşturulsun mu?',
   error_title: 'Bir şeyler ters gitti', open_settings: 'Ayarları aç', stopped: 'Yanıt durduruldu', max_tokens: 'Claude bu yanıt için maksimum uzunluğa ulaştı.',
+  err_no_api_key: 'Sohbete başlamak için Ayarlar → Hesap bölümünde Anthropic API anahtarınızı ekleyin veya Claude hesabınızla giriş yapın.',
+  err_auth: 'API anahtarınız reddedildi. Ayarlar → Hesap bölümünden kontrol edin.', err_rate_limit: 'API istek sınırına ulaşıldı. Biraz bekleyip yeniden deneyin.',
+  err_overloaded: 'API geçici olarak aşırı yüklü. Birazdan yeniden deneyin.', err_network: 'Ağ hatası: {msg}',
+  'model_d_claude-opus-5-5': 'Karmaşık işler için en yetenekli model', 'model_d_claude-sonnet-5-5': 'Günlük kullanım için akıllı ve verimli model',
+  'model_d_claude-haiku-5-5': 'Günlük görevler için en hızlı model', 'model_d_claude-fable-5-2': 'En zor problemler için en zeki model',
+  'model_d_claude-fable-5-1': 'Önceki Fable modeli', 'model_d_claude-fable-5': 'Daha eski Fable modeli',
+  'model_d_claude-opus-5': 'Önceki Opus modeli', 'model_d_claude-sonnet-5': 'Önceki Sonnet modeli',
+  'model_d_claude-opus-4-8': 'Eski model', 'model_d_claude-opus-4-7': 'Eski model', 'model_d_claude-opus-4-6': 'Eski model',
+  'model_d_claude-sonnet-4-6': 'Eski model', 'model_d_claude-haiku-4-5': 'Eski model', 'model_d_claude-opus-4-5': 'Eski model',
   continue: 'Devam et', refusal: 'Claude bu isteğe yardımcı olamıyor.', compaction: 'Sohbetin devam edebilmesi için önceki bağlam özetlendi.',
   fallback_notice: '{from} reddettikten sonra {to} yanıtladı.',
   welcome_title: 'ClaudeRust’a hoş geldin', welcome_desc: 'Rust ile yazılmış, resmi olmayan hafif bir Claude masaüstü istemcisi. Başlamak için Claude hesabınla giriş yap ya da Anthropic API anahtarını bağla.',
@@ -1196,10 +1218,13 @@ const tr = {
   prompts_resources: 'İstemler ve kaynaklar', nothing_here: 'Burada henüz bir şey yok',
   current_dir: 'Çalışma dizini', claude_md: 'CLAUDE.md yüklendi',
   chat_search_toggle: 'Sohbetleri ara ve referans ver', chat_search_toggle_d: 'Faydalı olduğunda Claude\u2019un bu uygulamadaki geçmiş sohbetlerinde arama yapmasına izin ver.',
+  chat_search_cc_note: 'Claude hesabınızla çalışan sohbetlerde henüz yok; sohbetler bir API anahtarıyla çalıştığında kullanılır.',
   notifications_toggle: 'Bildirimler', notifications_toggle_d: 'Uygulama arka plandayken Claude yanıtını bitirdiğinde bildir.',
   searched_chats: 'Geçmiş sohbetlerde arandı', recent_chats_tool: 'Son sohbetlere bakıldı',
   install_extension: 'Eklenti yükle…', install: 'Yükle', extension_installed: '{name} yüklendi',
   st_connected: 'bağlı', st_failed: 'başarısız', st_disabled: 'devre dışı', st_starting: 'başlatılıyor',
+  st_needs_auth: 'oturum açılmalı', st_reconnecting: 'yeniden bağlanıyor', mcp_sign_in: 'Oturum aç', mcp_signing_in: 'Tarayıcı bekleniyor…', mcp_sign_out: 'Oturumu kapat',
+  aq_title: 'Claude’un bir sorusu var', aq_other: 'Başka bir şey…', aq_submit: 'Yanıtla', aq_skip: 'Geç',
   engine_cc: 'Claude Code', engine_builtin: 'API anahtarı', engine_auto: 'Otomatik (kuruluysa Claude Code)',
   engine_builtin_d: 'Anthropic API anahtarını kullanan yerleşik ajan.',
   cc_found: '{v} · Claude Code girişini kullanır',
@@ -1254,6 +1279,11 @@ export function t(key, vars) {
   const s = (dicts[lang] && dicts[lang][key]) || en[key] || key;
   // one pass: every occurrence, and a value is never read as a pattern ($&) or filled in itself
   return vars ? s.replace(/\{(\w+)\}/g, (m, k) => (Object.hasOwn(vars, k) ? String(vars[k]) : m)) : s;
+}
+
+/** The translation of `key`, or `fallback` (text from the backend) when no dictionary has one. */
+export function tOr(key, fallback) {
+  return (dicts[lang] && dicts[lang][key]) || en[key] || fallback;
 }
 
 export const LANGUAGES = [
