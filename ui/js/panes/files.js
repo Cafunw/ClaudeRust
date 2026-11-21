@@ -9,7 +9,7 @@ import { registerPane, context, refresh, show } from '../workspace.js';
 const state = new Map(); // convId -> { open: Set<dir>, file: path|null, filter: '' }
 
 function st(convId) {
-  if (!state.has(convId)) state.set(convId, { open: new Set(), file: null, line: null, filter: '', scroll: 0, seq: 0 });
+  if (!state.has(convId)) state.set(convId, { open: new Set(), file: null, line: null, filter: '', grep: '', mode: 'names', regex: false, case: false, scroll: 0, seq: 0 });
   return state.get(convId);
 }
 
@@ -32,16 +32,23 @@ const base = (p) => p.split('/').pop();
 async function drawTree(el, ctx) {
   const s = st(ctx.convId);
   el.innerHTML = '';
-  const head = h(`<div class="pane-head fb-head"><input class="input sm fb-filter" placeholder="${esc(t('files_filter'))}" spellcheck="false"><button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>`);
+  const grep = s.mode === 'contents';
+  const head = h(`<div class="pane-head fb-head">
+    <div class="fb-mode segmented"><button data-m="names" class="${grep ? '' : 'on'}" title="${esc(t('files_mode_names'))}">${icon('file', 13)}</button><button data-m="contents" class="${grep ? 'on' : ''}" title="${esc(t('files_mode_contents'))}">${icon('search', 13)}</button></div>
+    <input class="input sm fb-filter" placeholder="${esc(grep ? t('files_grep_ph') : t('files_filter'))}" spellcheck="false">
+    ${grep ? `<button class="icon-btn sm fb-opt ${s.case ? 'on' : ''}" data-o="case" title="${esc(t('files_case'))}">Aa</button><button class="icon-btn sm fb-opt ${s.regex ? 'on' : ''}" data-o="regex" title="${esc(t('files_regex'))}">.*</button>` : ''}
+    <button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>`);
   const list = h('<div class="fb-tree"></div>');
   el.append(head, list);
   const input = head.querySelector('input');
-  input.value = s.filter;
+  input.value = grep ? (s.grep || '') : s.filter;
   head.querySelector('[data-a=refresh]').onclick = () => drawTree(el, ctx);
-  const run = debounce(() => { s.filter = input.value.trim(); fill(list, ctx); }, 150);
+  head.querySelectorAll('.fb-mode button').forEach((b) => { b.onclick = () => { if (s.mode !== b.dataset.m) { s.mode = b.dataset.m; s.scroll = 0; drawTree(el, ctx).then(() => el.querySelector('.fb-filter').focus()); } }; });
+  head.querySelectorAll('.fb-opt').forEach((b) => { b.onclick = () => { s[b.dataset.o] = !s[b.dataset.o]; b.classList.toggle('on', !!s[b.dataset.o]); fill(list, ctx); }; });
+  const run = debounce(() => { if (grep) s.grep = input.value; else s.filter = input.value.trim(); fill(list, ctx); }, grep ? 300 : 150);
   input.addEventListener('input', run);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { const first = list.querySelector('.fb-row.file'); if (first) first.click(); }
+    if (e.key === 'Enter') { const first = list.querySelector('.fb-row.file, .gr-hit'); if (first) first.click(); }
   });
   await fill(list, ctx);
   list.scrollTop = s.scroll;
@@ -74,6 +81,41 @@ async function fill(list, ctx) {
   const s = st(ctx.convId);
   const el = list.closest('.ws-pane');
   const seq = (s.seq = (s.seq || 0) + 1);
+  if (s.mode === 'contents') {
+    const q = s.grep || '';
+    if (!q.trim()) { list.innerHTML = `<div class="pane-empty">${esc(t('files_grep_hint'))}</div>`; return; }
+    list.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>';
+    let r;
+    try { r = await call('search_in_files', { conversationId: ctx.convId, query: q, regex: !!s.regex, caseSensitive: !!s.case }); } catch (e) { if (seq === s.seq) list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+    if (seq !== s.seq) return;
+    list.innerHTML = '';
+    if (!r.hits.length) { list.appendChild(h(`<div class="pane-empty">${esc(t('no_results'))}</div>`)); return; }
+    list.appendChild(h(`<div class="gr-sum muted small">${esc(t('files_grep_sum', { n: r.hits.length, files: r.files }))}${r.truncated ? ` · ${esc(t('files_grep_more'))}` : ''}</div>`));
+    let last = null;
+    for (const hit of r.hits) {
+      if (hit.path !== last) {
+        last = hit.path;
+        const fr = h(`<div class="gr-file" title="${esc(hit.path)}">${icon('file', 13)}<span class="ellipsis">${esc(hit.path)}</span></div>`);
+        fr.onclick = () => { s.file = hit.path; s.line = null; draw(el, ctx); };
+        list.appendChild(fr);
+      }
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const bytes = enc.encode(hit.text);
+      const pre = dec.decode(bytes.slice(0, hit.start));
+      const mid = dec.decode(bytes.slice(hit.start, hit.end));
+      const post = dec.decode(bytes.slice(hit.end));
+      const hr = h(`<div class="gr-hit"><span class="no">${hit.line}</span><span class="tx">${esc(pre.trimStart())}<mark>${esc(mid)}</mark>${esc(post)}</span><button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}">@</button></div>`);
+      hr.onclick = (e) => {
+        if (e.target.closest('.fb-at')) { mention(hit.path, hit.line); return; }
+        s.file = hit.path;
+        s.line = hit.line;
+        draw(el, ctx);
+      };
+      list.appendChild(hr);
+    }
+    return;
+  }
   if (s.filter) {
     let hits = [];
     try { hits = await call('file_search', { conversationId: ctx.convId, query: s.filter }); } catch { hits = []; }

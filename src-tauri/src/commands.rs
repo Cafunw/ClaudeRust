@@ -1222,6 +1222,16 @@ pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Val
     Ok(json!({"items": items, "truncated": truncated}))
 }
 
+/// Find in files (Files pane): text or regex through the project.
+#[tauri::command]
+pub async fn search_in_files(state: St<'_>, conversation_id: String, query: String, regex: bool, case_sensitive: bool) -> AppResult<Value> {
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let r = tokio::task::spawn_blocking(move || crate::grepsearch::search(&root, &query, regex, case_sensitive))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    Ok(serde_json::to_value(r)?)
+}
+
 /// One level of the project's file tree (for the Files pane).
 #[tauri::command]
 pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {

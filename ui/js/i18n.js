@@ -1,5 +1,13 @@
 // UI strings: English and Turkish.
 const en = {
+  files_mode_names: "Find files by name",
+  files_mode_contents: "Search inside files",
+  files_grep_ph: "Search in files…",
+  files_case: "Match case",
+  files_regex: "Regular expression",
+  files_grep_hint: "Type to search the project's files (.gitignore is respected).",
+  files_grep_sum: "{n} matches in {files} files",
+  files_grep_more: "stopped early; narrow the search",
   kb_help: "Click Change, then press the new keys (with Ctrl, ⌘ or Alt). Esc cancels; Backspace turns the shortcut off.",
   kb_change: "Change",
   kb_reset: "Reset",
@@ -492,6 +500,14 @@ const en = {
 };
 
 const tr = {
+  files_mode_names: "Dosyayı adıyla bul",
+  files_mode_contents: "Dosyaların içinde ara",
+  files_grep_ph: "Dosyalarda ara…",
+  files_case: "Büyük/küçük harf duyarlı",
+  files_regex: "Düzenli ifade",
+  files_grep_hint: "Proje dosyalarında aramak için yazın (.gitignore dikkate alınır).",
+  files_grep_sum: "{files} dosyada {n} eşleşme",
+  files_grep_more: "erken durdu; aramayı daraltın",
   kb_help: "Değiştir'e tıklayın, sonra yeni tuşlara basın (Ctrl, ⌘ ya da Alt ile). Esc iptal eder; Backspace kısayolu kapatır.",
   kb_change: "Değiştir",
   kb_reset: "Sıfırla",

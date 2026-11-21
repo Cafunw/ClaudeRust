@@ -17,6 +17,7 @@ pub mod error;
 pub mod extensions;
 pub mod filesearch;
 pub mod gitops;
+pub mod grepsearch;
 pub mod highlight;
 pub mod hooks;
 pub mod import;
@@ -379,6 +380,7 @@ pub fn run() {
             commands::project_dir,
             commands::project_file,
             commands::scan_todos,
+            commands::search_in_files,
             commands::prompt_history,
             commands::pr_info,
             commands::pr_suggest,
