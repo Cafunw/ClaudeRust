@@ -1,5 +1,8 @@
 // UI strings: English and Turkish.
 const en = {
+  code_run: "Run",
+  code_run_tip: "Paste into the terminal (press Enter there to run it)",
+  code_run_failed: "The terminal couldn't be opened.",
   ph_placeholder: "Search messages you've sent…",
   ph_empty: "Messages you send show up here.",
   sc_history: "Search sent messages",
@@ -481,6 +484,9 @@ const en = {
 };
 
 const tr = {
+  code_run: "Çalıştır",
+  code_run_tip: "Terminale yapıştır (çalıştırmak için orada Enter'a basın)",
+  code_run_failed: "Terminal açılamadı.",
   ph_placeholder: "Gönderdiğiniz mesajlarda arayın…",
   ph_empty: "Gönderdiğiniz mesajlar burada görünür.",
   sc_history: "Gönderilen mesajlarda ara",

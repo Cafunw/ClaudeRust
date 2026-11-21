@@ -45,6 +45,12 @@ export function decorate(root) {
     if (b.dataset.ready) return;
     b.dataset.ready = '1';
     b.innerHTML = `${icon('copy', 14)}<span>${t('copy_code')}</span>`;
+    // shell snippets in a code session can go straight to the terminal
+    const block = b.closest('.code-block');
+    if (store.codeRoot && block && SHELL_LANGS.has((block.dataset.lang || '').toLowerCase()) && block.closest('.turn.assistant')) {
+      const run = h(`<button class="code-run" type="button" title="${t('code_run_tip')}">${icon('terminal', 14)}<span>${t('code_run')}</span></button>`);
+      b.before(run);
+    }
   });
   all('.artifact-card').forEach((c) => {
     const kind = c.dataset.kind;
@@ -59,8 +65,26 @@ export function decorate(root) {
   });
 }
 
+const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'fish', 'console', 'shellsession', 'terminal', 'powershell', 'ps1', 'pwsh', 'cmd', 'bat']);
+
+/** The commands in a shell snippet: for console transcripts (`$ cmd` lines
+ *  followed by output) only the commands. */
+export function shellCommands(code) {
+  const lines = String(code).replace(/\n+$/, '').split('\n');
+  const prompted = lines.filter((l) => /^\s*[$%] /.test(l));
+  if (prompted.length && prompted.length < lines.length) return prompted.map((l) => l.replace(/^\s*[$%] /, '')).join('\n');
+  return lines.map((l) => l.replace(/^\s*\$ /, '')).join('\n');
+}
+
 // Global delegated click handling for rendered content.
 document.addEventListener('click', async (e) => {
+  const runBtn = e.target.closest('.code-run');
+  if (runBtn) {
+    const code = runBtn.closest('.code-block')?.querySelector('code')?.innerText || '';
+    const term = await import('./panes/terminal.js');
+    if (!(await term.pasteToTerminal(shellCommands(code)))) toast(t('code_run_failed'), 'error');
+    return;
+  }
   const copyBtn = e.target.closest('.code-copy');
   if (copyBtn) {
     const code = copyBtn.closest('.code-block')?.querySelector('code')?.innerText || '';

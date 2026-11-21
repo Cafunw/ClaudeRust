@@ -4,7 +4,7 @@ import { t } from '../i18n.js';
 import { call, on } from '../api.js';
 import { h, esc, errorToast, toast, showMenu } from '../util.js';
 import { icon } from '../icons.js';
-import { registerPane, context } from '../workspace.js';
+import { registerPane, context, show } from '../workspace.js';
 
 let lib = null;
 const sessions = new Map(); // convId -> { term, fit, ptyId, el, exited }
@@ -181,3 +181,22 @@ registerPane({
     sessions.delete(convId);
   },
 });
+
+/** Put `text` into the session's terminal as if pasted (opening the pane
+ *  first). Shells with bracketed paste (bash 5.1+, zsh) run nothing until
+ *  Enter is pressed. */
+export async function pasteToTerminal(text) {
+  const ctx = context();
+  if (!ctx) return false;
+  show('terminal');
+  for (let i = 0; i < 50; i++) {
+    const s = sessions.get(ctx.convId);
+    if (s && s.ptyId && !s.exited) {
+      s.term.paste(String(text).replace(/\n+$/, ''));
+      s.term.focus();
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
