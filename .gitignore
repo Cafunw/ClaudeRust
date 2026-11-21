@@ -14,3 +14,4 @@ node_modules
 .vscode/
 # agent worktrees (Claude Code)
 .claude/worktrees/
+/target-*/
