@@ -2284,6 +2284,7 @@ mod tests {
                     let e0 = Instant::now();
                     let payload = json!({"conversation_id": conv_id, "turn": turn});
                     len = serde_json::to_string(&payload).unwrap().len();
+                    drop(payload);
                     emit_ns = e0.elapsed().as_nanos();
                 });
                 let total = t0.elapsed().as_nanos();
