@@ -402,9 +402,11 @@ fn git_auto_ok(args: &[String]) -> bool {
 
 /// Files Auto mode should still ask about even inside the project.
 fn sensitive_path(p: &Path) -> bool {
-    let s = p.to_string_lossy().to_ascii_lowercase();
+    // separators normalised: on Windows a model-given `.claude/settings.json`
+    // joins the project folder as `C:\proj\.claude/settings.json`
+    let s = p.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
     let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    s.contains("/.git/") || s.contains("\\.git\\") || s.contains("/.claude/") || s.contains("\\.claude\\") || name == ".env" || name.starts_with(".env.") || name.ends_with(".pem") || name.ends_with(".key")
+    s.contains("/.git/") || s.contains("/.claude/") || name == ".env" || name.starts_with(".env.") || name.ends_with(".pem") || name.ends_with(".key")
         || name == "id_rsa" || name == "id_ed25519" || name == ".npmrc" || name == ".pypirc" || name == "credentials" || name == "credentials.json"
 }
 
@@ -1751,6 +1753,9 @@ mod tests {
             assert_eq!(p("Bash", json!({"command": fine})), Perm::Allow, "{fine}");
         }
         assert_eq!(p("Write", json!({"file_path": ".claude/settings.json", "content": "{}"})), Perm::Ask);
+        // mixed separators, as a forward-slash path joined to a Windows folder gives
+        assert!(sensitive_path(Path::new("C:\\proj\\.claude/settings.json")) && sensitive_path(Path::new("C:\\proj/.git\\config")));
+        assert!(sensitive_path(Path::new("/p/.Claude/hooks/x.sh")) && !sensitive_path(Path::new("/p/src/claude.rs")));
         assert_eq!(check_permission("acceptEdits", "Write", &json!({"file_path": ".claude/hooks/x.sh", "content": "x"}), &[], Some(&s)), Perm::Ask);
         assert_eq!(check_permission("default", "WebFetch", &json!({}), &[], Some(&s)), Perm::Ask);
         assert!(matches!(check_permission("plan", "Write", &json!({"file_path": f}), &[], Some(&s)), Perm::Deny(_)));

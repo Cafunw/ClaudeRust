@@ -178,6 +178,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cr-wt-{}", crate::util::new_id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         git(&dir, &["init", "-q"]).unwrap();
+        git(&dir, &["config", "core.autocrlf", "false"]).unwrap(); // keep LF on Windows runners
         git(&dir, &["config", "user.email", "t@example.com"]).unwrap();
         git(&dir, &["config", "user.name", "t"]).unwrap();
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();

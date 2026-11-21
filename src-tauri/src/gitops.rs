@@ -479,6 +479,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&d).output().unwrap().status.success());
         run(&["init", "-q"]);
+        run(&["config", "core.autocrlf", "false"]); // keep LF on Windows runners
         let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
         std::fs::write(d.join("f.txt"), &body).unwrap();
         run(&["add", "."]);
@@ -501,6 +502,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let run = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&d).output().unwrap();
         run(&["init", "-q"]);
+        run(&["config", "core.autocrlf", "false"]); // keep LF on Windows runners
         std::fs::write(d.join("a.txt"), "a\n").unwrap();
         run(&["add", "."]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
@@ -592,6 +594,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&d).output().unwrap().status.success());
         run(&["init", "-q"]);
+        run(&["config", "core.autocrlf", "false"]); // keep LF on Windows runners
         std::fs::write(d.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         run(&["add", "."]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
@@ -643,6 +646,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for args in [
             vec!["init", "-q"],
+            vec!["config", "core.autocrlf", "false"],
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
         ] {
