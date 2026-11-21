@@ -42,6 +42,7 @@ pub mod subagent;
 pub mod symbols;
 pub mod terminal;
 pub mod todos;
+pub mod turnstream;
 pub mod updates;
 pub mod util;
 pub mod view;
