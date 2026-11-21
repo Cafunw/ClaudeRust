@@ -104,6 +104,7 @@ pub async fn base_branch(root: &Path) -> String {
 }
 
 async fn gh(root: &Path, args: &[&str], stdin: Option<&str>) -> AppResult<String> {
+    crate::shellenv::ready().await;
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let mut cmd = crate::shellenv::command("gh", &args);
     cmd.current_dir(root)
@@ -228,6 +229,7 @@ pub fn pr_ref(pr: &str) -> Option<String> {
 /// A pull request's details and diff, through `gh`.
 pub async fn fetch(root: &Path, pr: &str) -> AppResult<Value> {
     let Some(r) = pr_ref(pr) else { return Err(AppError::msg("Give a pull request number or URL.")) };
+    crate::shellenv::ready().await;
     if !crate::shellenv::which("gh") {
         return Err(AppError::msg("Reviewing a pull request needs the GitHub CLI (gh), signed in with `gh auth login`."));
     }

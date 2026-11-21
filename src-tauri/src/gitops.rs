@@ -27,6 +27,7 @@ pub async fn git_raw(cwd: &Path, args: &[&str]) -> AppResult<std::process::Outpu
 
 /// `git_raw` with extra environment variables (e.g. `GIT_INDEX_FILE`).
 async fn git_raw_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> AppResult<std::process::Output> {
+    crate::shellenv::ready().await;
     let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let mut cmd = crate::shellenv::command("git", &owned);
     cmd.current_dir(cwd)

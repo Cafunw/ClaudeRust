@@ -14,6 +14,17 @@ pub fn path() -> OsString {
     PATH.get_or_init(compute).clone()
 }
 
+/// Wait, off the async runtime, until the PATH is known. Finding it runs
+/// the login shell (up to 4 s with a slow profile, at start) and every
+/// `path`, `command` or `which` meanwhile blocks its thread: async code
+/// that may run that early (the panes a restored session opens with)
+/// awaits this first, so no runtime worker waits for the shell.
+pub async fn ready() {
+    if PATH.get().is_none() {
+        let _ = tokio::task::spawn_blocking(init).await;
+    }
+}
+
 /// Where tools like node, npx, gh or claude usually live (Homebrew on Apple
 /// silicon and on Intel, the system's own folders): added when they exist,
 /// so they are found even when the login shell can't tell us its PATH.
@@ -176,6 +187,13 @@ pub fn command(program: &str, args: &[String]) -> tokio::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ready_resolves_the_path() {
+        ready().await;
+        assert!(PATH.get().is_some());
+        assert_eq!(path(), *PATH.get().unwrap());
+    }
 
     #[cfg(unix)]
     #[test]

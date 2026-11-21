@@ -58,6 +58,7 @@ pub fn find_cli(override_path: &str) -> Option<PathBuf> {
 
 /// Path and version of the CLI, for the settings screen.
 pub async fn cli_info(override_path: &str) -> Value {
+    crate::shellenv::ready().await;
     let Some(p) = find_cli(override_path) else {
         return json!({"found": false});
     };
@@ -309,6 +310,7 @@ enum Outcome {
 }
 
 pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
+    crate::shellenv::ready().await;
     match run_once(app, st, conv_id, user_msg_id.clone(), cancel, false).await? {
         Outcome::Done => Ok(()),
         // Start over in a new session that gets the earlier conversation as context.

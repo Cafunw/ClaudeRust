@@ -1463,6 +1463,8 @@ pub async fn term_open(app: AppHandle, state: St<'_>, conversation_id: String, c
             .and_then(|c| c.cwd)
             .unwrap_or_default(),
     };
+    // the shell gets the login PATH (a restored session opens its terminal at start)
+    crate::shellenv::ready().await;
     state.terminals.open(&app, &conversation_id, &cwd, cols, rows)
 }
 
@@ -3065,6 +3067,7 @@ pub fn editor_args(editor: &str, path: &str, line: Option<u32>) -> Option<(Strin
 #[tauri::command]
 pub async fn open_in_editor(app: AppHandle, state: St<'_>, path: String, line: Option<u32>) -> AppResult<String> {
     let editor = state.settings.read().editor.clone();
+    crate::shellenv::ready().await;
     if let Some((bin, args)) = editor_args(&editor, &path, line) {
         let mut cmd = crate::shellenv::command(&bin, &args);
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());

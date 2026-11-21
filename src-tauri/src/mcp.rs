@@ -1093,6 +1093,7 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
             .as_array()
             .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
+        crate::shellenv::ready().await;
         let mut cmd = crate::shellenv::command(command, &args);
         if let Some(env) = conf["env"].as_object() {
             for (k, v) in env {
