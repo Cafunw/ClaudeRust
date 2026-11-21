@@ -7,6 +7,8 @@ import { h, esc, modal, button, toast, errorToast, confirmDialog, relTime } from
 import { registerCommand } from './slash.js';
 
 let openModal = null;
+// routines whose "Run now" is in flight (a second click would start a second session)
+const running = new Set();
 
 function scheduleText(s) {
   if (s.kind === 'interval') {
@@ -23,9 +25,15 @@ function fmtWhen(ms) {
   return d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
 }
 
+// Each draw of the list or the editor takes a new number: a list that was
+// still loading when the editor opened doesn't replace it.
+const nextView = (body, view) => { body.dataset.view = view; body._drawSeq = (body._drawSeq || 0) + 1; return body._drawSeq; };
+
 async function drawList(body) {
+  const seq = nextView(body, 'list');
   let list = [];
   try { list = await call('routines_list'); } catch (e) { errorToast(e); }
+  if (seq !== body._drawSeq) return;
   body.innerHTML = '';
   const head = h(`<div class="rt-head"><p class="muted">${esc(t('rt_desc'))}</p><button class="btn primary sm" data-a="new">${icon('plus', 14)} ${t('rt_new')}</button></div>`);
   head.querySelector('[data-a=new]').onclick = () => drawEditor(body, null);
@@ -48,13 +56,22 @@ async function drawList(body) {
     };
     const op = row.querySelector('[data-a=open]');
     if (op) op.onclick = () => { if (openModal) openModal.close(); emit('navigate', { name: 'chat', params: { id: r.last_conversation_id } }); };
-    row.querySelector('[data-a=run]').onclick = async () => {
+    const runBtn = row.querySelector('[data-a=run]');
+    runBtn.disabled = running.has(r.id);
+    runBtn.onclick = async () => {
+      if (running.has(r.id)) return;
+      running.add(r.id);
+      runBtn.disabled = true;
       try {
         const id = await call('routine_run', { id: r.id });
         emit('conversations-changed');
         if (openModal) openModal.close();
         emit('navigate', { name: 'chat', params: { id } });
-      } catch (e) { errorToast(e); drawList(body); }
+      } catch (e) { errorToast(e); } finally {
+        running.delete(r.id);
+        runBtn.disabled = false;
+        if (body.isConnected && body.dataset.view === 'list') drawList(body);
+      }
     };
     row.querySelector('[data-a=edit]').onclick = () => drawEditor(body, r);
     row.querySelector('[data-a=del]').onclick = async () => {
@@ -67,6 +84,7 @@ async function drawList(body) {
 }
 
 function drawEditor(body, r) {
+  nextView(body, 'editor');
   const s = r ? r.schedule : { kind: 'daily', time: '09:00', weekdays: [1, 2, 3, 4, 5] };
   const cwd = r ? r.cwd : (loadLocal().codeFolder || '');
   const f = h(`<div class="rt-form">
@@ -97,7 +115,9 @@ function drawEditor(body, r) {
   sync();
   f.querySelector('[data-a=pick]').onclick = async () => { const d = await call('pick_directory').catch(() => null); if (d) q('cwd').value = d; };
   f.querySelector('[data-a=cancel]').onclick = () => drawList(body);
-  f.querySelector('[data-a=save]').onclick = async () => {
+  const saveBtn = f.querySelector('[data-a=save]');
+  saveBtn.onclick = async () => {
+    if (saveBtn.disabled) return; // a double click would save a new routine twice
     const kind = q('kind').value;
     const schedule = kind === 'daily'
       ? { kind, time: q('time').value || '09:00', weekdays: [...f.querySelectorAll('.rt-days input:checked')].map((x) => +x.value) }
@@ -116,7 +136,8 @@ function drawEditor(body, r) {
       enabled: r ? r.enabled : true,
       model: r ? r.model : (store.settings.code_model || null),
     };
-    try { await call('routine_save', { routine }); toast(t('rt_saved')); drawList(body); } catch (e) { errorToast(e); }
+    saveBtn.disabled = true;
+    try { await call('routine_save', { routine }); toast(t('rt_saved')); drawList(body); } catch (e) { errorToast(e); } finally { saveBtn.disabled = false; }
   };
   body.innerHTML = '';
   body.appendChild(f);
@@ -131,4 +152,11 @@ export function openRoutines() {
 }
 
 registerCommand({ name: 'schedule', description: () => t('cmd_schedule'), kinds: ['code'], run: () => openRoutines() });
-on('routines-changed', () => { if (openModal) drawList(openModal.body.querySelector('.routines') || openModal.body); });
+on('routines-changed', () => {
+  if (!openModal) return;
+  const body = openModal.body.querySelector('.routines') || openModal.body;
+  // the editor is in the same element: a routine running in the background
+  // mustn't wipe what is being typed (the list is redrawn when it closes)
+  if (body.dataset.view === 'editor') return;
+  drawList(body);
+});

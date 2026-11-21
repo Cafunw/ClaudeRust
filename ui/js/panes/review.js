@@ -86,11 +86,19 @@ onChangesHeader((slot, ctx) => {
   if (!list.length) return;
   const send = h(`<button class="btn sm primary" title="${esc(t('review_send_d'))}">${icon('arrowUp', 13)} ${esc(t('review_send', { n: list.length }))}</button>`);
   send.onclick = async () => {
+    if (send.disabled) return;
     const chat = await import('../chat.js');
     const c = chat.current();
     if (!c || c.id !== ctx.convId) return;
-    c.composer.setText(reviewPrompt(load(ctx.convId)));
-    await c.composer.send();
+    const prompt = reviewPrompt(load(ctx.convId));
+    send.disabled = true;
+    try {
+      c.composer.setText(prompt);
+      await c.composer.send();
+    } finally { send.disabled = false; }
+    // the composer takes the text out once it's sent (or queued); still
+    // there means it wasn't (an error, or busy): keep the comments
+    if (c.composer.getText() === prompt) return;
     save(ctx.convId, []);
     refresh('changes');
   };

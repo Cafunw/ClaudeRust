@@ -25,15 +25,31 @@ export async function openRewind(ctx) {
   </div>`);
   const opts = body.querySelector('.rw-options');
   const m = modal({ title: t('rewind_title'), body });
+  let busy = false;
+  // all options are off while one runs: a second click would restore again
+  const setBusy = (on) => {
+    busy = on;
+    opts.querySelectorAll('.rw-opt').forEach((b) => { b.disabled = on || b.dataset.enabled !== '1'; });
+  };
   const choose = async (code, conversation) => {
+    if (busy) return;
+    setBusy(true);
     try {
       const r = await call('rewind', { conversationId: ctx.conversationId, messageId: ctx.messageId, code, conversation });
       m.close();
       if (conversation && ctx.onConversationRewound) ctx.onConversationRewound(r.text);
       if (code && r.undo) {
-        toast(t('rewind_done_code'), '', { action: t('undo'), onAction: () => call('rewind_undo', { conversationId: ctx.conversationId, undo: r.undo }).then(() => toast(t('rewind_undone'))).catch(errorToast) });
+        let undone = false;
+        toast(t('rewind_done_code'), '', {
+          action: t('undo'),
+          onAction: () => {
+            if (undone) return;
+            undone = true;
+            call('rewind_undo', { conversationId: ctx.conversationId, undo: r.undo }).then(() => toast(t('rewind_undone'))).catch((e) => { undone = false; errorToast(e); });
+          },
+        });
       } else if (conversation) toast(t('rewind_done_conv'));
-    } catch (e) { errorToast(e); }
+    } catch (e) { errorToast(e); setBusy(false); }
   };
   const canCode = info.checkpoint && files.length > 0;
   const options = [
@@ -42,7 +58,7 @@ export async function openRewind(ctx) {
     { label: t('rewind_code'), sub: t('rewind_code_d'), code: true, conv: false, enabled: canCode },
   ];
   for (const o of options) {
-    const b = h(`<button class="rw-opt" ${o.enabled ? '' : 'disabled'}><b>${esc(o.label)}</b><span>${esc(o.sub)}</span></button>`);
+    const b = h(`<button class="rw-opt" data-enabled="${o.enabled ? '1' : '0'}" ${o.enabled ? '' : 'disabled'}><b>${esc(o.label)}</b><span>${esc(o.sub)}</span></button>`);
     b.onclick = () => choose(o.code, o.conv);
     opts.appendChild(b);
   }

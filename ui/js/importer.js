@@ -17,6 +17,19 @@ function errorsBox(errors, label) {
   return h(`<div class="notice error" style="margin-top:10px">${icon('alert', 15)}<div class="grow"><div>${esc(t('imp_errors', { n: errors.length }))}</div>${items}</div></div>`);
 }
 
+// One import at a time, across re-renders of this tab (Settings reopened
+// during a long import); the backend refuses a second one too.
+let activeImport = null;
+// the drop listener of the tab as last rendered
+let dropListener = null;
+
+/** Run `fn` unless another import is running (then: null). */
+function exclusive(fn) {
+  if (activeImport) return null;
+  activeImport = (async () => { try { return await fn(); } finally { activeImport = null; } })();
+  return activeImport;
+}
+
 /** Run an import while showing "Importing… n/total" on `label`. */
 async function withProgress(label, fn) {
   const unlisten = await onBackend('import-progress', (p) => {
@@ -40,12 +53,14 @@ export async function renderImport(body) {
   actions.append(choose, req);
   cb.append(actions, status);
   const runExport = async (path) => {
-    if (choose.disabled) return;
+    if (choose.disabled || activeImport) return;
     choose.disabled = true;
     status.textContent = t('imp_progress', { done: 0, total: '…' });
     cb.querySelectorAll('.notice').forEach((n) => n.remove());
     try {
-      const r = await withProgress(status, () => call('import_claude_export', { path }));
+      const job = exclusive(() => withProgress(status, () => call('import_claude_export', { path })));
+      if (!job) { status.textContent = ''; return; }
+      const r = await job;
       status.textContent = t('imp_result_proj', { n: r.imported, p: r.projects, s: r.skipped });
       const eb = errorsBox(r.errors);
       if (eb) cb.appendChild(eb);
@@ -56,17 +71,31 @@ export async function renderImport(body) {
       errorToast(e);
     } finally { choose.disabled = false; }
   };
+  // an import started before this tab was (re)opened is still running
+  if (activeImport) {
+    choose.disabled = true;
+    status.textContent = t('imp_progress', { done: '…', total: '…' });
+    activeImport.catch(() => {}).finally(() => { choose.disabled = false; status.textContent = ''; });
+  }
   choose.onclick = async () => {
+    if (activeImport) return;
     let path;
     try { path = await call('pick_import_file'); } catch (e) { errorToast(e); return; }
     if (path) runExport(path);
   };
-  // Dropping the export file anywhere on this tab imports it too.
-  const unlistenDrop = onBackend('tauri://drag-drop', (p) => {
-    if (!chats.isConnected) { unlistenDrop.then((u) => u()); return; }
+  // Dropping the export file anywhere on this tab imports it too. One
+  // listener: the previous rendering's goes first.
+  if (dropListener) dropListener.then((u) => u()).catch(() => {});
+  const listener = onBackend('tauri://drag-drop', (p) => {
+    if (!chats.isConnected) {
+      listener.then((u) => u()).catch(() => {});
+      if (dropListener === listener) dropListener = null;
+      return;
+    }
     const path = p && p.paths && p.paths.find((x) => /\.(zip|json)$/i.test(x));
     if (path) runExport(path);
   });
+  dropListener = listener;
   body.appendChild(chats);
 
   // --- local data (scan) -------------------------------------------------
@@ -112,12 +141,14 @@ function ccSessions(cc) {
     sync();
   };
   go.onclick = async () => {
-    if (!picked.size) return;
+    if (!picked.size || activeImport) return;
     go.disabled = true; all.disabled = true;
     b.querySelectorAll('.notice').forEach((n) => n.remove());
     try {
       const paths = [...picked];
-      const r = await withProgress(status, () => call('import_claude_code_sessions', { paths }));
+      const job = exclusive(() => withProgress(status, () => call('import_claude_code_sessions', { paths })));
+      if (!job) return;
+      const r = await job;
       status.textContent = t('imp_result', { n: r.imported, s: r.skipped });
       const eb = errorsBox(r.errors);
       if (eb) b.appendChild(eb);

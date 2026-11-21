@@ -17,12 +17,22 @@ async function openCommit(ctx, data) {
   </div>`);
   const ta = body.querySelector('textarea');
   const status = body.querySelector('.cm-status');
+  // Commit is on only when the secret scan allows it (nothing found, or the
+  // user confirmed) and no commit is already running (a second click would
+  // commit, and push, again).
+  let scanOk = false;
+  let committing = false;
+  let commitBtn = null;
+  const sync = () => { if (commitBtn) commitBtn.disabled = committing || !scanOk; };
   const m = modal({
     title: t('commit_title'),
     body,
     footer: [
       button(t('cancel'), 'ghost', () => m.close()),
       button(t('commit_do'), 'primary', async () => {
+        if (committing || !scanOk) return;
+        committing = true;
+        sync();
         try {
           const push = body.querySelector('[data-k=push]').checked;
           const r = await call('git_commit', { conversationId: ctx.convId, message: ta.value, push });
@@ -30,22 +40,25 @@ async function openCommit(ctx, data) {
           else toast(r);
           m.close();
           refresh('changes');
-        } catch (e) { errorToast(e); }
+        } catch (e) { errorToast(e); } finally {
+          committing = false;
+          sync();
+        }
       }),
     ],
   });
   // secrets about to be committed: list them and ask for confirmation.
   // Commit stays off until the scan has answered.
   const warn = body.querySelector('.secret-warn');
-  const commitBtn = m.el.querySelector('.modal-foot .btn.primary');
-  if (commitBtn) commitBtn.disabled = true;
+  commitBtn = m.el.querySelector('.modal-foot .btn.primary');
+  sync();
   const askAnyway = (html) => {
     warn.classList.remove('hidden');
     warn.innerHTML = `${html}<label class="day"><input type="checkbox" data-k="anyway"> ${esc(t('secrets_anyway'))}</label>`;
-    warn.querySelector('[data-k=anyway]').onchange = (e) => { if (commitBtn) commitBtn.disabled = !e.target.checked; };
+    warn.querySelector('[data-k=anyway]').onchange = (e) => { scanOk = e.target.checked; sync(); };
   };
   call('secret_scan', { conversationId: ctx.convId }).then((found) => {
-    if (!found || !found.length) { if (commitBtn) commitBtn.disabled = false; return; }
+    if (!found || !found.length) { scanOk = true; sync(); return; }
     askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_found', { n: found.length }))}</div>
       <ul>${found.slice(0, 8).map((f) => `<li><code>${esc(f.path)}${f.line ? `:${f.line}` : ''}</code> — ${esc(f.kind)}${f.preview ? ` <code>${esc(f.preview)}</code>` : ''}</li>`).join('')}</ul>`);
   }).catch((e) => {

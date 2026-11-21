@@ -140,15 +140,25 @@ async function draw(pane, ctx) {
     tx = mx - (mx - tx) * f; ty = my - (my - ty) * f; sc *= f;
     apply();
   }, { passive: false });
-  svg.addEventListener('mousedown', (e) => { drag = { x: e.clientX, y: e.clientY, tx, ty }; });
-  window.addEventListener('mousemove', (e) => {
+  // window listeners only while dragging: added on every draw and never
+  // removed, they kept each old map (and its SVG) alive
+  const onMove = (e) => {
     if (!drag) return;
     const pt = svg.getBoundingClientRect();
     tx = drag.tx + ((e.clientX - drag.x) / pt.width) * vb.w;
     ty = drag.ty + ((e.clientY - drag.y) / pt.height) * vb.h;
     apply();
+  };
+  const onUp = () => {
+    drag = null;
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  svg.addEventListener('mousedown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, tx, ty };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   });
-  window.addEventListener('mouseup', () => { drag = null; });
   // filter
   pane.querySelector('.pv-url').addEventListener('input', (e) => {
     const q = e.target.value.trim().toLowerCase();

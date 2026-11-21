@@ -83,14 +83,15 @@ function row(entry, depth, ctx, el) {
   return r;
 }
 
-async function fill(list, ctx) {
+/** quiet: a refresh in the background (files changed): no spinner, and the scroll position is kept. */
+async function fill(list, ctx, { quiet = false } = {}) {
   const s = st(ctx.convId);
   const el = list.closest('.ws-pane');
   const seq = (s.seq = (s.seq || 0) + 1);
   if (s.mode === 'contents') {
     const q = s.grep || '';
     if (!q.trim()) { list.innerHTML = `<div class="pane-empty">${esc(t('files_grep_hint'))}</div>`; return; }
-    list.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>';
+    if (!quiet) list.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>';
     let r;
     try { r = await call('search_in_files', { conversationId: ctx.convId, query: q, regex: !!s.regex, caseSensitive: !!s.case }); } catch (e) { if (seq === s.seq) list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
     if (seq !== s.seq) return;
@@ -270,16 +271,41 @@ export function showFile(path, line) {
   refresh('files');
 }
 
+/**
+ * Refill the tree (or results) in place after files changed: the header,
+ * with the filter box someone may be typing in, stays as it is, so it keeps
+ * focus, selection and caret.
+ */
+async function refill(el, ctx) {
+  const list = el.querySelector('.fb-tree');
+  if (!list) return draw(el, ctx);
+  const s = st(ctx.convId);
+  const top = list.scrollTop;
+  await fill(list, ctx, { quiet: true });
+  if (list.isConnected) { list.scrollTop = top; s.scroll = top; }
+  return undefined;
+}
+
 registerPane({
   id: 'files',
   order: 65,
   icon: 'folder',
   label: () => t('ws_files'),
   mount: (el, ctx) => { el.classList.add('files-pane'); draw(el, ctx); },
-  show: (el, ctx) => draw(el, ctx),
+  show: (el, ctx) => {
+    const s = st(ctx.convId);
+    if (s.soft) { s.soft = false; if (!s.file) return refill(el, ctx); }
+    return draw(el, ctx);
+  },
 });
 
 on('files-changed', ({ conversation_id }) => {
   const c = context();
-  if (c && c.convId === conversation_id && !st(conversation_id).file) refresh('files');
+  const s = st(conversation_id);
+  if (c && c.convId === conversation_id && !s.file) {
+    s.soft = true;
+    refresh('files');
+    // refresh() only reaches the pane while it's the one shown
+    s.soft = false;
+  }
 });

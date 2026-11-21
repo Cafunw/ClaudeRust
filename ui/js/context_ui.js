@@ -66,13 +66,24 @@ registerCommand({
   },
 });
 
-let compactToast = null;
-on('compacting', ({ auto }) => { compactToast = toast(auto ? t('compacting_auto') : t('compacting')); });
-on('compacted', ({ error, auto }) => {
-  void compactToast;
-  if (error) toast(`${t('compact_failed')}: ${error}`, 'error');
-  else toast(auto ? t('compacted_auto') : t('compacted'));
+/** Is `convId` the conversation on screen? (Events without one: yes.) */
+async function isOpen(convId) {
+  if (!convId) return true;
+  const chat = await import('./chat.js');
+  const c = chat.current();
+  return !!c && c.id === convId;
+}
+
+// Compaction toasts are about the open conversation only: a background
+// session compacting shouldn't announce itself over another one. A failed
+// /compact the user asked for is still reported.
+on('compacting', async ({ conversation_id: id, auto }) => {
+  if (await isOpen(id)) toast(auto ? t('compacting_auto') : t('compacting'));
+});
+on('compacted', async ({ conversation_id: id, error, auto }) => {
   refreshMeters();
+  const open = await isOpen(id);
+  if (error) { if (open || !auto) toast(`${t('compact_failed')}: ${error}`, 'error'); } else if (open) toast(auto ? t('compacted_auto') : t('compacted'));
 });
 on('generation-state', ({ running }) => { if (!running) refreshMeters(); });
 
