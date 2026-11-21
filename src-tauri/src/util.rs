@@ -137,7 +137,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Ok(m) => {
             // a file we may not write stays as it is (a plain write would
             // fail too; the rename alone would get past a read-only file)
-            std::fs::OpenOptions::new().write(true).open(&target)?;
+            let f = std::fs::OpenOptions::new().write(true).open(&target)?;
+            // Replacing the file would make it a different one: its other
+            // hard links would keep the old text, and a file someone else
+            // owns (writable through its group) would become ours. Those
+            // are written in place, as a plain write does.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                // SAFETY: geteuid has no preconditions and can't fail
+                if m.nlink() > 1 || m.uid() != unsafe { libc::geteuid() } {
+                    let mut f = f;
+                    f.set_len(0)?;
+                    f.write_all(bytes)?;
+                    return f.sync_all();
+                }
+            }
+            drop(f);
             Some(m.permissions())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -346,6 +362,22 @@ mod tests {
         std::os::unix::fs::symlink("made.txt", &dangling).unwrap();
         write_atomic(&dangling, b"hi").unwrap();
         assert_eq!(std::fs::read_to_string(d.join("made.txt")).unwrap(), "hi");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_keep_hard_links() {
+        let d = tmp_dir("awh");
+        let a = d.join("a.txt");
+        let b = d.join("b.txt");
+        std::fs::write(&a, "old").unwrap();
+        std::fs::hard_link(&a, &b).unwrap();
+        write_atomic(&a, b"new").unwrap();
+        // both names still show the same file
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "new");
+        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

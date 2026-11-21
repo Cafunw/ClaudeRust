@@ -179,6 +179,9 @@ export function createComposer(opts) {
     return { kind: mode, composer: api, ...c };
   }
 
+  /** Send (or queue) what's in the box. Resolves to whether it went: sent,
+   *  queued or handled as a command (the box is then cleared); false when
+   *  nothing was sent (empty, busy, stopped, failed). */
   async function send() {
     if (running) {
       // typing while Claude works queues the message (sent when it finishes)
@@ -187,42 +190,43 @@ export function createComposer(opts) {
         ta.value = ''; attachments = []; renderAttachments(); autoGrow(ta);
         if (opts.draftKey) store.drafts.delete(opts.draftKey);
         updateSend();
-        return;
+        return true;
       }
       opts.onStop && opts.onStop();
-      return;
+      return false;
     }
     let text = ta.value;
-    if ((!text.trim() && !attachments.length) || busy || attachments.some((a) => a.loading)) return;
+    if ((!text.trim() && !attachments.length) || busy || attachments.some((a) => a.loading)) return false;
     busy = true; updateSend();
     const atts = attachments.slice();
     try {
       if (mode === 'code' && /^#\s+\S/.test(text) && !text.trim().includes('\n') && !atts.length) {
         const r = await slash.handleHash(text.trim(), cmdContext());
-        if (r === true) { ta.value = ''; autoGrow(ta); if (opts.draftKey) store.drafts.delete(opts.draftKey); return; }
-        if (r === null) return;
+        if (r === true) { ta.value = ''; autoGrow(ta); if (opts.draftKey) store.drafts.delete(opts.draftKey); return true; }
+        if (r === null) return false;
       }
       if (text.trim().startsWith('/') && !atts.length) {
         const r = await slash.handle(text, cmdContext());
         if (r && r.handled) {
           ta.value = ''; autoGrow(ta);
           if (opts.draftKey) store.drafts.delete(opts.draftKey);
-          return;
+          return true;
         }
-        if (r && r.keep) return;
+        if (r && r.keep) return false;
         if (r && r.prompt) text = r.prompt;
         if (r && r.attachments && r.attachments.length) atts.push(...r.attachments);
       }
       const ok = await opts.onSend(text, atts, { ...st });
-      if (ok !== false) {
-        ta.value = '';
-        attachments = [];
-        renderAttachments();
-        autoGrow(ta);
-        if (opts.draftKey) store.drafts.delete(opts.draftKey);
-      }
+      if (ok === false) return false;
+      ta.value = '';
+      attachments = [];
+      renderAttachments();
+      autoGrow(ta);
+      if (opts.draftKey) store.drafts.delete(opts.draftKey);
+      return true;
     } catch (e) {
       errorToast(e);
+      return false;
     } finally {
       busy = false;
       updateSend();

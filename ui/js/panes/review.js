@@ -92,13 +92,13 @@ onChangesHeader((slot, ctx) => {
     if (!c || c.id !== ctx.convId) return;
     const prompt = reviewPrompt(load(ctx.convId));
     send.disabled = true;
+    let sent = false;
     try {
       c.composer.setText(prompt);
-      await c.composer.send();
+      sent = await c.composer.send();
     } finally { send.disabled = false; }
-    // the composer takes the text out once it's sent (or queued); still
-    // there means it wasn't (an error, or busy): keep the comments
-    if (c.composer.getText() === prompt) return;
+    // not sent (an error, or busy): keep the comments
+    if (!sent) return;
     save(ctx.convId, []);
     refresh('changes');
   };
