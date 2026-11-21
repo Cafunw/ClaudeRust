@@ -1,4 +1,5 @@
 // Hooks: ask before running a project's hooks, and /hooks to review them.
+import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call, on } from './api.js';
 import { h, esc, modal, button, toast, errorToast } from './util.js';
@@ -37,7 +38,9 @@ registerCommand({
     let info;
     try { info = await call('hooks_info', { conversationId: ctx.conversationId }); } catch (e) { errorToast(e); return; }
     const rows = info.active.map((x) => `<tr><td>${esc(x.event)}</td><td><code>${esc(x.matcher || '*')}</code></td><td><code>${esc(x.command)}</code></td></tr>`).join('');
+    const problems = (info.problems || []).map((p) => `<div class="notice error" style="margin:0 0 10px">${icon('alert', 15)}<div class="grow small">${esc(p)}</div></div>`).join('');
     const body = h(`<div class="hooks-dlg">
+      ${problems}
       ${info.active.length ? `<table class="kv hooks-table"><tr><th>${t('hooks_event')}</th><th>${t('hooks_matcher')}</th><th>${t('hooks_command')}</th></tr>${rows}</table>` : `<p class="muted">${esc(t('hooks_none'))}</p>`}
       ${info.untrusted ? `<p style="margin-top:12px">${esc(t('hooks_untrusted_d', { root: info.untrusted.root }))}</p><button class="btn" data-a="trust">${t('hooks_review')}</button>` : ''}
       <p class="muted small" style="margin-top:12px">${esc(t('hooks_help'))}</p></div>`);

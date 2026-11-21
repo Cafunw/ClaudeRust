@@ -254,6 +254,8 @@ const RENDER = {
       status = st || await call('mcp_status');
       store.mcpServers = status.servers;
       servers.innerHTML = '';
+      // a config that can't be used starts no servers: say why
+      if (status.config_problem) servers.appendChild(h(`<div class="notice error" style="margin:0 0 14px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
       if (!status.servers.length) servers.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('plug', 28)}<div style="margin-top:8px">${t('no_servers')}</div></div>`));
       for (const s of status.servers) servers.appendChild(serverCard(s, () => draw()));
       actions.innerHTML = '';
@@ -525,7 +527,9 @@ async function installExtension(redraw) {
 
 function editConfig(status, redraw) {
   const ta = h(`<textarea class="textarea code" spellcheck="false" style="height:52vh"></textarea>`);
-  ta.value = JSON.stringify(status.config, null, 2);
+  // a file that doesn't parse is opened as it is, to be fixed, never
+  // replaced by the empty config it reads as
+  ta.value = status.config_text ?? JSON.stringify(status.config, null, 2);
   const example = `{
   "mcpServers": {
     "filesystem": {
@@ -536,6 +540,7 @@ function editConfig(status, redraw) {
   }
 }`;
   const body = h('<div></div>');
+  if (status.config_problem) body.appendChild(h(`<div class="notice error" style="margin:0 0 10px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
   body.append(ta, h(`<details class="help"><summary>Example</summary><pre class="mono" style="white-space:pre-wrap">${esc(example)}</pre></details>`));
   const saveB = button(t('save_restart'), 'primary', async () => {
     try { const r = await call('mcp_save_config', { config: ta.value }); toast(t('config_saved')); m.close(); redraw(r); } catch (e) { errorToast(e); }

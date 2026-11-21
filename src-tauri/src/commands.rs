@@ -986,10 +986,15 @@ pub async fn highlight_code(code: String, language: String) -> AppResult<String>
 pub async fn mcp_status(state: St<'_>) -> AppResult<Value> {
     let st = state.inner().clone();
     let statuses = st.mcp.statuses().await;
+    let path = &st.mcp.config_path;
+    let problem = mcp::config_problem(path);
     Ok(json!({
         "servers": statuses,
-        "config_path": st.mcp.config_path.display().to_string(),
-        "config": mcp::read_config(&st.mcp.config_path),
+        "config_path": path.display().to_string(),
+        "config": mcp::read_config(path),
+        // a file that can't be used: why, and its text for the editor
+        "config_problem": problem,
+        "config_text": problem.as_ref().and_then(|_| mcp::config_text(path)),
         "claude_desktop_config": mcp::claude_desktop_config_path().filter(|p| p.exists()).map(|p| p.display().to_string()),
     }))
 }
@@ -1750,7 +1755,12 @@ pub async fn hooks_info(state: St<'_>, conversation_id: String) -> AppResult<Val
         .iter()
         .flat_map(|(e, hs)| hs.iter().map(move |h| json!({"event": e, "matcher": h.matcher, "command": h.command})))
         .collect();
-    Ok(json!({"active": active, "untrusted": cfg.untrusted.map(|(r, h, c)| json!({"root": r, "hash": h, "commands": c}))}))
+    Ok(json!({
+        "active": active,
+        "untrusted": cfg.untrusted.map(|(r, h, c)| json!({"root": r, "hash": h, "commands": c})),
+        // settings files whose hooks don't run, and why
+        "problems": cfg.problems,
+    }))
 }
 
 /// Trust (or stop trusting) a project's current hook configuration.
@@ -1851,6 +1861,9 @@ pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult
     }
     let shell = if cfg!(windows) { "powershell" } else if which::which("bash").is_ok() { "bash" } else { "sh" };
     add("Shell", "ok", shell.to_string());
+    if let Some(p) = mcp::config_problem(&st.mcp.config_path) {
+        add("MCP config", "error", p);
+    }
     for s in st.mcp.statuses().await {
         let v = serde_json::to_value(&s).unwrap_or_default();
         let status = v["status"].as_str().unwrap_or("");
@@ -1870,7 +1883,13 @@ pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult
                 add("Memory files", "ok", if mem.is_empty() { "none".into() } else { mem.join(", ") });
                 let hooks = engine::hook_config(&st, &p);
                 let n: usize = hooks.events.values().map(|v| v.len()).sum();
-                add("Hooks", if hooks.untrusted.is_some() { "warn" } else { "ok" }, format!("{n} active{}", if hooks.untrusted.is_some() { " · project hooks not trusted yet" } else { "" }));
+                let status = if !hooks.problems.is_empty() { "error" } else if hooks.untrusted.is_some() { "warn" } else { "ok" };
+                let mut detail = format!("{n} active{}", if hooks.untrusted.is_some() { " · project hooks not trusted yet" } else { "" });
+                for p in &hooks.problems {
+                    detail.push_str(" · ");
+                    detail.push_str(p);
+                }
+                add("Hooks", status, detail);
                 add("Engine", "ok", conv.options["engine"].as_str().unwrap_or("builtin").to_string());
             }
         }

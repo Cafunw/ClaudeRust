@@ -681,6 +681,17 @@ pub fn read_config(path: &Path) -> Value {
         .unwrap_or_else(|| json!({"mcpServers": {}}))
 }
 
+/// The config file's text as it is on disk, for the editor in Settings, so a
+/// file that doesn't parse is shown (and fixed) instead of replaced by an
+/// empty config. Text that isn't UTF-8 is shown with replacement characters.
+/// `None` when there is no file.
+pub fn config_text(path: &Path) -> Option<String> {
+    match read_config_text(path) {
+        Ok(t) => Some(t),
+        Err(_) => std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
+    }
+}
+
 /// What is wrong with the config file, in words for Settings: `None` when
 /// it is fine or doesn't exist yet. (`read_config` falls back to no servers
 /// for a broken file; this says why none were started.)
@@ -1300,13 +1311,18 @@ mod tests {
         let problem = config_problem(&p).unwrap();
         assert!(problem.contains("isn't valid JSON"), "{problem}");
         assert!(read_config_for_update(&p).is_err());
+        // the editor gets the file's own text to fix, not the empty config it reads as
+        assert_eq!(read_config(&p), json!({"mcpServers": {}}));
+        assert_eq!(config_text(&p).as_deref(), Some("{\"mcpServers\": {"));
         std::fs::write(&p, "[]").unwrap();
         assert!(config_problem(&p).unwrap().contains("JSON object"));
         std::fs::write(&p, r#"{"mcpServers": []}"#).unwrap();
         assert!(config_problem(&p).is_some());
         std::fs::write(&p, [0xC3u8, 0x28]).unwrap();
         assert!(config_problem(&p).unwrap().contains("UTF-8"));
+        assert_eq!(config_text(&p).as_deref(), Some("\u{fffd}("));
         assert_eq!(config_problem(&dir.join("missing.json")), None);
+        assert_eq!(config_text(&dir.join("missing.json")), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
