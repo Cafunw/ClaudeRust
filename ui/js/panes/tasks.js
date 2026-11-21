@@ -112,19 +112,30 @@ function scriptsSection(el, ctx, list) {
 }
 
 let timer = null;
+let shownEl = null; // the pane element the timer redraws
 registerPane({
   id: 'tasks',
   order: 40,
   icon: 'list',
   label: () => t('ws_tasks'),
   badge: (ctx) => counts.get(ctx.convId) || '',
-  mount: (el, ctx) => { el.classList.add('tasks-pane'); draw(el, ctx); },
+  // show() comes right after and draws it
+  mount: (el) => { el.classList.add('tasks-pane'); },
   show: (el, ctx) => {
     draw(el, ctx);
     clearInterval(timer);
-    timer = setInterval(() => { const c = context(); if (c && el.offsetParent) draw(el, c); else clearInterval(timer); }, 2000);
+    shownEl = el;
+    // the elapsed times and output tick while it's shown; not while the
+    // window is hidden (it's drawn again the moment it's back)
+    timer = setInterval(() => { const c = context(); if (c && el.offsetParent) { if (!document.hidden) draw(el, c); } else clearInterval(timer); }, 2000);
   },
   hide: () => { clearInterval(timer); timer = null; },
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !timer || !shownEl) return;
+  const c = context();
+  if (c && shownEl.offsetParent) draw(shownEl, c);
 });
 
 // sub-agents of the built-in agent

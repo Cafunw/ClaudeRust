@@ -45,7 +45,22 @@ function eventKeys(e) {
   return out;
 }
 
+// parsed bindings: every keydown is matched against all of them, by several
+// handlers, and there are only a few distinct strings
+const parsed = new Map();
+
 export function parse(binding) {
+  const k = String(binding || '');
+  let p = parsed.get(k);
+  if (!p) {
+    if (parsed.size > 200) parsed.clear();
+    p = Object.freeze(parseBinding(k));
+    parsed.set(k, p);
+  }
+  return p;
+}
+
+function parseBinding(binding) {
   const parts = String(binding || '').split('+');
   // "Mod++" style (the key itself is "+")
   let key = parts.pop();

@@ -5,10 +5,10 @@ import { contextMeter, compactDivider } from './context_ui.js';
 import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
-import { t } from './i18n.js';
+import { t, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
 import { store, emit, modelInfo, displayName } from './store.js';
-import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd } from './util.js';
+import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot } from './util.js';
 import { createComposer } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
 import * as artifacts from './artifacts.js';
@@ -36,6 +36,26 @@ function composerInitial(conv) {
 // replace the one opened after it
 let openSeq = 0;
 
+// get_conversation (the whole conversation, rendered) for callers that come
+// within a few milliseconds of each other: the end of a turn brings
+// generation-state and conversation-updated back to back, and a rename the
+// command's reply and its conversation-updated, and each asked for all of
+// it. A caller only ever joins a request that hasn't been sent yet, so it
+// never gets data older than its call.
+const JOIN_MS = 10;
+const fetching = new Map(); // id -> promise of a request about to be sent
+export function fetchConversation(id) {
+  let p = fetching.get(id);
+  if (!p) {
+    p = new Promise((resolve, reject) => setTimeout(() => {
+      fetching.delete(id);
+      call('get_conversation', { id }).then(resolve, reject);
+    }, JOIN_MS));
+    fetching.set(id, p);
+  }
+  return p;
+}
+
 export async function openConversation(id, { focus = true } = {}) {
   const seq = ++openSeq;
   const data = await call('get_conversation', { id });
@@ -60,6 +80,7 @@ export async function openConversation(id, { focus = true } = {}) {
     scrollEl: scroll,
     colEl: $('.chat-col', scroll),
     permEl: $('.perm-area', bottom),
+    bottomEl: bottom,
     topEl: top,
     running: data.running,
     artifacts: new Map(),
@@ -232,7 +253,7 @@ async function exportConv(c, fmt) {
 async function refreshConversationMeta() {
   if (!cur) return;
   try {
-    const data = await call('get_conversation', { id: cur.id });
+    const data = await fetchConversation(cur.id);
     cur.conv = data.conversation;
     renderTopbar();
     document.title = cur.conv.title || 'ClaudeRust';
@@ -276,15 +297,14 @@ export async function reload() {
   if (cur) cur.colEl.querySelectorAll('.compact-divider.pending').forEach((x) => x.remove());
   if (!cur) return;
   const id = cur.id;
-  const data = await call('get_conversation', { id });
+  const data = await fetchConversation(id);
   if (!cur || cur.id !== id) return;
   cur.conv = data.conversation;
   const keep = new Set(data.turns.map((x) => x.id));
   for (const [tid, el] of cur.els) if (!keep.has(tid)) { el.remove(); cur.els.delete(tid); cur.turns.delete(tid); }
   cur.order = [];
   for (const turn of data.turns) upsertTurn(turn, false);
-  // ensure DOM order
-  for (const tid of cur.order) cur.colEl.appendChild(cur.els.get(tid));
+  placeTurns();
   markLast();
   rebuildArtifacts();
   renderTopbar();
@@ -319,7 +339,9 @@ function onScroll() {
 
 function updateScrollButton() {
   if (!cur) return;
-  const bottom = cur.scrollEl.parentElement.querySelector('.chat-bottom');
+  // (kept, not looked up: a search from the view goes through the whole
+  // conversation first, on every scroll event and streamed change)
+  const bottom = cur.bottomEl;
   let btn = bottom.querySelector('.scroll-down');
   const show = !nearBottom();
   if (show && !btn) {
@@ -329,15 +351,36 @@ function updateScrollButton() {
   } else if (!show && btn) btn.remove();
 }
 
+/** Put the turn elements in conversation order after anything else in the
+ *  column, as appending each of them would, but move nothing when they're
+ *  in order already: a moved turn is laid out again and loses the scroll
+ *  positions inside it, and a reload (after every answer) would move all. */
+function placeTurns() {
+  const want = cur.order.map((tid) => cur.els.get(tid));
+  const kids = cur.colEl.children;
+  const start = kids.length - want.length;
+  if (start >= 0 && want.every((el, j) => kids[start + j] === el)) return;
+  for (const el of want) cur.colEl.appendChild(el);
+}
+
+/** A turn's disclaimer: it's in the action row, the turn's last child, so
+ *  there's no need to search the whole turn (this runs for every turn on
+ *  every streamed change). */
+function disclaimerOf(el) {
+  const last = el.lastElementChild;
+  if (last && last.classList.contains('turn-actions')) return last.querySelector('.disclaimer');
+  return el.querySelector('.disclaimer');
+}
+
 function markLast() {
   if (!cur) return;
-  cur.els.forEach((el) => el.classList.remove('last'));
   const lastId = cur.order[cur.order.length - 1];
-  if (lastId && cur.els.get(lastId)) cur.els.get(lastId).classList.add('last');
-  // disclaimer only on the last assistant turn
-  cur.els.forEach((el, id) => {
-    const d = el.querySelector('.disclaimer');
-    if (d) d.classList.toggle('hidden', id !== lastId);
+  const lastEl = lastId ? cur.els.get(lastId) : null;
+  cur.els.forEach((el) => {
+    el.classList.toggle('last', !!lastEl && el === lastEl);
+    // disclaimer only on the last assistant turn
+    const d = disclaimerOf(el);
+    if (d) d.classList.toggle('hidden', el !== lastEl);
   });
 }
 
@@ -429,6 +472,12 @@ function renderUserTurn(el, turn) {
   const text = (turn.parts.find((p) => p.kind === 'user_text') || {}).text || '';
   const atts = turn.parts.find((p) => p.kind === 'attachments');
   const name = displayName();
+  // a reload (after every answer) passes every turn again: one that hasn't
+  // changed keeps its DOM instead of being rebuilt and laid out anew
+  const sig = snapshot([turn, initials(name), cur ? cur.conv.kind : null, currentLanguage()]);
+  const same = sameSnapshot(el.__usig, sig);
+  el.__usig = sig;
+  if (same) return;
   el.innerHTML = `${turn.meta && turn.meta.compact_summary ? '<div class="cd-slot"></div>' : ''}${atts ? attachmentsHtml(atts.items) : ''}
     ${text ? `<div class="user-bubble"><span class="avatar">${esc(initials(name))}</span><div class="user-text">${esc(text)}</div></div>` : ''}
     <div class="turn-actions"></div>`;
@@ -508,6 +557,7 @@ function startEdit(el, turn, text) {
   ta.value = text;
   const bubble = el.querySelector('.user-bubble');
   bubble.replaceWith(box);
+  el.__usig = null; // drawn again on cancel (or reload), whatever the data
   el.querySelector('.turn-actions').classList.add('hidden');
   ta.style.height = Math.min(ta.scrollHeight + 4, window.innerHeight * 0.5) + 'px';
   ta.focus();
@@ -577,6 +627,8 @@ export function editedFiles(parts, cwd) {
 /** "Edited N files" summary under a finished code-session turn. */
 function renderTurnFiles(el, turn, streaming) {
   let box = el.querySelector('.turn-files');
+  // nothing to show and nothing shown (e.g. while streaming): done
+  if (!box && (streaming || !cur || cur.conv.kind !== 'code')) return;
   const files = !streaming && cur && cur.conv.kind === 'code' ? editedFiles(turn.parts, cur.conv.cwd) : [];
   const sig = JSON.stringify(files);
   if (box && box.__sig === sig) return;
@@ -615,9 +667,9 @@ function renderAssistantTurn(el, turn) {
     onRetry: () => retry(turn),
     onContinue: () => cur && cur.composer && sendInConversation(t('continue'), []).catch(errorToast),
   };
-  renderParts(partsEl, turn.parts || [], ctx);
-  // artifact card clicks
-  partsEl.querySelectorAll('.artifact-card:not([data-bound])').forEach((card) => {
+  const drawn = renderParts(partsEl, turn.parts || [], ctx);
+  // artifact card clicks (cards only appear in parts just drawn)
+  if (drawn) partsEl.querySelectorAll('.artifact-card:not([data-bound])').forEach((card) => {
     card.dataset.bound = '1';
     const open = () => artifacts.open(cur.id, cur.artifacts, card.dataset.identifier, Number(card.dataset.version));
     card.addEventListener('click', open);

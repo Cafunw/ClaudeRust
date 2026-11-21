@@ -1,17 +1,21 @@
 // Changes pane: files that differ from the baseline (git HEAD, or what the
 // agent changed outside git), a line-numbered diff viewer, and revert.
-import { t } from '../i18n.js';
+import { t, currentLanguage } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, confirmDialog, debounce, showMenu, promptDialog, toast } from '../util.js';
+import { h, esc, errorToast, confirmDialog, debounce, showMenu, promptDialog, toast, snapshot, sameSnapshot } from '../util.js';
 import { registerPane, refresh, context, updateTabs } from '../workspace.js';
 
 const state = new Map(); // convId -> { data, selected, diff, collapsed }
 const lineHooks = [];    // (rowEl, info, ctx) => void — e.g. inline comments
 const headerHooks = [];  // (headEl, ctx) => void
+const inputs = [];       // (ctx) => data the hooks draw from (see drawInputs)
 
 export function onDiffLine(fn) { lineHooks.push(fn); }
 export function onChangesHeader(fn) { headerHooks.push(fn); }
+/** What a hook's drawing depends on besides the changes themselves (e.g.
+ *  the review comments): the pane is drawn again when it changes. */
+export function onChangesInput(fn) { inputs.push(fn); }
 
 /** Parse a unified diff into rows with old/new line numbers. */
 export function parseUnified(text) {
@@ -53,9 +57,21 @@ async function loadDiff(el, ctx, path, quiet) {
   if (s.selected === path) draw(el, ctx);
 }
 
+/** Everything a draw shows: the same again means the same DOM. */
+function drawInputs(ctx, s) {
+  const w = ctx.conv && ctx.conv.options && ctx.conv.options.worktree;
+  return snapshot([s.data, s.selected, s.diff, w || null, currentLanguage(), ...inputs.map((fn) => fn(ctx))]);
+}
+
 function draw(el, ctx) {
   const s = stateFor(ctx.convId);
   const d = s.data;
+  // a refresh that found nothing new (files-changed comes after every edit
+  // and command): leave the pane as it is, with its scroll position and a
+  // comment being written, instead of building it all again
+  const sig = drawInputs(ctx, s);
+  if (sameSnapshot(el.__sig, sig)) { el.__sig = sig; return; }
+  el.__sig = sig;
   el.innerHTML = '';
   if (!d) { el.appendChild(h(`<div class="pane-empty"><span class="spinner"></span></div>`)); return; }
   const files = d.files || [];
@@ -184,11 +200,18 @@ function diffView(text, path, ctx, onHunkReverted) {
   if (!rows.length) { box.innerHTML = `<div class="muted" style="padding:10px">${t('no_textual_changes')}</div>`; return box; }
   const tbl = h('<table class="dv"><tbody></tbody></table>');
   const tb = tbl.querySelector('tbody');
+  // all rows parsed at once (one row at a time costs a parse each, for
+  // diffs of thousands of lines), then wired up row by row
+  const revertBtn = onHunkReverted ? `<button class="btn sm ghost dv-hunk-revert" title="${esc(t('hunk_revert_tip'))}">${icon('retry', 12)} ${esc(t('revert'))}</button>` : '';
+  tb.innerHTML = rows.map((r) => (r.type === 'hunk'
+    ? `<tr class="dv-hunk"><td colspan="3"><span class="dv-hunk-text">${esc(r.text)}</span>${revertBtn}</td></tr>`
+    : `<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`)).join('');
+  const trs = tb.children;
   let hunk = -1;
-  for (const r of rows) {
+  rows.forEach((r, i) => {
+    const tr = trs[i];
     if (r.type === 'hunk') {
       hunk += 1;
-      const tr = h(`<tr class="dv-hunk"><td colspan="3"><span class="dv-hunk-text">${esc(r.text)}</span>${onHunkReverted ? `<button class="btn sm ghost dv-hunk-revert" title="${esc(t('hunk_revert_tip'))}">${icon('retry', 12)} ${esc(t('revert'))}</button>` : ''}</td></tr>`);
       const b = tr.querySelector('.dv-hunk-revert');
       if (b) {
         const index = hunk;
@@ -197,13 +220,10 @@ function diffView(text, path, ctx, onHunkReverted) {
           try { await call('change_revert_hunk', { conversationId: ctx.convId, path, index, header: r.text }); onHunkReverted(); } catch (err) { errorToast(err); }
         };
       }
-      tb.appendChild(tr);
-      continue;
+      return;
     }
-    const tr = h(`<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`);
     for (const fn of lineHooks) fn(tr, { path, ...r }, ctx);
-    tb.appendChild(tr);
-  }
+  });
   box.appendChild(tbl);
   return box;
 }
@@ -220,7 +240,8 @@ registerPane({
   icon: 'edit',
   label: () => t('ws_changes'),
   badge: (ctx) => { const s = state.get(ctx.convId); return s && s.data && s.data.files ? s.data.files.length || '' : ''; },
-  mount: (el, ctx) => { el.classList.add('changes-pane'); load(el, ctx); },
+  // show() comes right after and loads it
+  mount: (el) => { el.classList.add('changes-pane'); },
   show: (el, ctx) => load(el, ctx),
 });
 

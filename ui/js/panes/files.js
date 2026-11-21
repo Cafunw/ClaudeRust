@@ -291,7 +291,8 @@ registerPane({
   order: 65,
   icon: 'folder',
   label: () => t('ws_files'),
-  mount: (el, ctx) => { el.classList.add('files-pane'); draw(el, ctx); },
+  // show() comes right after and draws it
+  mount: (el) => { el.classList.add('files-pane'); },
   show: (el, ctx) => {
     const s = st(ctx.convId);
     if (s.soft) { s.soft = false; if (!s.file) return refill(el, ctx); }
@@ -299,13 +300,27 @@ registerPane({
   },
 });
 
+// An agent edits and runs commands in bursts, each one a files-changed: the
+// tree is read again once the burst settles (each refill reads every open
+// folder), not once per event.
+const changed = new Set(); // conversations with files changed since the last refill
+const refillSoon = debounce(() => {
+  const c = context();
+  const ids = [...changed];
+  changed.clear();
+  if (!c || !ids.includes(c.convId)) return;
+  const s = st(c.convId);
+  if (s.file) return;
+  s.soft = true;
+  refresh('files');
+  // refresh() only reaches the pane while it's the one shown
+  s.soft = false;
+}, 200);
+
 on('files-changed', ({ conversation_id }) => {
   const c = context();
-  const s = st(conversation_id);
-  if (c && c.convId === conversation_id && !s.file) {
-    s.soft = true;
-    refresh('files');
-    // refresh() only reaches the pane while it's the one shown
-    s.soft = false;
+  if (c && c.convId === conversation_id && !st(conversation_id).file) {
+    changed.add(conversation_id);
+    refillSoon();
   }
 });

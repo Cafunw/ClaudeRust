@@ -2,8 +2,8 @@
 import { t, setLanguage, currentLanguage } from './i18n.js';
 import { call, on as onBackend, isMac } from './api.js';
 import { store, on, emit, loadLocal, saveLocal } from './store.js';
-import { $, closeMenu, debounce, errorToast, toast } from './util.js';
-import { mountSidebar, refreshSidebar, toggleSidebar } from './sidebar.js';
+import { $, closeMenu, errorToast, toast } from './util.js';
+import { mountSidebar, refreshSidebarSoon, toggleSidebar } from './sidebar.js';
 import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
 import { setToolProgress } from './parts.js';
@@ -183,7 +183,7 @@ function bindBackend() {
     refreshSidebarSoon();
     const c = chat.current();
     if (c && c.id === p.conversation_id) {
-      call('get_conversation', { id: c.id }).then((d) => {
+      chat.fetchConversation(c.id).then((d) => {
         const cc = chat.current();
         if (!cc || cc.id !== c.id) return;
         cc.conv = d.conversation;
@@ -221,8 +221,6 @@ function bindBackend() {
     if (p && p.paths && p.paths.length) c.addPaths(p.paths);
   });
 }
-
-const refreshSidebarSoon = debounce(() => refreshSidebar(), 250);
 
 async function init() {
   let boot;

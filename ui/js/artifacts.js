@@ -9,6 +9,7 @@ import { copyText, decorate } from './parts.js';
 let panel = null;
 let renderTimer = null;
 let renderSeq = 0;
+let fetching = null; // the panel whose document is being fetched
 
 function aside() { return $('#artifact-panel'); }
 
@@ -127,9 +128,16 @@ async function render() {
   const body = el.querySelector('.ap-body');
   const docKey = `${view}|${a.type}|${a.identifier}|${a.version}|${a.complete}|${isDark()}|${a.content.length}|${a.content.slice(-64)}`;
   if (panel.lastDocKey === docKey) return;
+  // while it streams there's a newer version every 120 ms, and each request
+  // highlights all of it: one request at a time, and the latest version is
+  // drawn when the one under way is back (newer requests used to make the
+  // older ones stale, so a slow highlighter showed nothing until the end)
+  if (!a.complete && fetching === panel) { panel.again = true; return; }
   panel.lastDocKey = docKey;
   const seq = ++renderSeq;
   const stale = () => seq !== renderSeq || !panel;
+  const mine = panel;
+  fetching = mine;
   try {
     if (view === 'preview' && a.type === 'text/markdown') {
       const html = await call('render_markdown', { text: a.content });
@@ -156,6 +164,9 @@ async function render() {
   } catch (e) {
     if (!stale()) body.innerHTML = `<div class="ap-empty">${esc(e.message)}</div>`;
     panel && (panel.lastDocKey = null);
+  } finally {
+    if (fetching === mine) fetching = null;
+    if (mine.again && panel === mine) { mine.again = false; render(); }
   }
 }
 

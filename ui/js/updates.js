@@ -58,6 +58,9 @@ const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 
 /** The Updates block for Settings → About; it redraws itself as the state changes. */
 export function updatesSection() {
+  // sections that were shown and are gone (Settings closed, another tab):
+  // they were only let go of at the next state change, which may not come
+  for (const f of [...listeners]) if (f.gone && f.gone()) listeners.delete(f);
   const el = h('<div class="upd"></div>');
   let shown = false;
   const draw = () => {
@@ -100,6 +103,7 @@ export function updatesSection() {
       };
     });
   };
+  draw.gone = () => shown && !el.isConnected;
   listeners.add(draw);
   draw();
   return el;

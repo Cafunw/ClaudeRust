@@ -4,7 +4,7 @@ import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac } from './api.js';
 import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
-import { $, esc, h, showMenu, initials, errorToast } from './util.js';
+import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot } from './util.js';
 import { conversationMenu } from './chat.js';
 import { pendingUpdate, showUpdates } from './updates.js';
 
@@ -161,7 +161,19 @@ function accountMenu(anchor) {
   ], { placement: 'top-start', width: 260 });
 }
 
+let soon = null;
+
+/** refreshSidebar once a burst of backend events has settled. */
+export function refreshSidebarSoon() {
+  clearTimeout(soon);
+  soon = setTimeout(() => { soon = null; refreshSidebar(); }, 250);
+}
+
 export async function refreshSidebar() {
+  // a refresh still to come from refreshSidebarSoon would show nothing this
+  // one won't: the events that asked for it came before this read
+  clearTimeout(soon);
+  soon = null;
   try {
     store.conversations = await call('list_conversations', {});
     // turns already running (e.g. after the window was reloaded): the
@@ -193,11 +205,18 @@ function chatLink(c) {
 function renderLists() {
   const box = $('#sidebar .sidebar-scroll');
   if (!box) return;
-  box.innerHTML = '';
   const code = store.appMode === 'code';
   // only this mode's conversations
   const convs = (store.conversations || []).filter((c) => (c.kind === 'code') === code);
   const starred = convs.filter((c) => c.starred);
+  // drawn on every running-changed and after every answer: when the links
+  // would come out the same, the ones shown stay (and keep hover and focus)
+  const shown = [...starred, ...convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT)];
+  const waiting = new Set([...store.permissions.values()].map((p) => p.conversation_id));
+  const sig = snapshot([code, currentLanguage(), shown, shown.map((c) => store.running.has(c.id)), shown.map((c) => waiting.has(c.id)), convs.length - starred.length > RECENT_LIMIT]);
+  if (sameSnapshot(box.__sig, sig)) { box.__sig = sig; highlight(); return; }
+  box.__sig = sig;
+  box.innerHTML = '';
   if (starred.length) {
     box.appendChild(h(`<div class="section-title">${t('starred')}</div>`));
     starred.forEach((c) => box.appendChild(chatLink(c)));

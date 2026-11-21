@@ -88,12 +88,20 @@ export function createComposer(opts) {
     return c ? c.name : id;
   }
 
+  // the button's icon, replaced only when it changes: updateSend runs on
+  // every keystroke, and new markup is new SVG to lay out each time
+  function sendIcon(name) {
+    if (sendBtn.__icon === name) return;
+    sendBtn.__icon = name;
+    sendBtn.innerHTML = icon(name, 18);
+  }
+
   function updateSend() {
     if (running && opts.onQueue && ta.value.trim()) {
       sendBtn.disabled = false;
       sendBtn.classList.remove('stop');
       sendBtn.classList.add('queue');
-      sendBtn.innerHTML = icon('arrowUp', 18);
+      sendIcon('arrowUp');
       sendBtn.setAttribute('aria-label', t('queue_send'));
       sendBtn.title = t('queue_send');
       return;
@@ -103,12 +111,12 @@ export function createComposer(opts) {
     if (running) {
       sendBtn.disabled = false;
       sendBtn.classList.add('stop');
-      sendBtn.innerHTML = icon('stop', 18);
+      sendIcon('stop');
       sendBtn.setAttribute('aria-label', t('stop'));
       return;
     }
     sendBtn.classList.remove('stop');
-    sendBtn.innerHTML = icon('arrowUp', 18);
+    sendIcon('arrowUp');
     sendBtn.setAttribute('aria-label', t('send'));
     sendBtn.disabled = busy || (!ta.value.trim() && !attachments.length) || attachments.some((a) => a.loading);
   }

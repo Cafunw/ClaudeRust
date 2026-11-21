@@ -41,18 +41,22 @@ export function openSettings(tab = 'general') {
     b.onclick = () => show(id);
     nav.appendChild(b);
   }
-  const m = modal({ title: t('settings'), body: root, wide: true, cls: 'tall', onClose: () => { current = null; stopRecording(); off(); } });
+  // what the shown tab subscribed to, undone when another tab is shown or Settings closes
+  const leaving = [];
+  const leave = () => { for (const f of leaving.splice(0)) f(); };
+  const m = modal({ title: t('settings'), body: root, wide: true, cls: 'tall', onClose: () => { current = null; stopRecording(); off(); leave(); } });
   m.body.style.padding = '0';
   m.body.style.flex = '1';
   m.body.style.minHeight = '0';
   m.body.style.overflow = 'hidden';
   let active = tab;
   function show(id) {
+    leave();
     active = id;
     nav.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
     body.innerHTML = '';
     body.scrollTop = 0;
-    (RENDER[id] || RENDER.general)(body);
+    (RENDER[id] || RENDER.general)(body, { onLeave: (f) => leaving.push(f) });
   }
   // redraw for changes made elsewhere, but not under the user's cursor: a
   // field being typed in would lose its text
@@ -113,7 +117,7 @@ function modelOptions() {
 }
 
 const RENDER = {
-  general(body) {
+  general(body, tab) {
     body.appendChild(h(`<h3>${t('s_profile')}</h3>`));
     body.appendChild(field(t('full_name'), textField('full_name')));
     body.appendChild(field(t('nickname'), textField('nickname')));
@@ -149,9 +153,10 @@ const RENDER = {
       save({ custom_styles: styles });
     };
     draw();
-    const off = on('settings-changed', draw);
+    // (an observer of the whole document watched for the list going away:
+    // it saw every change anywhere, a streaming answer's too, while open)
+    tab.onLeave(on('settings-changed', draw));
     body.appendChild(list);
-    new MutationObserver((_, o) => { if (!document.body.contains(list)) { off(); o.disconnect(); } }).observe(document.body, { childList: true, subtree: true });
   },
 
   appearance(body) {

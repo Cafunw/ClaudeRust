@@ -1,7 +1,7 @@
 // Rendering of assistant message parts (text, thinking, tools, notices).
 import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
-import { esc, h, morph, toast, fmtUsd } from './util.js';
+import { esc, h, morph, toast, fmtUsd, snapshot, sameSnapshot } from './util.js';
 import { call } from './api.js';
 import { store, modelInfo } from './store.js';
 
@@ -248,7 +248,9 @@ function liveSection(p) {
 export function setToolProgress(id, text) {
   if (liveOutput.size > 50) liveOutput.delete(liveOutput.keys().next().value);
   liveOutput.set(id, text);
-  for (const el of document.querySelectorAll(`.tool[data-tool-id="${CSS.escape(id)}"]`)) {
+  // tool cards are only in the conversation view: no need to search the whole document
+  const root = document.getElementById('view') || document;
+  for (const el of root.querySelectorAll(`.tool[data-tool-id="${CSS.escape(id)}"]`)) {
     const sec = el.querySelector('.live-out');
     if (!sec) continue;
     sec.classList.remove('hidden');
@@ -291,11 +293,6 @@ function todosHtml(todos) {
 }
 
 // ------------------------------------------------------------- part render
-
-function partSig(p) {
-  // signature for change detection (exclude nothing; parts are small except html)
-  return JSON.stringify(p);
-}
 
 function renderThinking(el, p) {
   if (!el.classList.contains('thinking')) {
@@ -450,9 +447,11 @@ function renderNotice(el, p, ctx) {
   }
 }
 
-/** Update the parts container of an assistant turn. */
+/** Update the parts container of an assistant turn. Returns whether any
+ *  part was drawn or removed (false: the DOM is as it was). */
 export function renderParts(container, parts, ctx) {
   const existing = Array.from(container.children);
+  let changed = false;
   parts.forEach((p, i) => {
     let el = existing[i];
     if (el && el.dataset.kind !== p.kind) { el.remove(); el = null; }
@@ -462,9 +461,16 @@ export function renderParts(container, parts, ctx) {
       const ref = container.children[i] || null;
       container.insertBefore(el, ref);
     }
-    const sig = partSig(p);
-    if (el.__sig === sig) return;
+    // the whole turn comes again with every streamed change (~20 times a
+    // second): only parts whose data changed are drawn again. A snapshot,
+    // not JSON.stringify, for that: a turn's finished tool outputs can be
+    // megabytes, compared on every event
+    const sig = snapshot(p);
+    const same = sameSnapshot(el.__sig, sig);
+    // keep the newest copy either way, so the old strings can be freed
     el.__sig = sig;
+    if (same) return;
+    changed = true;
     switch (p.kind) {
       case 'text':
         if (!el.classList.contains('md')) el.className = 'md part-text';
@@ -478,7 +484,8 @@ export function renderParts(container, parts, ctx) {
       default: el.textContent = '';
     }
   });
-  for (let j = container.children.length - 1; j >= parts.length; j--) container.children[j].remove();
+  for (let j = container.children.length - 1; j >= parts.length; j--) { container.children[j].remove(); changed = true; }
+  return changed;
 }
 
 export function turnPlainText(turn) {

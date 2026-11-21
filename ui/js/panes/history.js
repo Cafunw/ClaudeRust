@@ -1,13 +1,21 @@
 // History pane: recent commits, each commit's diff per file, and actions
 // (ask Claude to explain it, revert it).
-import { t } from '../i18n.js';
+import { t, currentLanguage } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, confirmDialog, toast, relTime } from '../util.js';
+import { h, esc, errorToast, confirmDialog, toast, relTime, debounce, snapshot, sameSnapshot } from '../util.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
 import { parseUnified } from './changes.js';
 
 const open = new Map(); // convId -> sha
+// A commit's contents can't change: what git_show gave for one is kept
+// (a few, newest last) instead of being asked again on every redraw.
+const shown = new Map(); // `${convId}|${sha}` -> git_show result
+function remember(key, d) {
+  shown.delete(key);
+  shown.set(key, d);
+  if (shown.size > 20) shown.delete(shown.keys().next().value);
+}
 
 function diffTable(text) {
   // the first line is the "a/x b/x" header of the file section
@@ -57,8 +65,14 @@ async function draw(el, ctx) {
   const seq = ++s.seq;
   const list = el.querySelector('.hist-list');
   let data;
-  try { data = await call('git_log', { conversationId: ctx.convId, query: s.q.trim() || null, mode: s.mode }); } catch (e) { list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+  try { data = await call('git_log', { conversationId: ctx.convId, query: s.q.trim() || null, mode: s.mode }); } catch (e) { list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; list.__sig = null; return; }
   if (seq !== s.seq) return; // a newer search is on its way
+  // the same log, open commit and day (dates are shown relative to today):
+  // what's shown is already this, so the list (and its scroll position and
+  // the open commit) stays as it is
+  const sig = snapshot([data, open.get(ctx.convId) || null, s.q.trim(), s.mode, new Date().toDateString(), currentLanguage()]);
+  if (sameSnapshot(list.__sig, sig)) { list.__sig = sig; return; }
+  list.__sig = sig;
   el.querySelector('.hist-head .b').textContent = data.branch;
   el.querySelector('.hist-head .cnt').textContent = data.commits.length === 1 ? t('hist_commit_one') : `${data.commits.length} ${t('hist_commits')}`;
   list.innerHTML = '';
@@ -82,10 +96,12 @@ async function draw(el, ctx) {
     };
     if (isOpen) {
       const body = row.querySelector('.hist-body');
+      const key = `${ctx.convId}|${c.sha}`;
       body.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>';
-      call('git_show', { conversationId: ctx.convId, sha: c.sha }).then((d) => {
+      (shown.has(key) ? Promise.resolve(shown.get(key)) : call('git_show', { conversationId: ctx.convId, sha: c.sha })).then((d) => {
+        remember(key, d);
         body.innerHTML = `${d.message && d.message !== c.subject ? `<pre class="hist-msg">${esc(d.message)}</pre>` : ''}${d.files.map((f, i) => `<details class="hist-file" ${i < 3 ? 'open' : ''}><summary><code>${esc(f.path)}</code> <span class="diff-stat"><span class="a">+${f.added}</span> <span class="d">-${f.removed}</span></span></summary><div class="diff-view">${diffTable(f.diff)}</div></details>`).join('')}`;
-      }).catch((e) => { body.textContent = e.message || String(e); });
+      }).catch((e) => { body.textContent = e.message || String(e); list.__sig = null; /* tried again next time */ });
     }
     list.appendChild(row);
   }
@@ -96,11 +112,15 @@ registerPane({
   order: 15,
   icon: 'history',
   label: () => t('ws_history'),
-  mount: (el, ctx) => { el.classList.add('history-pane'); draw(el, ctx); },
+  // show() comes right after and draws it
+  mount: (el) => { el.classList.add('history-pane'); },
   show: (el, ctx) => draw(el, ctx),
 });
 
-on('files-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) refresh('history'); });
+// files-changed comes after every edit and command of an agent, in bursts:
+// the log is read again once a burst settles, not once per event
+const refreshSoon = debounce((convId) => { const c = context(); if (c && c.convId === convId) refresh('history'); }, 250);
+on('files-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) refreshSoon(conversation_id); });
 
 /** Open the History pane on a commit (e.g. from the Files viewer's blame). */
 export function showCommit(sha) {

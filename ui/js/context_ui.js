@@ -24,15 +24,18 @@ export async function updateMeter(el) {
   const val = el.querySelector('.val');
   val.setAttribute('stroke-dasharray', `${(circ * pct) / 100} ${circ}`);
   el.classList.toggle('warn', pct >= 70);
-  el.classList.toggle('full', u.auto_compact_pct && pct >= u.auto_compact_pct);
+  // (a boolean: toggle() with an undefined second argument flips the class)
+  el.classList.toggle('full', !!(u.auto_compact_pct && pct >= u.auto_compact_pct));
   el.classList.toggle('empty', !used);
   el.querySelector('.pct').textContent = used ? `${pct}%` : '';
   el.querySelector('.cost').textContent = u.cost_usd ? `$${u.cost_usd < 0.01 ? u.cost_usd.toFixed(3) : u.cost_usd.toFixed(2)}` : '';
   el.title = `${t('context_used')}: ${fmtTokens(used)} / ${fmtTokens(win)}${u.pending_compact ? ` · ${t('compact_pending')}` : ''}\n${t('cost')}: $${(u.cost_usd || 0).toFixed(4)}`;
 }
 
-export function refreshMeters() {
-  document.querySelectorAll('.ctx-meter').forEach((el) => updateMeter(el));
+/** Refresh the meters of `convId` (all of them without one): a session
+ *  finishing in the background doesn't change the one on screen. */
+export function refreshMeters(convId) {
+  document.querySelectorAll('.ctx-meter').forEach((el) => { if (!convId || el.dataset.conv === convId) updateMeter(el); });
 }
 
 /** Divider shown before a message whose earlier context was summarized. */
@@ -81,11 +84,11 @@ on('compacting', async ({ conversation_id: id, auto }) => {
   if (await isOpen(id)) toast(auto ? t('compacting_auto') : t('compacting'));
 });
 on('compacted', async ({ conversation_id: id, error, auto }) => {
-  refreshMeters();
+  refreshMeters(id);
   const open = await isOpen(id);
   if (error) { if (open || !auto) toast(`${t('compact_failed')}: ${error}`, 'error'); } else if (open) toast(auto ? t('compacted_auto') : t('compacted'));
 });
-on('generation-state', ({ running }) => { if (!running) refreshMeters(); });
+on('generation-state', ({ conversation_id: id, running }) => { if (!running) refreshMeters(id); });
 
 const CTX_COLORS = { system: '#8e5cc2', memory: '#2f8a8a', tools: '#4a7bd0', mcp_tools: '#5a6b8c', messages: '#c96442', tool_calls: '#b07a10', summary: '#3a9a5b' };
 

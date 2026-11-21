@@ -54,7 +54,8 @@ registerPane({
     const done = s.todos.filter((x) => x.status === 'completed').length;
     return done < s.todos.length ? `${done}/${s.todos.length}` : '';
   },
-  mount: (el, ctx) => { el.classList.add('plan-pane'); load(el, ctx); },
+  // show() comes right after and loads it
+  mount: (el) => { el.classList.add('plan-pane'); },
   show: (el, ctx) => load(el, ctx),
 });
 

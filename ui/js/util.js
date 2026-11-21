@@ -20,6 +20,38 @@ export function debounce(fn, ms) {
   return (...a) => { clearTimeout(tm); tm = setTimeout(() => fn(...a), ms); };
 }
 
+// Markers for the shape of a snapshot (objects, so no leaf value can equal them).
+const ARR = {};
+const OBJ = {};
+
+/**
+ * A snapshot of JSON-like data for change detection: its keys, leaves and
+ * shape, in order. Strings are immutable, so the snapshot keeps them as
+ * they are: far cheaper than JSON.stringify (no escaping, no copying), and
+ * comparing two snapshots compares strings, a memcmp at worst. Unlike
+ * keeping the object itself, it can't change when the object is updated in
+ * place.
+ */
+export function snapshot(v, out = []) {
+  if (v === null || typeof v !== 'object') { out.push(v); return out; }
+  if (Array.isArray(v)) {
+    out.push(ARR, v.length);
+    for (const x of v) snapshot(x, out);
+    return out;
+  }
+  const keys = Object.keys(v);
+  out.push(OBJ, keys.length);
+  for (const k of keys) { out.push(k); snapshot(v[k], out); }
+  return out;
+}
+
+/** Whether two snapshots (see `snapshot`) are of equal data. */
+export function sameSnapshot(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export function initials(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return 'Y';
@@ -136,12 +168,16 @@ export function showMenu(anchor, items, opts = {}) {
       btns[idx].classList.add('kb'); btns[idx].focus();
     }
   };
+  const entry = { el, anchor, outside, key, onClose: opts.onClose };
   setTimeout(() => {
+    // closed (or replaced by another menu) before this ran: closeMenu has
+    // already been, and listeners added now would never be removed
+    if (openMenu !== entry) return;
     document.addEventListener('mousedown', outside, true);
     document.addEventListener('keydown', key, true);
   });
   if (anchor) anchor.setAttribute('aria-expanded', 'true');
-  openMenu = { el, anchor, outside, key, onClose: opts.onClose };
+  openMenu = entry;
   return el;
 }
 

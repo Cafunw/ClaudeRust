@@ -4,17 +4,39 @@ import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { h, esc } from '../util.js';
 import { loadLocal, saveLocal } from '../store.js';
-import { onDiffLine, onChangesHeader } from './changes.js';
+import { onDiffLine, onChangesHeader, onChangesInput } from './changes.js';
 import { refresh } from '../workspace.js';
 
-function load(convId) { return (loadLocal().reviewComments || {})[convId] || []; }
+// The comments are read for every line of a diff that's drawn: kept here
+// (this module is the only one that writes them) instead of parsing local
+// storage thousands of times per draw.
+let cache = null; // { all, byKey: Map<convId, Map<key, comment>> }
+function comments() {
+  if (!cache) cache = { all: loadLocal().reviewComments || {}, byKey: new Map() };
+  return cache;
+}
+function load(convId) { return comments().all[convId] || []; }
+/** The comment on a line, if any. */
+function commentAt(convId, k) {
+  const c = comments();
+  if (!c.byKey.has(convId)) {
+    const m = new Map();
+    for (const x of load(convId)) if (!m.has(key(x))) m.set(key(x), x); // the first, as a search would find
+    c.byKey.set(convId, m);
+  }
+  return c.byKey.get(convId).get(k);
+}
 function save(convId, list) {
   const all = loadLocal().reviewComments || {};
   if (list.length) all[convId] = list; else delete all[convId];
   saveLocal({ reviewComments: all });
+  cache = null;
 }
 
 const key = (c) => `${c.path}|${c.side}|${c.line}`;
+
+// a comment added or removed redraws the Changes pane
+onChangesInput((ctx) => load(ctx.convId));
 
 /** The prompt sent for a set of comments. */
 export function reviewPrompt(list) {
@@ -77,7 +99,7 @@ onDiffLine((tr, info, ctx) => {
     tr.after(ed);
   };
   // existing comment on this line: show it after the row once it's attached
-  const existing = load(ctx.convId).find((x) => key(x) === key(c0));
+  const existing = commentAt(ctx.convId, key(c0));
   if (existing) queueMicrotask(() => { if (tr.parentNode) tr.after(commentRow(existing, ctx.convId)); });
 });
 

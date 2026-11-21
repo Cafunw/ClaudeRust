@@ -160,12 +160,17 @@ export async function renderCode(view) {
     list.querySelectorAll('.list-item[data-id]').forEach((r) => {
       const st = statusOf(r.dataset.id);
       const chip = r.querySelector('.sess-status');
-      chip.className = `sess-status ${st}`;
-      chip.textContent = st ? t('sess_' + st) : '';
+      // written only when it changes: this runs every 1.5 s, and a write
+      // (even of the same text) has the list styled and laid out again
+      const cls = `sess-status ${st}`;
+      const text = st ? t('sess_' + st) : '';
+      if (chip.className !== cls) chip.className = cls;
+      if (chip.textContent !== text) chip.textContent = text;
     });
   };
   const offs = [on('running-changed', refreshStatus)];
-  const watch = setInterval(() => { if (!list.isConnected) { clearInterval(watch); offs.forEach((f) => f && f()); } else refreshStatus(); }, 1500);
+  // (nothing to do while the window is hidden: it's caught up within 1.5 s of coming back)
+  const watch = setInterval(() => { if (!list.isConnected) { clearInterval(watch); offs.forEach((f) => f && f()); } else if (!document.hidden) refreshStatus(); }, 1500);
   composer.focus();
 }
 

@@ -75,7 +75,8 @@ registerPane({
   icon: 'globe',
   label: () => t('ws_preview'),
   badge: (ctx) => (st(ctx.convId).found.some((f) => f.running) && !st(ctx.convId).url ? '•' : ''),
-  mount: async (el, ctx) => { mount(el, ctx); await detect(ctx); render(el, ctx); },
+  // show() comes right after: it looks for addresses and draws
+  mount: (el, ctx) => { mount(el, ctx); },
   show: async (el, ctx) => { await detect(ctx); render(el, ctx); },
 });
 
