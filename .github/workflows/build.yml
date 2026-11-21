@@ -7,6 +7,9 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -43,7 +46,7 @@ jobs:
         with:
           key: ${{ matrix.name }}
       - name: Install Tauri CLI
-        run: npm install
+        run: npm ci --ignore-scripts
       # test installers: no update manifests or signatures (those need the
       # signing key and are made by the Release workflow)
       - name: Build

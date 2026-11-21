@@ -1,7 +1,11 @@
 # ClaudeRust
 
-**Claude masaüstü uygulamasının Rust ile yeniden yazılmış, hafif sürümü.**
-_A lightweight rewrite of the Claude desktop app in Rust (Tauri 2)._ — [English below](#english)
+**Claude API için Rust ile yazılmış, resmi olmayan hafif bir masaüstü istemcisi.**
+_An unofficial, lightweight desktop client for the Claude API, written in Rust (Tauri 2)._ — [English below](#english)
+
+> **Resmi değildir.** ClaudeRust bağımsız, açık kaynak (MIT) bir projedir; Anthropic ile bağlantılı değildir, Anthropic tarafından onaylanmamış ya da desteklenmemektedir. "Claude", Anthropic'in ticari markasıdır. Proje, Claude Code (yapay zekâ) yardımıyla geliştirilmektedir.
+>
+> **Unofficial.** ClaudeRust is an independent open-source (MIT) project, not affiliated with, endorsed by or sponsored by Anthropic. "Claude" is a trademark of Anthropic. The project is developed with the help of Claude Code (AI).
 
 ![Ana ekran](docs/screenshots/home-light.png)
 
@@ -78,7 +82,7 @@ Her push'ta GitHub Actions üç platform için kurulum paketi üretir: depo → 
 2. `v0.2.0` etiketini gönderin: `git tag v0.2.0 && git push origin v0.2.0`.
 3. İş akışı bitince GitHub'daki taslak sürümü **yayınlayın** (Publish). Kurulu uygulamalar yalnızca yayınlanmış en son sürümü görür.
 
-Release iş akışı iki depo sırrı ister (Settings → Secrets and variables → Actions): `TAURI_SIGNING_PRIVATE_KEY` (güncelleme imzalama anahtarı) ve `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Açık anahtar `tauri.conf.json` içindedir. Özel anahtarı kaybederseniz kurulu uygulamalar yeni sürümleri kabul etmez; güvenli bir yerde yedekleyin. Depo özel (private) olduğu sürece sürüm dosyaları giriş gerektirdiğinden kurulu uygulamalar güncellemeyi indiremez; depo herkese açık olunca çalışır.
+Release iş akışı imzalama anahtarını korumalı bir **ortamdan** (environment) alır: Settings → Environments → `release` ortamı (yalnızca `v*` etiketleri, isteğe bağlı onaylayıcı) ve bu ortamın sırları `TAURI_SIGNING_PRIVATE_KEY` (güncelleme imzalama anahtarı) ile `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Ayrıntılar `release.yml` dosyasının başında. Açık anahtar `tauri.conf.json` içindedir. Özel anahtarı kaybederseniz kurulu uygulamalar yeni sürümleri kabul etmez; güvenli bir yerde yedekleyin. Depo özel (private) olduğu sürece sürüm dosyaları giriş gerektirdiğinden kurulu uygulamalar güncellemeyi indiremez; depo herkese açık olunca çalışır.
 
 ### Kaynaktan derleme
 Gereksinimler: Rust (stable), Node.js 18+ (yalnızca Tauri CLI için), Linux'ta `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`.
@@ -161,13 +165,21 @@ Arayüz dosyaları (`ui/`) ikili dosyaya gömülür: arayüzde değişiklik yapt
 - **Koyu mod**: Ayarlar → Görünüm → Açık / Koyu / Sistemle eşleş. Tüm sayfalar, paneller ve iletişim kutuları (diff renkleri, terminal, onay kutuları dahil) tema renklerini kullanır.
 - **Klavye kısayolları**: Yeni sohbet `Ctrl/⌘+Shift+O`, arama ve komut paleti `Ctrl/⌘+K` (`>` komutlar, `@` dosyalar), sohbette bul `Ctrl/⌘+F`, gönderilen mesajlar `Ctrl/⌘+R`, son sohbetler arasında `Ctrl+Tab`, mesajlarınız arasında `Alt+↑/↓` (üst çubukta ana hat), panel sekmeleri `Alt+1…8`, çalışma alanı/terminal ``Ctrl/⌘+` ``, kenar çubuğu `Ctrl/⌘+B`, ayarlar `Ctrl/⌘+,`, durdur `Esc`, son mesajı düzenle `↑`, yakınlaştır `Ctrl/⌘ + / − / 0`, tüm liste `Ctrl/⌘+/`. Kısayolların çoğu Ayarlar → Kısayollar'dan değiştirilebilir.
 
+## Lisans
+
+MIT — bkz. [LICENSE](LICENSE). Uygulamaya dahil edilen üçüncü taraf yazılımların lisansları [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) dosyasında ve Ayarlar → Hakkında → *Açık kaynak lisansları* bölümündedir. "Claude", Anthropic'in ticari markasıdır; ClaudeRust Anthropic ile bağlantılı değildir.
+
+Güvenlik açıklarını herkese açık bir issue yerine [SECURITY.md](SECURITY.md)'de anlatıldığı gibi özel olarak bildirin.
+
 ---
 
 ## English
 
-ClaudeRust recreates the Claude desktop experience — chats, projects, artifacts, web search, MCP servers, a Claude Code–style coding agent, Quick Entry and the tray — as a small native app. All application logic is Rust; the UI is plain HTML/CSS/JS rendered by the operating system's WebView (no Electron, no bundled browser, no JS build step).
+ClaudeRust is an unofficial client that offers a Claude Desktop–style experience for the Claude API — chats, projects, artifacts, web search, MCP servers, a Claude Code–style coding agent, Quick Entry and the tray — as a small native app. All application logic is Rust; the UI is plain HTML/CSS/JS rendered by the operating system's WebView (no Electron, no bundled browser, no JS build step).
 
 **Signing in:** Code sessions can run through the official Claude Code CLI, which signs in with your **Claude subscription** through its own `/login` (ClaudeRust never sees the credentials); sessions resume and branch like in Claude Desktop. A built-in Rust agent with the same tool set is available as the API-key engine. Chat needs an Anthropic API key: Anthropic doesn't allow third-party apps to offer claude.ai sign-in, and doing it anyway would mean private endpoints or copied session tokens.
+
+**API key storage:** the macOS Keychain and the Windows Credential Manager; on Linux, the app's local database (readable by your user account).
 
 **Import from Claude:** Settings → Import brings over a claude.ai data export (chats with their edit branches, attachments, thinking, versioned artifacts, and projects with their instructions and documents), Claude Code sessions from `~/.claude/projects` (they stay resumable), Claude Desktop's MCP servers and installed extensions, and Claude Code's user MCP servers.
 
@@ -185,7 +197,7 @@ ClaudeRust recreates the Claude desktop experience — chats, projects, artifact
 
 **Since then:** *Improve my message* (composer tools menu, with Undo), *Instructions for this conversation* (conversation menu), save a code block as a file, drafts that survive a restart, `/tour [area]` (a read-only guided tour of the codebase), `@folder/` mentions that include the folder's layout, History search (message, author, or code added/removed), a Code page filter with sessions grouped by folder and live *Working* / *Needs you* status, and a settings backup (Settings → About; API keys, server addresses, the editor command, permission settings and machine-specific paths are neither saved nor overwritten). Every page, pane and dialog uses the theme's colours in dark mode (Settings → Appearance).
 
-**Updates:** the app checks the latest GitHub release a little after start and every few hours (Settings → About → *Updates*, where you can also check by hand, read the notes, *Download and install* with a progress bar and restart). Downloads are verified against the public key in `tauri.conf.json` before installing. To publish one: raise the version in `tauri.conf.json` and `Cargo.toml`, push a `vX.Y.Z` tag, then publish the draft release the Release workflow creates (it needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets). While the repository is private, installed apps can't download release files, so updates start working once it's public.
+**Updates:** the app checks the latest GitHub release a little after start and every few hours (Settings → About → *Updates*, where you can also check by hand, read the notes, *Download and install* with a progress bar and restart). Downloads are verified against the public key in `tauri.conf.json` before installing. To publish one: raise the version in `tauri.conf.json` and `Cargo.toml`, push a `vX.Y.Z` tag, then publish the draft release the Release workflow creates (it takes the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets from a protected `release` environment limited to `v*` tags; see the top of `release.yml`). While the repository is private, installed apps can't download release files, so updates start working once it's public.
 
 **Testing:** `cargo test -p clauderust --lib`, `cargo clippy -p clauderust --lib -- -D warnings` and `npm run lint` (ESLint). The UI is embedded in the binary, so UI changes need a `cargo build`. Debug builds can run scripts inside the window (`CLAUDERUST_EVAL_DIR`); the end-to-end checks drive the app that way under Xvfb against a mock API.
 
@@ -235,5 +247,12 @@ ui/                 index.html, css/app.css, js/*.js + js/panes/*.js (ES modules
 
 Conversation history is sent back to the API append-only and unchanged (thinking blocks, server tool results and fallback markers included), so prompt caching and preserved thinking keep working across tool loops, branches and model switches.
 
+### License
+MIT — see [LICENSE](LICENSE). Contributions are accepted under the same license.
+
+Please report security issues privately, as described in [SECURITY.md](SECURITY.md).
+
 ### Third-party notices
-KaTeX and xterm.js are bundled under their MIT licenses (`ui/vendor/katex/LICENSE`, `ui/vendor/xterm/LICENSE`). "Claude" is a trademark of Anthropic; this is an independent client for the Claude API.
+KaTeX and xterm.js are bundled under their MIT licenses (`ui/vendor/katex/LICENSE`, `ui/vendor/xterm/LICENSE`); some interface icons are based on [Feather](https://feathericons.com) (MIT). The licenses of everything compiled into the app, including the Rust crates, are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) (also under Settings → About → Open-source licenses; regenerate it with `python3 dev/third_party_licenses.py` after changing dependencies).
+
+"Claude" is a trademark of Anthropic. ClaudeRust is an independent client for the Claude API and is not affiliated with or endorsed by Anthropic.

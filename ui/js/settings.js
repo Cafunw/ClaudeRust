@@ -409,6 +409,16 @@ const RENDER = {
       } catch (e) { errorToast(e); }
     };
     body.appendChild(row(t('settings_backup_title'), t('settings_backup_d'), backup));
+    const lic = h(`<button class="btn sm">${esc(t('oss_show'))}</button>`);
+    lic.onclick = async () => {
+      try {
+        const text = await call('third_party_licenses');
+        const pre = h('<pre class="licenses"></pre>');
+        pre.textContent = text;
+        modal({ title: t('oss_title'), body: pre, wide: true, cls: 'tall' });
+      } catch (e) { errorToast(e); }
+    };
+    body.appendChild(row(t('oss_title'), t('oss_d'), lic));
     const ob = h(`<button class="btn sm">${t('reset_onboarding')}</button>`);
     ob.onclick = async () => { await call('reset_onboarding'); location.reload(); };
     body.appendChild(row(t('welcome_title'), '', ob));

@@ -32,8 +32,8 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "shortDescription": "Lightweight Claude desktop client written in Rust",
-    "longDescription": "ClaudeRust is a fast, lightweight desktop client for Claude, written in Rust with Tauri. Chats, projects, artifacts, MCP servers and an agentic coding mode.",
+    "shortDescription": "Unofficial lightweight desktop client for the Claude API",
+    "longDescription": "ClaudeRust is an unofficial, lightweight desktop client for the Claude API, written in Rust with Tauri: chats, projects, artifacts, MCP servers and an agentic coding mode. It is not affiliated with or endorsed by Anthropic.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -54,7 +54,9 @@
         "type": "downloadBootstrapper"
       }
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "copyright": "Copyright (c) 2026 Cafunw and the ClaudeRust contributors. MIT License.",
+    "license": "MIT"
   },
   "plugins": {
     "updater": {

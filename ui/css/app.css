@@ -1249,3 +1249,4 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .upd-bar span { display: block; height: 100%; background: var(--accent); border-radius: 6px; transition: width .2s; }
 .upd-bar.indeterminate span { animation: upd-slide 1.2s ease-in-out infinite; }
 @keyframes upd-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.licenses { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--font-mono); color: var(--text-1); }

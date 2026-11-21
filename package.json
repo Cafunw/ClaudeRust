@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Tooling for building ClaudeRust (the app itself is Rust + static UI; no JS build step).",
+  "license": "MIT",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",

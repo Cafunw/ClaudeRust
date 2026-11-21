@@ -4,3 +4,11 @@
 node_modules
 *.log
 .DS_Store
+# secrets and local settings that must never be committed
+.env
+.env.*
+*.key
+*.pem
+*.p12
+.idea/
+.vscode/

@@ -140,6 +140,29 @@ mod tests {
     }
 
     #[test]
+    fn third_party_licenses_are_current() {
+        // regenerate with `python3 dev/third_party_licenses.py` after changing dependencies
+        let notices = include_str!("../../THIRD_PARTY_LICENSES.md");
+        let lock = include_str!("../../Cargo.lock");
+        let mut missing = Vec::new();
+        let mut name = "";
+        for line in lock.lines() {
+            if let Some(n) = line.strip_prefix("name = ") {
+                name = n.trim_matches('"');
+            } else if let Some(v) = line.strip_prefix("version = ") {
+                let v = v.trim_matches('"');
+                if !name.is_empty() && name != "clauderust" && !notices.contains(&format!("- {name} {v} ")) {
+                    missing.push(format!("{name} {v}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "THIRD_PARTY_LICENSES.md is out of date (run dev/third_party_licenses.py): {missing:?}");
+        for lib in ["KaTeX", "xterm.js", "Feather"] {
+            assert!(notices.contains(lib), "{lib}");
+        }
+    }
+
+    #[test]
     fn config_has_a_key_and_an_https_endpoint() {
         let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let up = &conf["plugins"]["updater"];

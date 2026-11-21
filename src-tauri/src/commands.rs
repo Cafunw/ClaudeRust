@@ -50,6 +50,12 @@ pub fn restart_app(app: AppHandle) {
     app.restart();
 }
 
+/// Licenses of the third-party software in the app (Settings → About).
+#[tauri::command]
+pub fn third_party_licenses() -> &'static str {
+    include_str!("../../THIRD_PARTY_LICENSES.md")
+}
+
 /// Is a newer version available? (Settings → About)
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> AppResult<Value> {

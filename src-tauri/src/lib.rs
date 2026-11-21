@@ -295,6 +295,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::restart_app,
+            commands::third_party_licenses,
             commands::update_check,
             commands::update_install,
             commands::save_settings,
