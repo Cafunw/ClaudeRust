@@ -3,7 +3,8 @@
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { call, on } from '../api.js';
-import { h, esc, errorToast, humanSize, debounce } from '../util.js';
+import { h, esc, errorToast, humanSize, debounce, showMenu, toast } from '../util.js';
+import { copyText } from '../parts.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
 
 const state = new Map(); // convId -> { open: Set<dir>, file: path|null, filter: '' }
@@ -155,8 +156,28 @@ async function drawFile(el, ctx) {
   const head = h(`<div class="pane-head fv-head"><button class="icon-btn" data-a="back" title="${t('back')}">${icon('arrowLeft', 14)}</button>
     <div class="fv-path ellipsis" title="${esc(f.path)}">${crumbs}</div>
     <span class="muted small">${f.lines != null ? `${f.lines} ${esc(t('files_lines'))} · ` : ''}${esc(humanSize(f.size))}</span>
+    <button class="icon-btn" data-a="ask" title="${esc(t('fv_ask'))}">${icon('sparkle', 14)}</button>
     <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}">@</button>
+    <button class="icon-btn" data-a="more" title="${esc(t('fv_more'))}">${icon('more', 14)}</button>
     <button class="icon-btn" data-a="edit" title="${esc(t('open_in_editor'))}">${icon('external', 14)}</button></div>`);
+  const asMention = () => `@${/\s/.test(f.path) ? `"${f.path}"` : f.path}`;
+  const ask = async (prompt) => {
+    const c = await composer();
+    if (!c) return;
+    c.setText(prompt);
+    c.send();
+  };
+  head.querySelector('[data-a=ask]').onclick = (ev) => showMenu(ev.currentTarget, [
+    { label: t('fv_explain'), icon: 'help', onClick: () => ask(t('fv_explain_p', { file: asMention() })) },
+    { label: t('fv_review'), icon: 'eye', onClick: () => ask(t('fv_review_p', { file: asMention() })) },
+    { label: t('fv_tests'), icon: 'check', onClick: () => ask(t('fv_tests_p', { file: asMention() })) },
+    { label: t('ask_custom'), icon: 'edit', onClick: () => mention(f.path) },
+  ], { placement: 'bottom-end', width: 240 });
+  head.querySelector('[data-a=more]').onclick = (ev) => showMenu(ev.currentTarget, [
+    { label: t('fv_copy_path'), icon: 'copy', onClick: () => copyText(f.path).then(() => toast(t('copied'))) },
+    { label: t('fv_copy_abs'), icon: 'copy', onClick: () => copyText(String(f.abs)).then(() => toast(t('copied'))) },
+    { label: t('reveal'), icon: 'folder', onClick: () => call('reveal_path', { path: String(f.abs) }).catch(errorToast) },
+  ], { placement: 'bottom-end', width: 240 });
   head.querySelector('[data-a=back]').onclick = () => { s.file = null; s.line = null; drawTree(el, ctx); };
   head.querySelector('[data-a=at]').onclick = () => mention(f.path);
   head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: s.line || null }).catch(errorToast);

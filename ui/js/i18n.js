@@ -1,5 +1,15 @@
 // UI strings: English and Turkish.
 const en = {
+  fv_explain: "Explain this file",
+  fv_review: "Review this file",
+  fv_tests: "Write tests for it",
+  fv_ask: "Ask Claude about this file",
+  fv_more: "More",
+  fv_explain_p: "Explain {file}: what it does, how it fits into the rest of the project, and anything non-obvious about it.",
+  fv_review_p: "Review {file}: point out bugs, risky edge cases and unclear code, with line numbers. Don't modify files.",
+  fv_tests_p: "Write tests for {file} following the project's existing test conventions, then run them.",
+  fv_copy_path: "Copy relative path",
+  fv_copy_abs: "Copy full path",
   files_mode_names: "Find files by name",
   files_mode_contents: "Search inside files",
   files_grep_ph: "Search in files…",
@@ -500,6 +510,16 @@ const en = {
 };
 
 const tr = {
+  fv_explain: "Bu dosyayı açıkla",
+  fv_review: "Bu dosyayı incele",
+  fv_tests: "Bunun için test yaz",
+  fv_ask: "Bu dosyayı Claude'a sor",
+  fv_more: "Diğer",
+  fv_explain_p: "{file} dosyasını açıkla: ne yaptığını, projenin geri kalanıyla nasıl ilişkili olduğunu ve dikkat çekmeyen noktaları.",
+  fv_review_p: "{file} dosyasını incele: hataları, riskli uç durumları ve anlaşılması zor kodu satır numaralarıyla belirt. Dosyaları değiştirme.",
+  fv_tests_p: "{file} için projenin mevcut test düzenine uyan testler yaz, sonra çalıştır.",
+  fv_copy_path: "Göreli yolu kopyala",
+  fv_copy_abs: "Tam yolu kopyala",
   files_mode_names: "Dosyayı adıyla bul",
   files_mode_contents: "Dosyaların içinde ara",
   files_grep_ph: "Dosyalarda ara…",

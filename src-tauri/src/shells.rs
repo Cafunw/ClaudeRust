@@ -21,6 +21,8 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_CAP: usize = 1_000_000;
+/// Background commands that ran at least this long notify when they end.
+const NOTIFY_AFTER_MS: i64 = 20_000;
 
 pub struct BgShell {
     pub id: String,
@@ -122,6 +124,19 @@ impl BgShell {
     }
 }
 
+/// The notification text for a background command that ended, or None when
+/// it shouldn't notify (stopped on purpose, or too quick to be worth it).
+fn finished_note(sh: &BgShell, code: i32, took_ms: i64) -> Option<String> {
+    if sh.killed.load(Ordering::Relaxed) || took_ms < NOTIFY_AFTER_MS {
+        return None;
+    }
+    let what = if sh.description.trim().is_empty() { sh.command.as_str() } else { sh.description.as_str() };
+    let what: String = what.chars().take(80).collect();
+    let secs = took_ms / 1000;
+    let dur = if secs >= 60 { format!("{}m {}s", secs / 60, secs % 60) } else { format!("{secs}s") };
+    Some(if code == 0 { format!("{what} finished after {dur}.") } else { format!("{what} failed (exit code {code}) after {dur}.") })
+}
+
 #[derive(Default)]
 pub struct Shells {
     map: Mutex<HashMap<String, Arc<BgShell>>>,
@@ -137,6 +152,24 @@ impl Shells {
         if let Some(app) = self.app.get() {
             let _ = app.emit("shells-changed", json!({"conversation_id": conv_id}));
         }
+    }
+
+    /// A desktop notification when a long background command ends while the
+    /// window isn't in front (not when it was stopped on purpose).
+    fn notify_finished(&self, sh: &BgShell, code: i32) {
+        let Some(app) = self.app.get() else { return };
+        let Some(body) = finished_note(sh, code, now_ms() - sh.started_at) else { return };
+        use tauri::Manager;
+        let Some(st) = app.try_state::<Arc<crate::state::AppState>>() else { return };
+        if !st.settings.read().notifications {
+            return;
+        }
+        let focused = app.get_webview_window("main").map(|w| w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false)).unwrap_or(false);
+        if focused {
+            return;
+        }
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app.notification().builder().title("Background command").body(body).show();
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<BgShell>> {
@@ -271,6 +304,7 @@ impl Shells {
             *s2.exit.lock() = Some(code);
             *s2.finished_at.lock() = Some(now_ms());
             me.changed(&s2.conv_id);
+            me.notify_finished(&s2, code);
         });
         Ok(shell)
     }
@@ -279,6 +313,17 @@ impl Shells {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_notes() {
+        let mut sh = shell();
+        sh.description = "Build".into();
+        assert_eq!(finished_note(&sh, 0, 5_000), None, "quick commands don't notify");
+        assert_eq!(finished_note(&sh, 0, 95_000).as_deref(), Some("Build finished after 1m 35s."));
+        assert_eq!(finished_note(&sh, 2, 30_000).as_deref(), Some("Build failed (exit code 2) after 30s."));
+        sh.killed.store(true, Ordering::Relaxed);
+        assert_eq!(finished_note(&sh, -1, 95_000), None, "stopped on purpose");
+    }
 
     fn shell() -> BgShell {
         BgShell {
