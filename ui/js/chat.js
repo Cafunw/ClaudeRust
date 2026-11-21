@@ -25,6 +25,7 @@ function composerInitial(conv) {
     model: conv.model,
     thinking: o.thinking ?? (conv.kind === 'code' ? true : !!store.settings.thinking_default),
     effort: o.effort || null,
+    ultracode: o.ultracode ?? null,
     web_search: o.web_search ?? false,
     style: o.style || 'normal',
     disabled_servers: o.disabled_servers || [],
@@ -105,7 +106,7 @@ export async function openConversation(id, { focus = true } = {}) {
   cur.composer = composer;
   $('.composer-slot', bottom).appendChild(composer.el);
   $('.composer-hint', bottom).textContent = '';
-  composer.setRunning(!!data.running);
+  composer.setRunning(!!data.running, !!data.waiting);
 
   renderTopbar();
   for (const turn of data.turns) upsertTurn(turn, false);
@@ -312,7 +313,7 @@ export async function reload() {
   rebuildArtifacts();
   renderTopbar();
   cur.running = data.running;
-  cur.composer.setRunning(!!data.running);
+  cur.composer.setRunning(!!data.running, !!data.waiting);
   scrollToBottom(false);
 }
 
@@ -924,3 +925,16 @@ export function closeCurrent() {
 }
 
 on('compacted', ({ conversation_id, auto, error }) => { if (auto && !error && cur && cur.id === conversation_id) reload(); });
+// Claude Code idles on a workflow: what you type now goes straight in (the workflow goes on) instead of queueing
+on('cc-waiting', ({ conversation_id, waiting }) => {
+  if (cur && cur.id === conversation_id && cur.running) cur.composer.setRunning(true, waiting);
+  // what was queued while the turn worked goes now, not after the workflow
+  if (waiting && (queues.get(conversation_id) || []).length) sendQueued(conversation_id);
+});
+// the CLI ignored ultracode (dynamic workflows off for the account): say so once per chat
+const ucWarned = new Set();
+on('ultracode-unavailable', ({ conversation_id }) => {
+  if (!cur || cur.id !== conversation_id || ucWarned.has(conversation_id)) return;
+  ucWarned.add(conversation_id);
+  toast(t('ultracode_unavailable'), 'error');
+});

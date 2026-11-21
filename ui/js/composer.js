@@ -10,6 +10,22 @@ import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, 
 
 const PASTE_AS_FILE = 6000;
 
+// What the Claude Code CLI applies by itself for a model in a folder: the effort it runs at when none is chosen,
+// whether Ultracode can be switched on, and whether its settings switch it on. Asked once per model and folder (it costs a CLI start): undefined
+// until it answers, {} when it couldn't say.
+const ccInfo = new Map();
+function ccInfoOf(model, cwd, onReady) {
+  const key = `${model}\n${cwd || ''}`;
+  let e = ccInfo.get(key);
+  if (!e) {
+    e = { info: undefined };
+    e.p = call('claude_code_session_info', { model, cwd: cwd || null }).catch(() => ({})).then((r) => { e.info = r || {}; });
+    ccInfo.set(key, e);
+  }
+  if (e.info === undefined && onReady) e.p.then(onReady);
+  return e.info;
+}
+
 export function thinkingSupported(m) {
   return ['disableable', 'between_tools', 'explicit', 'budget'].includes(m.thinking);
 }
@@ -20,6 +36,8 @@ export function createComposer(opts) {
     model: store.settings.default_model,
     thinking: mode === 'code' ? true : !!store.settings.thinking_default,
     effort: null,
+    // null until chosen: the CLI's settings decide
+    ultracode: null,
     web_search: !!store.settings.web_search_default,
     style: 'normal',
     disabled_servers: [],
@@ -28,6 +46,8 @@ export function createComposer(opts) {
   };
   let attachments = [];
   let running = false;
+  // Claude Code is idle while a workflow runs: what you type goes straight in instead of queueing
+  let waiting = false;
   let busy = false;
 
   const el = h(`<div class="composer" data-mode="${mode}">
@@ -57,10 +77,30 @@ export function createComposer(opts) {
     opts.onOptions && opts.onOptions(patch);
   }
 
+  // Claude Code's own answer for the model (see ccInfoOf); undefined when this isn't a Claude Code session
+  const ccInfoNow = (m) => {
+    const c = (opts.context && opts.context()) || {};
+    return mode === 'code' && c.engine === 'claude-code' ? ccInfoOf(m.id, c.cwd, refreshBar) : undefined;
+  };
+  // Ultracode is a Claude Code CLI option, for models that support it and while the CLI says it can be on
+  // (it can't with Dynamic workflows off)
+  const ultracodeOffered = (m) => mode === 'code' && ((opts.context && opts.context()) || {}).engine === 'claude-code' && !!m.ultracode && (ccInfoNow(m) || {}).ultracode_available !== false;
+  // the choice made here, else whether the CLI's settings turn it on for every session
+  const ultracodeOn = (m) => (st.ultracode ?? (ccInfoNow(m) || {}).ultracode) === true;
+  // the level a turn runs at: the one chosen, else the one the CLI really uses (it knows the account's defaults), else ours
+  const effortOf = (m) => {
+    const levels = m.efforts || [];
+    if (!levels.length) return null;
+    const own = (ccInfoNow(m) || {}).effort;
+    return levels.includes(st.effort) ? st.effort : (levels.includes(own) ? own : (m.default_effort || 'high'));
+  };
+
   function refreshBar() {
     const m = modelInfo(st.model);
+    ccInfoNow(m); // asks the CLI now, so the model menu has its answer when it opens
     const thinkOn = m.thinking === 'always_on' || (thinkingSupported(m) && st.thinking);
-    $('[data-act=model]', el).innerHTML = `${esc(m.name)}${thinkOn && m.thinking !== 'always_on' ? ` <span class="think-flag" title="${t('extended_thinking')}">${icon('bulb', 13)}</span>` : ''} ${icon('chevDown', 14)}`;
+    const ucOn = ultracodeOn(m) && ultracodeOffered(m);
+    $('[data-act=model]', el).innerHTML = `${esc(m.name)}${thinkOn && m.thinking !== 'always_on' ? ` <span class="think-flag" title="${t('extended_thinking')}">${icon('bulb', 13)}</span>` : ''}${ucOn ? ` <span class="think-flag" title="${esc(t('ultracode_d'))}">${esc(t('ultracode'))}</span>` : ''} ${icon('chevDown', 14)}`;
     const toolsBtn = $('[data-act=tools]', el);
     const anyOn = (mode === 'chat' && st.web_search) || (st.style && st.style !== 'normal');
     toolsBtn.classList.toggle('on', !!anyOn);
@@ -100,7 +140,7 @@ export function createComposer(opts) {
   }
 
   function updateSend() {
-    if (running && opts.onQueue && ta.value.trim()) {
+    if (running && !waiting && opts.onQueue && ta.value.trim()) {
       sendBtn.disabled = false;
       sendBtn.classList.remove('stop');
       sendBtn.classList.add('queue');
@@ -111,7 +151,7 @@ export function createComposer(opts) {
     }
     sendBtn.classList.remove('queue');
     sendBtn.title = '';
-    if (running) {
+    if (running && !(waiting && (ta.value.trim() || attachments.length))) {
       sendBtn.disabled = false;
       sendBtn.classList.add('stop');
       sendIcon('stop');
@@ -194,7 +234,7 @@ export function createComposer(opts) {
    *  queued or handled as a command (the box is then cleared); false when
    *  nothing was sent (empty, busy, stopped, failed). */
   async function send() {
-    if (running) {
+    if (running && !(waiting && (ta.value.trim() || attachments.length))) {
       // typing while Claude works queues the message (sent when it finishes)
       if (ta.value.trim() && opts.onQueue && !attachments.some((a) => a.loading)) {
         opts.onQueue(ta.value, attachments.slice());
@@ -264,20 +304,26 @@ export function createComposer(opts) {
         },
       });
     }
-    if (thinkingSupported(m) || (m.efforts && m.efforts.length)) items.push({ sep: true });
+    const uc = ultracodeOffered(m);
+    if (thinkingSupported(m) || (m.efforts && m.efforts.length) || uc) items.push({ sep: true });
     if (thinkingSupported(m)) {
       const row = h(`<label class="menu-item" style="cursor:pointer">${icon('bulb', 16)}<span class="mtext">${t('extended_thinking')}<span class="sub">${m.thinking === 'budget' ? '' : ''}</span></span><span class="switch"><input type="checkbox" ${st.thinking ? 'checked' : ''}><span class="track"></span></span></label>`);
       row.querySelector('input').addEventListener('change', (e) => { persist({ thinking: e.target.checked }); });
       items.push({ element: row });
     }
     if (m.efforts && m.efforts.length) {
-      const cur = st.effort || m.default_effort || 'high';
+      const cur = effortOf(m);
       const seg = h(`<div style="padding:6px 10px 8px"><div class="small muted" style="margin-bottom:6px">${t('effort')}</div><div class="segmented">${m.efforts.map((e) => `<button data-e="${e}" class="${e === cur ? 'on' : ''}">${t('effort_' + e)}</button>`).join('')}</div></div>`);
       seg.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
         seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
         persist({ effort: b.dataset.e });
       }));
       items.push({ element: seg });
+    }
+    if (uc) {
+      const row = h(`<label class="menu-item" style="cursor:pointer">${icon('sparkle', 16)}<span class="mtext">${esc(t('ultracode'))}<span class="sub">${esc(t('ultracode_d'))}</span></span><span class="switch"><input type="checkbox" ${ultracodeOn(m) ? 'checked' : ''}><span class="track"></span></span></label>`);
+      row.querySelector('input').addEventListener('change', (e) => { persist({ ultracode: e.target.checked }); });
+      items.push({ element: row });
     }
     showMenu(anchor, items, { placement: 'top-end', width: 300 });
   }
@@ -398,7 +444,8 @@ export function createComposer(opts) {
     } else if (e.key === 'ArrowUp' && !ta.value && opts.onEditLast) {
       e.preventDefault();
       opts.onEditLast();
-    } else if (e.key === 'Escape' && running) {
+    } else if (e.key === 'Escape' && running && !waiting) {
+      // not while idle on a workflow: like Claude Code, Esc leaves background workflows alone
       e.preventDefault();
       opts.onStop && opts.onStop();
     }
@@ -434,7 +481,9 @@ export function createComposer(opts) {
     el,
     state: st,
     focus() { ta.focus(); const n = ta.value.length; ta.setSelectionRange(n, n); },
-    setRunning(r) { running = r; updateSend(); },
+    setRunning(r, w) { running = r; waiting = !!(r && w); updateSend(); },
+    /** Running, but idle on a Claude Code workflow (a message goes straight in). */
+    waiting: () => waiting,
     /** Show messages queued while Claude is responding. */
     showQueue(list, onRemove) {
       let q = el.querySelector('.queued');
@@ -450,6 +499,12 @@ export function createComposer(opts) {
     setText(s) { ta.value = s; autoGrow(ta); updateSend(); saveDraft(); },
     getText() { return ta.value; },
     setState(patch) { Object.assign(st, patch); refreshBar(); },
+    /** Change options as the menus do (saved to the conversation, if any). */
+    persist,
+    ultracodeOffered: () => ultracodeOffered(modelInfo(st.model)),
+    ultracodeOn: () => ultracodeOn(modelInfo(st.model)),
+    /** The effort level the next turn runs at (null when the model has none). */
+    effort: () => effortOf(modelInfo(st.model)),
     addPaths,
     addStaged,
     setDrag(on) { el.classList.toggle('drag', on); },

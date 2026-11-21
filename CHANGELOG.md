@@ -22,6 +22,18 @@ client for the Claude API, written in Rust.
 **Code**
 - Two engines: the official Claude Code CLI (signs in with your Claude
   subscription) or a built-in Rust agent (API key).
+- Effort levels for the Claude Code engine, and Ultracode (standing
+  multi-agent workflows) on the models that support it: a switch in the model
+  menu, `/effort` and `/ultracode`. A workflow's report is followed to the end
+  instead of cut at the first answer; workflows show in the Tasks pane (phases,
+  agents, cost; stop one), and you can keep talking while one runs. The effort
+  menu shows the level the CLI really runs at.
+- As in Claude Code: Stop ends the turn and leaves running workflows alone,
+  messages queued meanwhile go in once the turn is done, the `ultracode`
+  keyword opts a message into a workflow, Ultracode set on in Claude Code's
+  settings shows and can be turned off, `/effort current` and `/workflows`.
+  Each message shows its own cost, and `/cost` and the cost meter include
+  what workflows and sub-agents spent.
 - Side panel with Changes (diffs, revert a file or a hunk, review comments,
   commit with a suggested message and a secret scan, pull requests),
   History, Terminal, Plan, Tasks, Preview, Map and Files (tree, search,
@@ -31,6 +43,9 @@ client for the Claude API, written in Rust.
   routines, `/` commands, `@` file and symbol mentions.
 
 **App**
+- Sign in with your Claude account (Chat and Code, through the official
+  `claude` CLI; ClaudeRust never touches the token) and an interface that
+  follows claude.ai's current look.
 - Import from Claude: claude.ai data exports, Claude Code sessions, Claude
   Desktop MCP servers and extensions.
 - Automatic updates from GitHub Releases, verified by signature.

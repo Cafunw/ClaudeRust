@@ -565,6 +565,10 @@ impl TurnBuilder {
         if m.role != "assistant" {
             return;
         }
+        // Claude Code shows each of its messages apart: a workflow's report isn't run into the answer before it
+        if m.meta["engine"] == crate::claudecode::ENGINE {
+            self.flush_text(ctx);
+        }
         if self.first_assistant.is_none() {
             self.first_assistant = Some(Head::of(m));
         }
@@ -990,6 +994,19 @@ mod tests {
         assert_eq!(parts[2]["kind"], "text");
         assert!(parts[2]["html"].as_str().unwrap().contains("artifact-card"));
         assert!(parts[2]["html"].as_str().unwrap().contains("rust-lang.org"));
+        // Claude Code: an answer and the workflow report that follows it stay two texts; the built-in agent's
+        // text that goes on after a Stop hook stays one
+        let two = |engine: &str| {
+            let meta = json!({"engine": engine});
+            let path = vec![
+                msg("u1", "user", json!([{"type":"text","text":"go"}]), json!({})),
+                msg("a1", "assistant", json!([{"type":"text","text":"Started."}]), meta.clone()),
+                msg("a2", "assistant", json!([{"type":"text","text":"It finished."}]), meta),
+            ];
+            build_turns(&path, &ctx, &mut ArtifactTracker::default())[1]["parts"].as_array().unwrap().iter().filter(|p| p["kind"] == "text").count()
+        };
+        assert_eq!(two(crate::claudecode::ENGINE), 2);
+        assert_eq!(two("builtin"), 1);
         assert_eq!(turns[1]["artifacts"][0]["version"], 1);
         assert_eq!(turns[1]["msg_ids"].as_array().unwrap().len(), 3);
     }

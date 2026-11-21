@@ -39,6 +39,10 @@ pub struct AppState {
     pub mcp: Arc<McpManager>,
     pub runs: Mutex<HashMap<String, CancellationToken>>,
     pub live: Mutex<HashMap<String, LiveRun>>,
+    /// The Claude Code CLI turn running in a conversation: the line to it.
+    pub cc_ctl: Mutex<HashMap<String, crate::claudecode::Ctl>>,
+    /// Claude Code's workflows per conversation (the Tasks pane), finished ones until cleared.
+    pub workflows: Mutex<HashMap<String, Vec<Value>>>,
     pub permissions: Mutex<HashMap<String, oneshot::Sender<PermissionReply>>>,
     pub pending_perms: Mutex<HashMap<String, Value>>,
     pub staged: Mutex<HashMap<String, Attachment>>,
@@ -67,6 +71,8 @@ impl AppState {
             mcp: Arc::new(McpManager::new(mcp_config)),
             runs: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            cc_ctl: Mutex::new(HashMap::new()),
+            workflows: Mutex::new(HashMap::new()),
             permissions: Mutex::new(HashMap::new()),
             pending_perms: Mutex::new(HashMap::new()),
             staged: Mutex::new(HashMap::new()),

@@ -168,7 +168,7 @@ function bindShortcuts() {
     else if (e.key === 'Escape' && !document.querySelector('.modal-scrim, .popover')) {
       const c = chat.current();
       // the composer's own stop: queued messages come back instead of being sent
-      if (c && c.running) { e.preventDefault(); chat.stopTurn(c.id); }
+      if (c && c.running && !c.composer.waiting()) { e.preventDefault(); chat.stopTurn(c.id); }
     }
   });
 }

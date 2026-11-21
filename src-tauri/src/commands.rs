@@ -209,7 +209,7 @@ async fn models_view(st: &AppState) -> Value {
     for id in st.oai_models.lock().iter() {
         out.push(json!({
             "id": format!("{}{id}", crate::oai::PREFIX), "name": id, "description": "OpenAI-compatible endpoint",
-            "thinking": "none", "efforts": [], "featured": true, "available": true, "provider": "oai",
+            "thinking": "none", "efforts": [], "ultracode": false, "featured": true, "available": true, "provider": "oai",
         }));
     }
     if let Some(list) = &api {
@@ -443,7 +443,60 @@ fn discard_new_conversation(st: &Arc<AppState>, conv: &crate::db::Conversation) 
     }
 }
 
+/// A message typed while a Claude Code turn is idle on a workflow goes straight to that CLI (the workflow
+/// keeps running), as a turn of its own. None when the conversation isn't in that state.
+fn say_to_running_cli(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> Option<AppResult<Value>> {
+    if conv.options["engine"] != crate::claudecode::ENGINE || req.edit {
+        return None;
+    }
+    let tx = st.cc_ctl.lock().get(&conv.id).filter(|c| c.waiting).map(|c| c.tx.clone())?;
+    Some((|| -> AppResult<Value> {
+        let atts: Vec<attachments::Attachment> = {
+            let staged = st.staged.lock();
+            req.attachment_ids
+                .iter()
+                .map(|id| staged.get(id).cloned().ok_or_else(|| AppError::msg("An attachment is no longer available. Remove it and attach it again.")))
+                .collect::<AppResult<_>>()?
+        };
+        if req.text.trim().is_empty() && atts.is_empty() {
+            return Err(AppError::msg("Message is empty."));
+        }
+        let mut content: Vec<Value> = atts.iter().map(attachments::to_block).collect();
+        if !req.text.trim().is_empty() {
+            content.push(json!({"type": "text", "text": req.text}));
+        }
+        let conv = st.db.conv_get(&conv.id)?;
+        let msg = Message {
+            id: new_id(),
+            conversation_id: conv.id.clone(),
+            parent_id: conv.current_leaf.clone(),
+            role: "user".into(),
+            content: Value::Array(content),
+            meta: json!({"attachments": atts.iter().map(attachments::display_meta).collect::<Vec<_>>(), "plan_mode": false}),
+            created_at: now_ms(),
+        };
+        st.db.msg_insert(&msg)?;
+        st.db.conv_set_leaf(&conv.id, Some(&msg.id))?;
+        let _ = st.db.fts_index(&conv.id, &msg.id, &req.text);
+        {
+            let mut staged = st.staged.lock();
+            for id in &req.attachment_ids {
+                staged.remove(id);
+            }
+        }
+        if tx.send(crate::claudecode::Cmd::Say(msg.id.clone())).is_err() {
+            // the turn ended in the meantime: the message gets one of its own
+            let slot = engine::RunSlot::reserve(st, &conv.id, "Claude is still responding. Stop the response or wait for it to finish.")?;
+            engine::start_reserved(app, slot, &msg.id);
+        }
+        Ok(json!({"conversation_id": conv.id, "message_id": msg.id}))
+    })())
+}
+
 async fn send_into(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> AppResult<Value> {
+    if let Some(r) = say_to_running_cli(app, st, conv, req) {
+        return r;
+    }
     // reserved before anything is awaited: a second send (queued message,
     // watch auto-fix, a double press) can't slip in between the check and
     // the start of the turn
@@ -609,7 +662,11 @@ pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: S
 
 #[tauri::command]
 pub async fn stop_generation(state: St<'_>, conversation_id: String) -> AppResult<()> {
-    engine::stop(&state, &conversation_id);
+    // a Claude Code turn busy while workflows run: Stop ends that turn, the workflows go on (each has its Stop in Tasks)
+    let spare = state.cc_ctl.lock().get(&conversation_id).filter(|c| c.spare).map(|c| c.tx.clone());
+    if !spare.is_some_and(|tx| tx.send(crate::claudecode::Cmd::StopTurn).is_ok()) {
+        engine::stop(&state, &conversation_id);
+    }
     Ok(())
 }
 
@@ -1307,10 +1364,8 @@ fn usage_stats_of(st: &AppState, conversation_id: &str) -> AppResult<Value> {
             tot.1 += u["output_tokens"].as_u64().unwrap_or(0);
             tot.2 += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
             tot.3 += u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-            if u.is_object() && !model.starts_with(crate::oai::PREFIX) {
-                tot.4 += usage_cost(model, u);
-            }
         }
+        tot.4 += answer_cost(model, &m.meta);
     }
     let start = crate::compact::start_index(&path).unwrap_or(0);
     let context = crate::compact::context_tokens(&path[start..]);
@@ -1618,7 +1673,43 @@ pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppR
     };
     let sid = crate::claudecode::latest_session(&path).ok_or_else(|| AppError::msg("This conversation has no Claude Code session yet: send a message first."))?;
     let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::msg("Claude Code isn't installed."))?;
-    crate::claudecode::open_in_terminal(Some(std::path::Path::new(&cwd)), &cli, &["--resume".to_string(), sid])
+    // the session carries on as this window runs it: model, effort level and ultracode
+    let mut args = vec!["--resume".to_string(), sid];
+    if !conv.model.trim().is_empty() && conv.model != "default" {
+        args.extend(["--model".to_string(), conv.model.clone()]);
+    }
+    args.extend(crate::claudecode::cli_session_flags(&conv.options, &conv.model, conv.kind != "code", &st.data_dir));
+    crate::claudecode::open_in_terminal(Some(std::path::Path::new(&cwd)), &cli, &args)
+}
+
+/// Claude Code's workflows in a conversation (the Tasks pane).
+#[tauri::command]
+pub async fn workflows_list(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    Ok(json!(state.workflows.lock().get(&conversation_id).cloned().unwrap_or_default()))
+}
+
+/// Stop one workflow of the conversation's running turn.
+#[tauri::command]
+pub async fn workflow_stop(state: St<'_>, conversation_id: String, task_id: String) -> AppResult<bool> {
+    let tx = state.cc_ctl.lock().get(&conversation_id).map(|c| c.tx.clone());
+    Ok(tx.is_some_and(|tx| tx.send(crate::claudecode::Cmd::StopTask(task_id)).is_ok()))
+}
+
+#[tauri::command]
+pub async fn workflows_clear(state: St<'_>, conversation_id: String) -> AppResult<()> {
+    if let Some(l) = state.workflows.lock().get_mut(&conversation_id) {
+        l.retain(|w| w["status"] == "running");
+    }
+    Ok(())
+}
+
+/// What the CLI would do on its own for `model` in this folder: the effort level it runs at, whether
+/// Ultracode can be switched on (it needs a model with xhigh and dynamic workflows turned on), and
+/// whether settings switch it on.
+#[tauri::command]
+pub async fn claude_code_session_info(state: St<'_>, model: String, cwd: Option<String>) -> AppResult<Value> {
+    let (path, dir) = (state.settings.read().claude_code_path.clone(), state.data_dir.clone());
+    Ok(crate::claudecode::session_info(&path, &model, cwd.as_deref().filter(|c| std::path::Path::new(c).is_dir()).map(std::path::Path::new).unwrap_or(&dir)).await)
 }
 
 /// Runnable scripts the session's folder declares (Tasks pane).
@@ -2698,6 +2789,18 @@ pub fn usage_cost(model: &str, u: &Value) -> f64 {
     (g("input_tokens") * p.0 + g("output_tokens") * p.1 + g("cache_read_input_tokens") * p.0 * 0.1 + g("cache_creation_input_tokens") * p.0 * 1.25) / 1_000_000.0
 }
 
+/// What an answer cost (USD): what Claude Code reported for its turn (sub-agents and workflows included, on the
+/// turn's last row), else its usage at list prices; local models are free.
+pub fn answer_cost(model: &str, meta: &Value) -> f64 {
+    if meta["engine"] == crate::claudecode::ENGINE {
+        return meta["cost_usd"].as_f64().unwrap_or(0.0);
+    }
+    if model.starts_with(crate::oai::PREFIX) {
+        return 0.0;
+    }
+    ["usage", "subagent_usage"].iter().filter(|k| meta[**k].is_object()).map(|k| usage_cost(model, &meta[*k])).sum()
+}
+
 /// Tokens and cost across all conversations of the last `days` days.
 #[tauri::command]
 pub async fn usage_overview(state: St<'_>, days: Option<u32>) -> AppResult<Value> {
@@ -2718,7 +2821,7 @@ fn usage_overview_of(st: &AppState, days: Option<u32>) -> AppResult<Value> {
     for (at, conv_id, title, kind, conv_model, meta) in rows {
         let meta: Value = serde_json::from_str(&meta).unwrap_or_default();
         let model = meta["model"].as_str().unwrap_or(&conv_model).to_string();
-        let mut cost = 0.0;
+        let cost = answer_cost(&model, &meta);
         let mut inp = 0;
         let mut out = 0;
         for key in ["usage", "subagent_usage"] {
@@ -2726,10 +2829,7 @@ fn usage_overview_of(st: &AppState, days: Option<u32>) -> AppResult<Value> {
             if !u.is_object() {
                 continue;
             }
-            if !model.starts_with(crate::oai::PREFIX) {
-                cost += usage_cost(&model, u);
-            }
-            inp += u["input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0) + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            inp +=u["input_tokens"].as_u64().unwrap_or(0) + u["cache_read_input_tokens"].as_u64().unwrap_or(0) + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
             out += u["output_tokens"].as_u64().unwrap_or(0);
         }
         if inp == 0 && out == 0 {
@@ -2783,6 +2883,18 @@ mod usage_tests {
         let cached = serde_json::json!({"cache_read_input_tokens": 1_000_000});
         assert!((super::usage_cost("claude-opus-5-5", &cached) - p.0 * 0.1).abs() < 1e-9);
     }
+
+    #[test]
+    fn claude_code_answers_cost_what_the_cli_reported() {
+        let u = serde_json::json!({"input_tokens": 1_000_000});
+        let p = crate::models::info("claude-opus-5-5").price;
+        let cost = |meta: serde_json::Value| super::answer_cost("claude-opus-5-5", &meta);
+        // its workflows and sub-agents are in the CLI's figure, not in the row's usage; the turn's other rows add nothing
+        assert_eq!(cost(serde_json::json!({"engine": "claude-code", "usage": u, "cost_usd": 0.25})), 0.25);
+        assert_eq!(cost(serde_json::json!({"engine": "claude-code", "usage": u})), 0.0);
+        assert!((cost(serde_json::json!({"usage": u, "subagent_usage": u})) - 2.0 * p.0).abs() < 1e-9);
+        assert_eq!(super::answer_cost("oai:llama", &serde_json::json!({"usage": u})), 0.0);
+    }
 }
 
 // ------------------------------------------------------------- HTML report
@@ -2802,11 +2914,7 @@ pub async fn export_html(st: &AppState, conv: &crate::db::Conversation, path: &[
     let mut cost = 0.0f64;
     for m in path {
         if m.role == "assistant" {
-            for key in ["usage", "subagent_usage"] {
-                if m.meta[key].is_object() {
-                    cost += usage_cost(m.meta["model"].as_str().unwrap_or(&conv.model), &m.meta[key]);
-                }
-            }
+            cost += answer_cost(m.meta["model"].as_str().unwrap_or(&conv.model), &m.meta);
         }
         if render::is_tool_result_msg(m) {
             continue;

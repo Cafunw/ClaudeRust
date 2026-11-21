@@ -33,7 +33,7 @@ async function draw(el, ctx) {
   updateTabs();
   el.innerHTML = '';
   const head = h(`<div class="pane-head"><span class="muted">${t('ws_tasks_d')}</span><div class="grow"></div><button class="btn sm ghost" data-a="clear">${t('clear_finished')}</button></div>`);
-  head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); await call('subagents_clear', { conversationId: ctx.convId }).catch(() => {}); draw(el, ctx); };
+  head.querySelector('[data-a=clear]').onclick = async () => { await call('shells_clear', { conversationId: ctx.convId }).catch(errorToast); await call('subagents_clear', { conversationId: ctx.convId }).catch(() => {}); await call('workflows_clear', { conversationId: ctx.convId }).catch(() => {}); draw(el, ctx); };
   el.appendChild(head);
   el.appendChild(scriptsSection(el, ctx, scripts));
   if (!rows.length) { el.appendChild(h(`<div class="pane-empty">${icon('list', 22)}<div>${t('ws_tasks_empty')}</div></div>`)); return; }
@@ -149,6 +149,48 @@ addTaskProvider(async (ctx) => {
   }));
 });
 on('subagents-changed', ({ conversation_id }) => { const c = context(); if (c && c.convId === conversation_id) refresh('tasks'); });
+
+// Claude Code's workflows (ultracode): the phase it is in, every agent and what it cost so far
+const kTokens = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n || 0));
+function workflowText(w) {
+  const lines = [];
+  for (const p of w.phases || []) {
+    lines.push(p.title);
+    for (const a of (w.agents || []).filter((x) => x.phase === p.title)) {
+      const ended = a.state === 'done' || a.state === 'error';
+      const mark = a.state === 'done' ? '✓' : a.state === 'error' ? '✗' : '…';
+      const bits = [a.model && String(a.model).replace(/^claude-/, ''), a.tokens ? `${kTokens(a.tokens)} tok` : '', a.duration_ms ? `${Math.round(a.duration_ms / 1000)}s` : '', !ended && a.last_tool ? a.last_tool : ''].filter(Boolean);
+      lines.push(`  ${mark} ${a.label}${bits.length ? ' · ' + bits.join(' · ') : ''}`);
+      // what it came back with, or why it failed
+      const out = (a.state === 'error' ? a.error : a.result) || '';
+      if (ended && out) lines.push(`      ${out.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+  }
+  return lines.join('\n') || w.description || '';
+}
+addTaskProvider(async (ctx) => {
+  const list = await call('workflows_list', { conversationId: ctx.convId });
+  return list.slice().reverse().map((w) => {
+    const agents = w.agents || [];
+    const live = agents.filter((a) => a.state !== 'done' && a.state !== 'error');
+    const phase = (live[0] || agents[agents.length - 1] || {}).phase;
+    return {
+      id: 'wf-' + w.id, kind: 'workflow', title: `${t('workflow')} · ${w.name || w.description || ''}`,
+      sub: [phase, agents.length ? `${agents.length - live.length}/${agents.length} ${t('workflow_agents')}` : '', w.tokens ? `${kTokens(w.tokens)} tok` : ''].filter(Boolean).join(' · '),
+      status: w.status, started: w.started_at, finished: w.finished_at, exit: null,
+      onStop: () => call('workflow_stop', { conversationId: ctx.convId, taskId: w.id }),
+      output: async () => workflowText(w),
+    };
+  });
+});
+on('workflows-changed', ({ conversation_id }) => {
+  const c = context();
+  if (!c || c.convId !== conversation_id) return;
+  // the tab's badge counts them too, while the pane isn't drawn
+  Promise.all([call('workflows_list', { conversationId: c.convId }), call('shells_list', { conversationId: c.convId })])
+    .then(([w, s]) => { counts.set(c.convId, [...w, ...s].filter((x) => x.status === 'running').length); refresh(); })
+    .catch(() => {});
+});
 
 on('shells-changed', ({ conversation_id }) => {
   const c = context();

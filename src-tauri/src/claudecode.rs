@@ -76,6 +76,48 @@ pub async fn cli_info(override_path: &str) -> Value {
     json!({"found": true, "path": p.display().to_string(), "version": version})
 }
 
+/// Asks a CLI started like a turn's (with nothing to answer) what it applies for `model` here: the effort
+/// it runs at when none was chosen, whether Ultracode can be switched on (a model with xhigh and
+/// dynamic workflows turned on), and whether settings turn it on for every session. An empty object
+/// when it can't say.
+pub async fn session_info(override_path: &str, model: &str, cwd: &std::path::Path) -> Value {
+    crate::shellenv::ready().await;
+    let Some(cli) = find_cli(override_path) else { return json!({}) };
+    let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json"].iter().map(|s| s.to_string()).collect();
+    if !model.trim().is_empty() && model != "default" {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+    cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+        cmd.env_remove(k);
+    }
+    let Ok(mut child) = cmd.spawn() else { return json!({}) };
+    let mut stdin = child.stdin.take();
+    let Some(stdout) = child.stdout.take() else { return json!({}) };
+    let rid = new_id();
+    write_line(&mut stdin, &json!({"type": "control_request", "request_id": rid, "request": {"subtype": "get_settings"}})).await;
+    let mut lines = BufReader::new(stdout).lines();
+    let applied = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Ok(Some(l)) = lines.next_line().await {
+            let Ok(ev) = serde_json::from_str::<Value>(&l) else { continue };
+            // only `applied`: the rest of get_settings carries the settings' env values
+            if ev["type"] == "control_response" && ev["response"]["request_id"].as_str() == Some(rid.as_str()) {
+                return Some(ev["response"]["response"]["applied"].clone());
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    stop_cli(child, stdin, false).await;
+    match applied {
+        Some(a) => json!({"effort": a["effort"], "ultracode_available": a["ultracodeAvailable"], "ultracode": a["ultracodeRequested"]}),
+        None => json!({}),
+    }
+}
+
 /// Open a terminal running `claude` so the user can sign in with /login.
 pub fn open_login_terminal(cli: &std::path::Path) -> AppResult<()> {
     open_in_terminal(None, cli, &[])
@@ -309,6 +351,8 @@ struct TurnState {
     siblings: Value,
     tracker: ArtifactTracker,
     last_emit: Instant,
+    /// What the CLI had spent before this turn: its results report a running total.
+    cost_before: f64,
 }
 
 impl TurnState {
@@ -427,14 +471,20 @@ enum Outcome {
     /// The CLI no longer has the session we tried to resume (transcripts are
     /// cleaned up after a while); nothing was stored for this attempt.
     ResumeLost,
+    /// A message was stored as the CLI went away and no turn took it: its own turn.
+    Next(String),
 }
 
 pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
     crate::shellenv::ready().await;
-    match run_once(app, st, conv_id, user_msg_id.clone(), cancel, false).await? {
-        Outcome::Done => Ok(()),
-        // Start over in a new session that gets the earlier conversation as context.
-        Outcome::ResumeLost => run_once(app, st, conv_id, user_msg_id, cancel, true).await.map(|_| ()),
+    let (mut id, mut fresh) = (user_msg_id, false);
+    loop {
+        match run_once(app, st, conv_id, id.clone(), cancel, fresh).await? {
+            Outcome::Done => return Ok(()),
+            // Start over in a new session that gets the earlier conversation as context.
+            Outcome::ResumeLost => fresh = true,
+            Outcome::Next(next) => (id, fresh) = (next, false),
+        }
     }
 }
 
@@ -506,6 +556,170 @@ fn is_resume_lost(text: &str) -> bool {
     text.contains("No conversation found with session ID") || text.contains("No message found with message.uuid")
 }
 
+/// The effort and ultracode flags for a turn. Only a level the model has goes
+/// through: one left from another model is dropped, as the built-in engine does.
+/// Ultracode lives only as long as the CLI process (`--resume` doesn't bring it
+/// back), so a choice goes with every spawn: on, or off over settings that turn
+/// it on for every session; none leaves the CLI's own. Chats have no tools, so no Workflow tool.
+pub fn cli_session_flags(options: &Value, model: &str, chat: bool, data_dir: &std::path::Path) -> Vec<String> {
+    let m = crate::models::info(model);
+    let mut out = vec![];
+    if let Some(e) = options["effort"].as_str().filter(|e| m.efforts.contains(e)) {
+        out.extend(["--effort".to_string(), e.to_string()]);
+    }
+    if let Some(on) = options["ultracode"].as_bool().filter(|_| !chat && m.ultracode) {
+        out.extend(["--settings".to_string(), ultracode_settings_file(data_dir, on).display().to_string()]);
+    }
+    out
+}
+
+/// The settings file that switches ultracode on or off. `--settings` takes a path or
+/// inline JSON; a path survives the quoting of cmd.exe and of a terminal
+/// line, which turn the JSON's quotes into something else.
+fn ultracode_settings_file(data_dir: &std::path::Path, on: bool) -> PathBuf {
+    let body = format!(r#"{{"ultracode":{on}}}"#);
+    let p = data_dir.join(if on { "claude-ultracode.json" } else { "claude-ultracode-off.json" });
+    if std::fs::read_to_string(&p).map_or(true, |s| s.trim() != body) {
+        let _ = std::fs::write(&p, body);
+    }
+    p
+}
+
+/// What the running CLI turn can be told from outside.
+pub enum Cmd {
+    /// Stop one workflow (the CLI's `stop_task` request).
+    StopTask(String),
+    /// A user message, already stored, for the CLI while a workflow runs.
+    Say(String),
+    /// The person's Stop while workflows run: it ends the busy turn and spares
+    /// them, as Claude Code does where each task has its own Stop.
+    StopTurn,
+}
+
+/// The line to a conversation's running CLI turn, whether the turn is waiting
+/// on a workflow (idle, so a message can go straight in), and whether a Stop
+/// now ends only the busy turn (workflows run beside it).
+pub struct Ctl {
+    pub tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
+    pub waiting: bool,
+    pub spare: bool,
+}
+
+/// Takes the conversation's line down when its run ends, however it ends.
+struct CtlGuard {
+    st: Arc<AppState>,
+    conv_id: String,
+}
+
+impl Drop for CtlGuard {
+    fn drop(&mut self) {
+        self.st.cc_ctl.lock().remove(&self.conv_id);
+    }
+}
+
+fn end_workflow(w: &mut Value, status: &str) {
+    if w["status"] == "running" {
+        w["status"] = json!(status);
+        w["finished_at"] = json!(now_ms());
+    }
+}
+
+/// Keeps what the Tasks pane shows of a workflow, from the CLI's task events
+/// (name, phases, every agent's state and cost). True when something changed.
+fn record_workflow(list: &mut Vec<Value>, ev: &Value) -> bool {
+    let id = ev["task_id"].as_str().unwrap_or("");
+    let at = list.iter().position(|w| w["id"] == id);
+    match (ev["subtype"].as_str().unwrap_or(""), at) {
+        ("task_started", None) if ev["task_type"] == "local_workflow" && ev["ambient"] != true && ev["off_host"] != true && !id.is_empty() => {
+            list.push(json!({
+                "id": id, "name": ev["workflow_name"], "description": ev["description"], "status": "running",
+                "started_at": now_ms(), "finished_at": null, "tokens": 0, "tool_uses": 0,
+                "phases": [], "agents": [], "output_file": null,
+            }));
+            if list.len() > 30 {
+                list.remove(0);
+            }
+            true
+        }
+        ("task_progress", Some(i)) => {
+            let w = &mut list[i];
+            w["tokens"] = ev["usage"]["total_tokens"].clone();
+            w["tool_uses"] = ev["usage"]["tool_uses"].clone();
+            let (mut phases, mut agents) = (vec![], vec![]);
+            for p in ev["workflow_progress"].as_array().into_iter().flatten() {
+                match p["type"].as_str() {
+                    Some("workflow_phase") => phases.push(json!({"index": p["index"], "title": p["title"]})),
+                    Some("workflow_agent") => agents.push(json!({
+                        "label": p["label"], "phase": p["phaseTitle"], "state": p["state"], "model": p["model"],
+                        "tokens": p["tokens"], "tool_calls": p["toolCalls"], "duration_ms": p["durationMs"],
+                        "last_tool": p["lastToolSummary"].as_str().or(p["lastToolName"].as_str()),
+                        "result": p["resultPreview"].as_str().map(|s| truncate_chars(s, 400)),
+                        "error": p["error"].as_str().map(|s| truncate_chars(s, 400)),
+                    })),
+                    _ => {}
+                }
+            }
+            if !phases.is_empty() {
+                w["phases"] = json!(phases);
+            }
+            if !agents.is_empty() {
+                w["agents"] = json!(agents);
+            }
+            true
+        }
+        ("task_updated", Some(i)) => match ev["patch"]["status"].as_str() {
+            Some(s @ ("completed" | "failed" | "killed")) => {
+                end_workflow(&mut list[i], s);
+                true
+            }
+            _ => false,
+        },
+        ("task_notification", Some(i)) => {
+            let w = &mut list[i];
+            end_workflow(w, match ev["status"].as_str() { Some("completed") => "completed", Some("failed") => "failed", _ => "killed" });
+            w["output_file"] = ev["output_file"].clone();
+            if !ev["usage"].is_null() {
+                w["tokens"] = ev["usage"]["total_tokens"].clone();
+                w["tool_uses"] = ev["usage"]["tool_uses"].clone();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// How long to wait, after the last workflow ended, for the follow-up turn the
+/// CLI starts to report it (it normally starts at once).
+const REPORT_WAIT: Duration = Duration::from_secs(30);
+
+/// Follows the CLI's background workflows (ultracode's `local_workflow`
+/// tasks; not shells, live-update watchers or remote tasks) from its system
+/// events. True when one ended.
+fn track_workflows(bg: &mut HashSet<String>, ev: &Value) -> bool {
+    let wf = |t: &Value| t["task_type"] == "local_workflow" && t["ambient"] != true && t["off_host"] != true;
+    let id = ev["task_id"].as_str().unwrap_or("");
+    let n = bg.len();
+    match ev["subtype"].as_str().unwrap_or("") {
+        "task_started" if wf(ev) && !id.is_empty() => {
+            bg.insert(id.to_string());
+        }
+        "task_notification" => {
+            bg.remove(id);
+        }
+        "task_updated" if matches!(ev["patch"]["status"].as_str(), Some("completed" | "failed" | "killed")) => {
+            bg.remove(id);
+        }
+        // the whole set of live tasks
+        "background_tasks_changed" => {
+            let old = std::mem::take(bg);
+            *bg = ev["tasks"].as_array().into_iter().flatten().filter(|t| wf(t)).filter_map(|t| t["task_id"].as_str().map(String::from)).collect();
+            return old.iter().any(|k| !bg.contains(k));
+        }
+        _ => {}
+    }
+    bg.len() < n
+}
+
 #[allow(unused_assignments)]
 async fn run_once(
     app: &AppHandle,
@@ -569,6 +783,9 @@ async fn run_once(
         args.push("--fallback-model".into());
         args.push(fb);
     }
+    let flags = cli_session_flags(&conv.options, &conv.model, chat, &st.data_dir);
+    let ultracode_asked = conv.options["ultracode"] == true && flags.iter().any(|a| a == "--settings");
+    args.extend(flags);
     if chat {
         // our chat prompt (instructions, style, project knowledge) replaces the coding one, and
         // nothing else is switched on: no tools, skills, MCP servers or the CLI's own settings and hooks.
@@ -662,12 +879,17 @@ async fn run_once(
             )}));
         }
     }
-    let first_line = json!({
+    let mut first_line = json!({
         "type": "user",
         "message": {"role": "user", "content": content},
         "parent_tool_use_id": null,
         "session_id": ""
     });
+    // A person typed it: the CLI then honours what only a person may type, such as the "ultracode"
+    // keyword. Not over a replayed conversation, whose earlier words aren't this message's.
+    if !chat && !with_history {
+        first_line["origin"] = json!({"kind": "human"});
+    }
 
     let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
     cmd.current_dir(&cwd)
@@ -706,7 +928,17 @@ async fn run_once(
             }
         });
     }
+    // the line to this run: Stop for one workflow, a message while one runs
+    let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
+    st.cc_ctl.lock().insert(conv_id.to_string(), Ctl { tx: ctl_tx, waiting: false, spare: false });
+    let _ctl = CtlGuard { st: st.clone(), conv_id: conv_id.to_string() };
     write_line(&mut stdin, &first_line).await;
+    // The CLI drops ultracode without a word when the account has dynamic
+    // workflows off: ask what it applied.
+    let uc_check = ultracode_asked.then(new_id);
+    if let Some(id) = &uc_check {
+        write_line(&mut stdin, &json!({"type": "control_request", "request_id": id, "request": {"subtype": "get_settings"}})).await;
+    }
 
     let turn_start = path
         .iter()
@@ -720,6 +952,7 @@ async fn run_once(
         siblings: json!({"index": 0, "count": 1, "ids": []}),
         tracker: view::tracker_for(&path[..turn_start]),
         last_emit: Instant::now() - Duration::from_secs(1),
+        cost_before: 0.0,
     };
     let mcp: HashMap<String, (String, String)> = HashMap::new();
     let math = settings.latex_enabled;
@@ -727,9 +960,31 @@ async fn run_once(
     let mut result: Option<Value> = None;
     let mut interrupted = false;
     let mut interrupt_deadline: Option<Instant> = None;
-    // When the CLI reported its result. It can stay alive afterwards (for
-    // example while a background task runs); the turn still ends here.
+    // When the CLI reported its result, and how long it then gets to exit. It
+    // can stay alive afterwards (a background shell, say); the turn still ends
+    // then, unless a workflow (ultracode) runs: those report in a later turn.
     let mut result_at: Option<Instant> = None;
+    let mut result_grace = Duration::from_secs(3);
+    // Live background workflows, and whether one ended since the last model
+    // call (its report may still come as a follow-up turn).
+    let mut bg: HashSet<String> = HashSet::new();
+    let mut report_due = false;
+    // A workflow's wait is in no turn's own duration_ms: the footer shows the wall time instead.
+    let run_start = Instant::now();
+    let mut ran_workflow = false;
+    // between a result and the next model call
+    let mut idle = false;
+    // Messages typed while a workflow runs go to the CLI at once, each as a turn of its own: those not yet
+    // handed over, whether the line is advertised as waiting, whether any was handed over, and the last row
+    // of earlier turns that the CLI session continues from.
+    let mut pending_say: VecDeque<String> = VecDeque::new();
+    let mut waiting = false;
+    // whether a Stop now ends only the busy turn, and whether the turn going on was ended so
+    let mut spare = false;
+    let mut turn_stopped = false;
+    let mut delivered = false;
+    let mut tip: Option<String> = None;
+    let mut last_wf_emit = Instant::now() - Duration::from_secs(1);
     let mut lines = BufReader::new(stdout).lines();
     let mut awaiting: HashMap<String, String> = HashMap::new();
     let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<PermDone>();
@@ -764,6 +1019,61 @@ async fn run_once(
         }};
     }
 
+    // Idle with a workflow running: a message can go straight in (the composer sends instead of queueing).
+    // Busy with one running: a Stop ends the turn only (a second one, if the turn doesn't end, everything).
+    macro_rules! sync_waiting {
+        () => {
+            let live = !bg.is_empty() && stdin.is_some() && !interrupted;
+            let was_waiting = waiting;
+            if (live && idle, live && !idle && !turn_stopped) != (waiting, spare) {
+                (waiting, spare) = (live && idle, live && !idle && !turn_stopped);
+                if let Some(c) = st.cc_ctl.lock().get_mut(conv_id) {
+                    (c.waiting, c.spare) = (waiting, spare);
+                }
+            }
+            if waiting != was_waiting {
+                let _ = app.emit("cc-waiting", json!({"conversation_id": conv_id, "waiting": waiting}));
+            }
+        };
+    }
+
+    // Hand the next stored message to the CLI once its turn is idle: the turn that ended is settled, the
+    // message starts a turn of its own (its own bubble, cost and time), and the CLI keeps its workflows.
+    macro_rules! deliver_say {
+        () => {
+            while idle && stdin.is_some() && !interrupted {
+                let Some(mid) = pending_say.pop_front() else { break };
+                settle_rows(st, conv_id, &mut ts, &result, None, std::mem::take(&mut turn_stopped), None, None)?;
+                if let Some(t) = ts.rows.iter().rev().find(|r| r.meta["cc_uuid"].is_string()) {
+                    tip = Some(t.id.clone());
+                }
+                let msg = st.db.msg_get(&mid)?;
+                let upto = st.db.path_to(&mid)?;
+                let from = upto.iter().rposition(|m| m.role == "user" && !render::is_tool_result_msg(m)).unwrap_or(0);
+                ts = TurnState {
+                    rows: vec![],
+                    current: None,
+                    streaming: None,
+                    first_id: None,
+                    siblings: json!({"index": 0, "count": 1, "ids": []}),
+                    tracker: view::tracker_for(&upto[..from]),
+                    last_emit: Instant::now() - Duration::from_secs(1),
+                    cost_before: result.as_ref().and_then(|r| r["total_cost_usd"].as_f64()).unwrap_or(ts.cost_before),
+                };
+                parent = mid;
+                let blocks: Vec<Value> = msg.content.as_array().cloned().unwrap_or_default().into_iter().filter(|b| !is_reminder(b)).collect();
+                write_line(&mut stdin, &json!({"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": null, "session_id": "", "origin": {"kind": "human"}})).await;
+                result = None;
+                result_at = None;
+                idle = false;
+                report_due = false;
+                delivered = true;
+                crate::turnstream::end(conv_id);
+                emit_conv_updated(app, conv_id);
+            }
+        };
+    }
+
     // The event loop. Its errors (storing a row fails, say because the chat
     // was deleted mid-turn) end it like the CLI ending does, so the cleanup
     // after it always runs: open prompts taken down, the CLI stopped.
@@ -774,6 +1084,9 @@ async fn run_once(
                 _ = cancel.cancelled(), if !interrupted => {
                     interrupted = true;
                     interrupt_deadline = Some(Instant::now() + Duration::from_secs(5));
+                    for id in &bg {
+                        write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "stop_task", "task_id": id}})).await;
+                    }
                     write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}})).await;
                     continue;
                 }
@@ -792,10 +1105,30 @@ async fn run_once(
                     emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
                     continue;
                 }
+                Some(cmd) = ctl_rx.recv() => {
+                    match cmd {
+                        Cmd::StopTask(id) => {
+                            write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "stop_task", "task_id": id}})).await;
+                        }
+                        Cmd::Say(id) => {
+                            pending_say.push_back(id);
+                            deliver_say!();
+                            sync_waiting!();
+                        }
+                        // the turn may have ended meanwhile: then there is nothing left to stop
+                        Cmd::StopTurn if !idle && !turn_stopped => {
+                            turn_stopped = true;
+                            write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt", "spare_background_tasks": true}})).await;
+                            sync_waiting!();
+                        }
+                        Cmd::StopTurn => {}
+                    }
+                    continue;
+                }
                 _ = tokio::time::sleep(Duration::from_millis(250)), if interrupt_deadline.is_some() || result_at.is_some() => {
                     let now = Instant::now();
                     let interrupt_over = interrupt_deadline.map(|d| now > d).unwrap_or(false);
-                    let result_over = result_at.map(|t| now.duration_since(t) > Duration::from_secs(3)).unwrap_or(false);
+                    let result_over = result_at.map(|t| now.duration_since(t) > result_grace).unwrap_or(false);
                     if interrupt_over || result_over {
                         break;
                     }
@@ -814,10 +1147,41 @@ async fn run_once(
                             update_conv_options(st, conv_id, |o| o["cc_session"] = json!(sid));
                         }
                     }
+                    let sub = ev["subtype"].as_str().unwrap_or("");
+                    if matches!(sub, "task_started" | "task_progress" | "task_updated" | "task_notification") {
+                        let changed = record_workflow(st.workflows.lock().entry(conv_id.to_string()).or_default(), &ev);
+                        // progress comes several times a second: the pane gets it at a calmer pace, the ends at once
+                        if changed && (sub != "task_progress" || last_wf_emit.elapsed() > Duration::from_millis(400)) {
+                            last_wf_emit = Instant::now();
+                            let _ = app.emit("workflows-changed", json!({"conversation_id": conv_id}));
+                        }
+                    }
+                    let ended = track_workflows(&mut bg, &ev);
+                    ran_workflow |= ended || !bg.is_empty();
+                    if ended {
+                        report_due = true;
+                        if bg.is_empty() && idle && stdin.is_some() {
+                            // the last one ended after the turn's result: wait for its report
+                            // turn, which a message_start below takes over from
+                            result_at = Some(Instant::now());
+                            result_grace = REPORT_WAIT;
+                        }
+                    }
+                    // the report's request is being retried (rate limit, overload): it is still coming
+                    if ev["subtype"] == "api_retry" && idle && stdin.is_some() && result_grace == REPORT_WAIT && result_at.is_some() {
+                        result_at = Some(Instant::now());
+                    }
                 }
                 "stream_event" if top_level => {
                     let se = &ev["event"];
                     if se["type"] == "message_start" {
+                        report_due = false;
+                        if idle && stdin.is_some() {
+                            // a follow-up turn (a workflow's report): read it to its own result
+                            result_at = None;
+                            turn_stopped = false;
+                        }
+                        idle = false;
                         let api_id = se["message"]["id"].as_str().unwrap_or("").to_string();
                         let idx = match &ts.current {
                             Some((id, i)) if *id == api_id => *i,
@@ -945,19 +1309,50 @@ async fn run_once(
                         emit(app, st, conv_id, &mut ts, &mcp, math, &awaiting, true);
                     }
                 }
+                "control_response" => {
+                    let r = &ev["response"];
+                    // only `applied`: the rest of get_settings carries the settings' env values
+                    let a = &r["response"]["applied"];
+                    if uc_check.is_some() && r["request_id"].as_str() == uc_check.as_deref() && a["ultracodeRequested"] == true && a["ultracode"] != true {
+                        let _ = app.emit("ultracode-unavailable", json!({"conversation_id": conv_id}));
+                    }
+                }
                 "result" => {
                     result = Some(ev.clone());
-                    result_at = Some(Instant::now());
-                    // closing stdin lets the CLI exit
-                    stdin = None;
+                    idle = true;
+                    // the spending limit ends the turn, workflows or not
+                    let over_budget = ev["subtype"].as_str().is_some_and(|t| t.contains("budget"));
+                    if interrupted || over_budget || (bg.is_empty() && !report_due) {
+                        result_at = Some(Instant::now());
+                        result_grace = Duration::from_secs(3);
+                        // closing stdin lets the CLI exit
+                        stdin = None;
+                    } else if bg.is_empty() {
+                        // a workflow ended during this turn; its report may come as one more turn
+                        result_at = Some(Instant::now());
+                        result_grace = REPORT_WAIT;
+                    } else {
+                        // workflows still run: keep stdin open (their permission prompts, and the
+                        // CLI's 10-minute cap once input closes) until they report back
+                        result_at = None;
+                    }
+                    deliver_say!();
                 }
                 _ => {}
             }
+            sync_waiting!();
         }
         Ok(())
     }
     .await;
 
+    // Workflows that went with the CLI.
+    if let Some(list) = st.workflows.lock().get_mut(conv_id) {
+        for w in list.iter_mut() {
+            end_workflow(w, "killed");
+        }
+    }
+    let _ = app.emit("workflows-changed", json!({"conversation_id": conv_id}));
     // Prompts the CLI never got an answer to.
     for (_, (req_id, _)) in open_perms.drain() {
         st.permissions.lock().remove(&req_id);
@@ -968,9 +1363,10 @@ async fn run_once(
     stop_cli(child, stdin, events.is_err()).await;
     events?;
     ts.streaming = None;
+    // a turn ended by a Stop that spared the workflows ends stopped too, not failed
+    let stopped = interrupted || turn_stopped;
 
     // Bookkeeping on the last assistant row.
-    let last_assistant = ts.rows.iter().rposition(|r| r.role == "assistant");
     let err_text = {
         let t = err_tail.lock();
         t.iter().rev().take(8).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
@@ -983,7 +1379,7 @@ async fn run_once(
             budget_stop = Some(json!({"budget": crate::engine::turn_budget(&conv, &st.settings.read()), "spent": r["total_cost_usd"]}));
         }
         Some(r) => {
-            if r["is_error"].as_bool() == Some(true) && !interrupted {
+            if r["is_error"].as_bool() == Some(true) && !stopped {
                 error = Some(
                     r["result"].as_str().map(|s| s.to_string()).filter(|s| !s.is_empty())
                         .or_else(|| r["errors"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n")))
@@ -991,7 +1387,7 @@ async fn run_once(
                 );
             }
         }
-        None if !interrupted => {
+        None if !stopped => {
             error = Some(if err_text.is_empty() {
                 "Claude Code exited unexpectedly. Run `claude` in a terminal to check that it's installed and signed in.".into()
             } else {
@@ -1003,59 +1399,94 @@ async fn run_once(
     if error.as_deref().is_some_and(|e| e.contains("Not logged in") || e.contains("/login")) {
         error = Some("You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).".into());
     }
-    if !fresh && ts.rows.is_empty() && !interrupted {
+    if !fresh && ts.rows.is_empty() && !interrupted && !delivered {
         let text = format!("{} {}", error.clone().unwrap_or_default(), err_text);
         if is_resume_lost(&text) {
             return Ok(Outcome::ResumeLost);
         }
     }
-    match last_assistant {
-        Some(i) => {
-            let row = &mut ts.rows[i];
-            if let Some(r) = &result {
-                if !r["usage"].is_null() {
-                    row.meta["usage"] = r["usage"].clone();
-                }
-                row.meta["cost_usd"] = r["total_cost_usd"].clone();
-                row.meta["duration_ms"] = r["duration_ms"].clone();
-            }
-            row.meta["stop_reason"] = json!(if interrupted { Value::Null } else { json!("end_turn") });
-            if interrupted {
-                row.meta["stopped"] = json!(true);
-            }
-            if let Some(e) = &error {
-                row.meta["error"] = json!({"message": e, "kind": "claude_code"});
-            }
-            if let Some(b) = &budget_stop {
-                row.meta["budget_stop"] = b.clone();
-            }
-            st.db.msg_update(&row.id, &row.content, &row.meta)?;
-            let text = render::plain_text(&row.content);
-            let _ = st.db.fts_index(conv_id, &row.id, &text);
-        }
-        None => {
-            if let Some(e) = &error {
+    // a workflow's wait is in no turn's own duration_ms: a turn that spanned one shows the wall time
+    let wall_ms = result_at.filter(|_| ran_workflow && !delivered).map(|t| t.duration_since(run_start).as_millis() as u64);
+    let settled = settle_rows(st, conv_id, &mut ts, &result, wall_ms, stopped, error.as_deref(), budget_stop.as_ref())?;
+    if !settled {
+        if let Some(e) = &error {
+            if !delivered {
                 return fail(e.clone());
             }
-            if interrupted {
-                let i = new_row!("assistant", json!([]), json!({"stopped": true, "engine": ENGINE}));
-                let _ = i;
-            }
+            // the error belongs under the message of the turn that failed, not the run's first one
+            let _ = new_row!("assistant", json!([]), json!({"error": {"message": e, "kind": "claude_code"}, "engine": ENGINE}));
+        } else if stopped {
+            let _ = new_row!("assistant", json!([]), json!({"stopped": true, "engine": ENGINE}));
         }
     }
     // Remember where the CLI session ends so the next message resumes there.
-    if let Some(tip) = ts.rows.iter().rev().find(|r| r.meta["cc_uuid"].is_string()) {
-        let tip_id = tip.id.clone();
+    let tip_id = ts.rows.iter().rev().find(|r| r.meta["cc_uuid"].is_string()).map(|r| r.id.clone()).or(tip);
+    if let Some(tip_id) = tip_id {
         update_conv_options(st, conv_id, |o| o["cc_tip"] = json!(tip_id));
     }
     if let Some(r) = ts.rows.last() {
         st.db.conv_set_leaf(conv_id, Some(&r.id))?;
     }
     emit(app, st, conv_id, &mut ts, &mcp, math, &HashMap::new(), true);
+    // a message that came in as the CLI went away (it is stored, but no turn took it): its own run
+    let mut orphan = pending_say.pop_back();
+    while let Ok(c) = ctl_rx.try_recv() {
+        if let Cmd::Say(id) = c {
+            orphan = Some(id);
+        }
+    }
     match error {
         Some(e) => Err(AppError::Api { status: 0, kind: "claude_code".into(), message: e }),
-        None => Ok(Outcome::Done),
+        None => Ok(match orphan.filter(|_| !interrupted) {
+            Some(id) => Outcome::Next(id),
+            None => Outcome::Done,
+        }),
     }
+}
+
+/// Bookkeeping on the last assistant row of a turn that ended: what the CLI's
+/// result said about it (cost, time, usage), and how it ended. False when the
+/// turn has no assistant row.
+#[allow(clippy::too_many_arguments)]
+fn settle_rows(
+    st: &AppState,
+    conv_id: &str,
+    ts: &mut TurnState,
+    result: &Option<Value>,
+    wall_ms: Option<u64>,
+    interrupted: bool,
+    error: Option<&str>,
+    budget_stop: Option<&Value>,
+) -> AppResult<bool> {
+    ts.streaming = None;
+    let Some(i) = ts.rows.iter().rposition(|r| r.role == "assistant") else { return Ok(false) };
+    let row = &mut ts.rows[i];
+    if let Some(r) = result {
+        if !r["usage"].is_null() {
+            row.meta["usage"] = r["usage"].clone();
+        }
+        row.meta["cost_usd"] = turn_cost(r, ts.cost_before);
+        row.meta["duration_ms"] = wall_ms.map(|ms| json!(ms)).unwrap_or_else(|| r["duration_ms"].clone());
+    }
+    row.meta["stop_reason"] = json!(if interrupted { Value::Null } else { json!("end_turn") });
+    if interrupted {
+        row.meta["stopped"] = json!(true);
+    }
+    if let Some(e) = error {
+        row.meta["error"] = json!({"message": e, "kind": "claude_code"});
+    }
+    if let Some(b) = budget_stop {
+        row.meta["budget_stop"] = b.clone();
+    }
+    st.db.msg_update(&row.id, &row.content, &row.meta)?;
+    let text = render::plain_text(&row.content);
+    let _ = st.db.fts_index(conv_id, &row.id, &text);
+    Ok(true)
+}
+
+/// A turn's own cost, from a result whose `total_cost_usd` is what the CLI process spent so far.
+fn turn_cost(result: &Value, before: f64) -> Value {
+    result["total_cost_usd"].as_f64().map_or(Value::Null, |t| json!((t - before).max(0.0)))
 }
 
 /// The CLI's answer for a permission prompt the user (or Stop) resolved.
@@ -1168,6 +1599,101 @@ mod tests {
         assert!(is_resume_lost("Error: No conversation found with session ID: abc"));
         assert!(is_resume_lost("No message found with message.uuid of: x"));
         assert!(!is_resume_lost("rate limited"));
+    }
+
+    #[test]
+    fn effort_and_ultracode_flags() {
+        let dir = std::env::temp_dir().join(format!("clauderust-flags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = |o: Value, model: &str, chat: bool| cli_session_flags(&o, model, chat, &dir);
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let (uc, off) = (dir.join("claude-ultracode.json").display().to_string(), dir.join("claude-ultracode-off.json").display().to_string());
+        let (uc, off) = (uc.as_str(), off.as_str());
+        assert_eq!(f(json!({"effort": "xhigh"}), "claude-opus-5-5", false), s(&["--effort", "xhigh"]));
+        assert_eq!(f(json!({"effort": "low"}), "claude-opus-5-5", true), s(&["--effort", "low"]));
+        // stale or unknown levels are dropped
+        assert!(f(json!({"effort": "xhigh"}), "claude-sonnet-4-6", false).is_empty());
+        assert!(f(json!({"effort": "high"}), "claude-haiku-4-5", false).is_empty());
+        assert!(f(json!({"effort": "ultracode"}), "claude-opus-5-5", false).is_empty());
+        assert!(f(json!({"effort": null}), "claude-opus-5-5", false).is_empty());
+        // ultracode: code sessions on a model that has it, at the chosen level
+        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", false), s(&["--effort", "high", "--settings", uc]));
+        assert_eq!(f(json!({"ultracode": true}), "claude-sonnet-5-5", false), s(&["--settings", uc]));
+        // off is said too (settings can turn it on for every session); unset leaves the CLI's own
+        assert_eq!(f(json!({"effort": "high", "ultracode": false}), "claude-opus-5-5", false), s(&["--effort", "high", "--settings", off]));
+        assert_eq!(f(json!({"effort": "high", "ultracode": null}), "claude-opus-5-5", false), s(&["--effort", "high"]));
+        assert_eq!(f(json!({"effort": "high", "ultracode": "true"}), "claude-opus-5-5", false), s(&["--effort", "high"]));
+        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", true), s(&["--effort", "high"]));
+        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-sonnet-4-6", false), s(&["--effort", "high"]));
+        assert!(f(json!({"ultracode": true}), "default", false).is_empty());
+        // the files the flag points at switch ultracode on and off
+        assert_eq!(std::fs::read_to_string(uc).unwrap(), r#"{"ultracode":true}"#);
+        assert_eq!(std::fs::read_to_string(off).unwrap(), r#"{"ultracode":false}"#);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_workflow_is_recorded_from_its_events() {
+        let mut list = vec![];
+        let started = json!({"subtype": "task_started", "task_id": "w1", "task_type": "local_workflow", "workflow_name": "audit", "description": "Audit it"});
+        assert!(record_workflow(&mut list, &started));
+        // the same start twice, shells and ambient workflows add nothing
+        assert!(!record_workflow(&mut list, &started));
+        assert!(!record_workflow(&mut list, &json!({"subtype": "task_started", "task_id": "b1", "task_type": "local_bash"})));
+        assert!(!record_workflow(&mut list, &json!({"subtype": "task_started", "task_id": "w2", "task_type": "local_workflow", "ambient": true})));
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0]["name"].as_str(), list[0]["status"].as_str()), (Some("audit"), Some("running")));
+        let progress = json!({"subtype": "task_progress", "task_id": "w1", "usage": {"total_tokens": 900, "tool_uses": 4}, "workflow_progress": [
+            {"type": "workflow_phase", "index": 1, "title": "Find"},
+            {"type": "workflow_agent", "label": "find:a.js", "phaseTitle": "Find", "state": "progress", "model": "m", "tokens": 500, "toolCalls": 2, "durationMs": 1200, "lastToolName": "Read"},
+            {"type": "workflow_agent", "label": "find:b.js", "phaseTitle": "Find", "state": "error", "error": "API Error: 529"},
+        ]});
+        assert!(record_workflow(&mut list, &progress));
+        assert_eq!((list[0]["tokens"].as_i64(), list[0]["phases"][0]["title"].as_str()), (Some(900), Some("Find")));
+        assert_eq!((list[0]["agents"][0]["label"].as_str(), list[0]["agents"][0]["last_tool"].as_str()), (Some("find:a.js"), Some("Read")));
+        assert_eq!((list[0]["agents"][1]["state"].as_str(), list[0]["agents"][1]["error"].as_str()), (Some("error"), Some("API Error: 529")));
+        // progress for a workflow we never saw start is ignored; an end sticks once
+        assert!(!record_workflow(&mut list, &json!({"subtype": "task_progress", "task_id": "zz", "usage": {}})));
+        assert!(record_workflow(&mut list, &json!({"subtype": "task_updated", "task_id": "w1", "patch": {"status": "completed"}})));
+        assert!(record_workflow(&mut list, &json!({"subtype": "task_notification", "task_id": "w1", "status": "failed", "output_file": "o.txt"})));
+        assert_eq!((list[0]["status"].as_str(), list[0]["output_file"].as_str()), (Some("completed"), Some("o.txt")));
+        assert!(list[0]["finished_at"].is_number());
+    }
+
+    #[test]
+    fn workflows_are_tracked_until_they_report() {
+        let mut bg = HashSet::new();
+        let mut ev = |e: Value| track_workflows(&mut bg, &e);
+        assert!(!ev(json!({"subtype": "task_started", "task_id": "w1", "task_type": "local_workflow", "tool_use_id": "tu"})));
+        // shells, watchers and remote tasks don't hold the turn
+        assert!(!ev(json!({"subtype": "task_started", "task_id": "b1", "task_type": "local_bash"})));
+        assert!(!ev(json!({"subtype": "task_started", "task_id": "w2", "task_type": "local_workflow", "ambient": true})));
+        assert!(!ev(json!({"subtype": "task_progress", "task_id": "w1"})));
+        assert!(!ev(json!({"subtype": "task_updated", "task_id": "w1", "patch": {"status": "running"}})));
+        assert!(!ev(json!({"subtype": "init"})));
+        assert!(ev(json!({"subtype": "task_notification", "task_id": "w1", "status": "completed"})));
+        assert!(bg.is_empty());
+        // the live-task set replaces what we knew
+        let mut ev = |e: Value| track_workflows(&mut bg, &e);
+        assert!(!ev(json!({"subtype": "background_tasks_changed", "tasks": [
+            {"task_id": "w3", "task_type": "local_workflow"},
+            {"task_id": "w4", "task_type": "local_workflow", "off_host": true},
+            {"task_id": "b2", "task_type": "local_bash"},
+        ]})));
+        assert!(ev(json!({"subtype": "task_updated", "task_id": "w3", "patch": {"status": "killed"}})));
+        assert!(!ev(json!({"subtype": "background_tasks_changed", "tasks": [{"task_id": "w5", "task_type": "local_workflow"}]})));
+        assert!(ev(json!({"subtype": "background_tasks_changed", "tasks": []})));
+        assert!(bg.is_empty());
+    }
+
+    #[test]
+    fn a_turn_costs_what_came_after_the_one_before() {
+        // results of one CLI process (a message typed while a workflow ran): running totals
+        let cost = |total: Value, before: f64| turn_cost(&json!({"total_cost_usd": total}), before).as_f64();
+        assert_eq!(cost(json!(0.03), 0.0), Some(0.03));
+        assert!((cost(json!(0.153), 0.142).unwrap() - 0.011).abs() < 1e-9);
+        assert_eq!(cost(json!(0.1), 0.2), Some(0.0));
+        assert!(turn_cost(&json!({}), 0.1).is_null());
     }
 
     #[cfg(target_os = "linux")]

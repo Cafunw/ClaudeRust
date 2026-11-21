@@ -25,6 +25,8 @@ pub struct ModelInfo {
     pub description: String,
     pub thinking: Thinking,
     pub efforts: Vec<&'static str>,
+    /// Claude Code can run ultracode on it: the CLI allows it exactly where xhigh effort is.
+    pub ultracode: bool,
     pub default_effort: Option<&'static str>,
     /// Send `display: "summarized"` (models whose default display is "omitted").
     pub display_param: bool,
@@ -53,6 +55,7 @@ fn base(id: &str, name: &str, desc: &str) -> ModelInfo {
         description: desc.into(),
         thinking: Thinking::AlwaysOn,
         efforts: ALL_EFFORTS.to_vec(),
+        ultracode: false,
         default_effort: Some("high"),
         display_param: true,
         web_tools_v2: true,
@@ -175,6 +178,9 @@ fn build_catalog() -> Vec<ModelInfo> {
     m.legacy = true;
     v.push(m);
 
+    for m in &mut v {
+        m.ultracode = m.efforts.contains(&"xhigh");
+    }
     v
 }
 
@@ -210,6 +216,7 @@ pub fn info(id: &str) -> ModelInfo {
         m.efforts = vec![];
         m.default_effort = None;
     }
+    m.ultracode = m.efforts.contains(&"xhigh");
     m
 }
 
@@ -387,6 +394,17 @@ mod tests {
 
         let o48 = info("claude-opus-4-8");
         assert!(thinking_params(&o48, false, None, 1000).thinking.is_none());
+    }
+
+    #[test]
+    fn ultracode_follows_xhigh() {
+        for (id, on) in [
+            ("claude-opus-5-5", true), ("claude-haiku-5-5", true), ("claude-opus-4-7", true),
+            ("claude-opus-4-6", false), ("claude-sonnet-4-6", false), ("claude-haiku-4-5", false),
+            ("claude-opus-4-5", false), ("claude-mythos-6", true), ("claude-3-opus", false), ("default", false),
+        ] {
+            assert_eq!(info(id).ultracode, on, "{id}");
+        }
     }
 
     /// Time a model lookup (once per assistant message of a rendered turn,

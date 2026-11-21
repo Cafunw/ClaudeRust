@@ -63,8 +63,9 @@ export async function renderCode(view) {
       <button class="env-btn" data-act="folder" title="${esc(folder)}">${icon('folder', 14)}<span class="ellipsis">${esc(folder ? base(folder) : t('folder_missing'))}</span>${icon('chevDown', 11)}</button>
       <button class="env-btn" data-act="wt" title="${esc(t('worktree_help'))}"><span class="chk ${w}">${w === 'on' ? icon('check', 11) : w === 'auto' ? '–' : ''}</span><span>Worktree</span></button>`;
   };
-  const setFolder = (f) => { folder = f; saveLocal({ codeFolder: f }); drawEnv(); composer.focus(); };
-  const setEngine = (e) => { engine = e; saveLocal({ codeEngine: e }); drawEnv(); };
+  // the CLI's defaults (effort, ultracode) can differ per folder: the model button asks again
+  const setFolder = (f) => { folder = f; saveLocal({ codeFolder: f }); drawEnv(); composer.refresh(); composer.focus(); };
+  const setEngine = (e) => { engine = e; saveLocal({ codeEngine: e }); drawEnv(); composer.refresh(); };
 
   const folderMenu = (anchor, placement) => showMenu(anchor, [
     ...[...new Set([folder, ...recentFolders].filter(Boolean))].map((f) => ({ label: base(f), sub: f, checked: f === folder, onClick: () => setFolder(f) })),

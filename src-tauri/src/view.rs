@@ -140,10 +140,13 @@ pub async fn conversation_view(st: &AppState, conv_id: &str) -> AppResult<Value>
         .filter(|p| p["conversation_id"] == conv_id)
         .cloned()
         .collect();
+    // a Claude Code turn idle while a workflow runs: a message goes straight in
+    let waiting = st.cc_ctl.lock().get(conv_id).is_some_and(|c| c.waiting);
     Ok(json!({
         "conversation": conv,
         "turns": turns,
         "running": running,
+        "waiting": waiting,
         "pending_permissions": pending,
     }))
 }
