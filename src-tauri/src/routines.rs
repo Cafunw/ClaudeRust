@@ -197,7 +197,7 @@ mod tests {
     fn interval_and_daily_schedules() {
         let r = routine(Schedule::Interval { minutes: 30 });
         assert_eq!(next_run(&r), Some(1_000_000 + 30 * 60_000));
-        assert_eq!(due(&[r.clone()], 1_000_000 + 30 * 60_000).len(), 1);
+        assert_eq!(due(std::slice::from_ref(&r), 1_000_000 + 30 * 60_000).len(), 1);
         assert!(due(&[r], 1_000_000).is_empty());
         // daily at 09:30 → the next 09:30 after a moment
         let base = Local.with_ymd_and_hms(2026, 11, 20, 10, 0, 0).unwrap().timestamp_millis(); // Friday

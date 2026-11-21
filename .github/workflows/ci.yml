@@ -32,7 +32,7 @@ jobs:
         timeout-minutes: 10
         run: cargo test -p clauderust --lib -- --test-threads=2
       - name: Clippy
-        run: cargo clippy -p clauderust --lib -- -D warnings
+        run: cargo clippy -p clauderust --all-targets -- -D warnings
       - name: Check UI modules parse
         if: runner.os == 'Linux'
         run: for f in ui/js/*.js ui/js/panes/*.js; do node --experimental-default-type=module --check "$f"; done

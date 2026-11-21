@@ -173,8 +173,7 @@ mod tests {
     use super::*;
     #[test]
     fn chat_prompt_contains_parts() {
-        let mut st = Settings::default();
-        st.nickname = "Ada".into();
+        let st = Settings { nickname: "Ada".into(), ..Default::default() };
         let sys = chat_system(&ChatPromptInput {
             settings: &st,
             date: "Friday, November 20, 2026",
