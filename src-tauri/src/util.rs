@@ -130,7 +130,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file path", path.display())))?
         .to_string_lossy()
         .to_string();
-    let perms = match std::fs::metadata(&target) {
+    let existing = match std::fs::metadata(&target) {
         Ok(m) if m.is_dir() => {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is a folder", target.display())));
         }
@@ -138,30 +138,53 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             // a file we may not write stays as it is (a plain write would
             // fail too; the rename alone would get past a read-only file)
             let f = std::fs::OpenOptions::new().write(true).open(&target)?;
-            // Replacing the file would make it a different one: its other
-            // hard links would keep the old text, and a file someone else
-            // owns (writable through its group) would become ours. Those
-            // are written in place, as a plain write does.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                // SAFETY: geteuid has no preconditions and can't fail
-                if m.nlink() > 1 || m.uid() != unsafe { libc::geteuid() } {
-                    let mut f = f;
-                    f.set_len(0)?;
-                    f.write_all(bytes)?;
-                    return f.sync_all();
-                }
-            }
-            drop(f);
-            Some(m.permissions())
+            Some((m, f))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
+    // Replacing the file would make it a different one: its other hard
+    // links would keep the old text, and a file someone else owns
+    // (writable through its group) would become ours. Those are written in
+    // place, as a plain write does.
+    #[cfg(unix)]
+    let in_place = |f: &std::fs::File| {
+        let mut f = f;
+        f.set_len(0)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    };
+    #[cfg(unix)]
+    if let Some((m, f)) = &existing {
+        if std::os::unix::fs::MetadataExt::nlink(m) > 1 {
+            return in_place(f);
+        }
+    }
     let tmp = dir.join(format!(".{name}.{}.tmp", &new_id()[..8]));
+    let created = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+    #[cfg(unix)]
+    if let Some((m, f)) = &existing {
+        use std::os::unix::fs::MetadataExt;
+        // our (effective) uid: the temporary file's, which this process just
+        // made (or, when none can be made here, a file's in the temp folder)
+        let ours = match &created {
+            Ok(t) => t.metadata().map(|t| t.uid()).ok(),
+            Err(_) => own_uid_from_temp_dir(),
+        };
+        if ours.is_some_and(|uid| uid != m.uid()) {
+            if created.is_ok() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            return in_place(f);
+        }
+    }
+    let mut tmp_file = created?;
+    let perms = existing.map(|(m, f)| {
+        drop(f);
+        m.permissions()
+    });
     let written = (|| {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let f = &mut tmp_file;
         f.write_all(bytes)?;
         if let Some(p) = &perms {
             f.set_permissions(p.clone())?;
@@ -178,6 +201,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = d.sync_all();
     }
     Ok(())
+}
+
+/// This process's effective uid, from the owner of a file it makes in the
+/// temp folder (`None` when it can't make one).
+#[cfg(unix)]
+fn own_uid_from_temp_dir() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let probe = std::env::temp_dir().join(format!(".clauderust-uid-{}", new_id()));
+    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).ok()?;
+    let uid = f.metadata().ok().map(|m| m.uid());
+    drop(f);
+    let _ = std::fs::remove_file(&probe);
+    uid
 }
 
 /// Rename `from` over `to`. On Windows a virus scanner or indexer briefly
@@ -378,6 +414,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "new");
         let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writes_keep_the_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tmp_dir("awo");
+        let f = d.join("theirs.txt");
+        std::fs::write(&f, "old").unwrap();
+        let mine = std::fs::metadata(&f).unwrap().uid();
+        assert_eq!(own_uid_from_temp_dir(), Some(mine));
+        // our own file is replaced (a new inode)
+        let ino = std::fs::metadata(&f).unwrap().ino();
+        write_atomic(&f, b"new").unwrap();
+        assert_ne!(std::fs::metadata(&f).unwrap().ino(), ino);
+        // someone else's (only root can make one): written in place
+        let other = mine + 4242;
+        if std::os::unix::fs::chown(&f, Some(other), None).is_ok() {
+            let ino = std::fs::metadata(&f).unwrap().ino();
+            write_atomic(&f, b"theirs, longer").unwrap();
+            let m = std::fs::metadata(&f).unwrap();
+            assert_eq!((m.uid(), m.ino()), (other, ino));
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "theirs, longer");
+            let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert_eq!(names.len(), 1, "no temporary file left: {names:?}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

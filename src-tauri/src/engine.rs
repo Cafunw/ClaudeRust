@@ -294,30 +294,31 @@ fn is_thinking(b: &Value) -> bool {
 /// - drop unsigned (interrupted) thinking, empty text, tool calls without a
 ///   result in the next message, and unpaired server tool calls.
 pub fn sanitize_assistant(content: &Value, answered: &HashSet<String>) -> Vec<Value> {
-    let blocks = content.as_array().cloned().unwrap_or_default();
+    // only the blocks kept are copied
+    let blocks: &[Value] = content.as_array().map(Vec::as_slice).unwrap_or_default();
     let last_fallback = blocks.iter().rposition(|b| b["type"] == "fallback");
-    let server_results: HashSet<String> = blocks
+    let server_results: HashSet<&str> = blocks
         .iter()
         .filter(|b| b["type"].as_str().map(|t| t.ends_with("_tool_result")).unwrap_or(false))
-        .filter_map(|b| b["tool_use_id"].as_str().map(|s| s.to_string()))
+        .filter_map(|b| b["tool_use_id"].as_str())
         .collect();
     let known = |t: &str| {
         matches!(t, "text" | "thinking" | "redacted_thinking" | "tool_use" | "server_tool_use" | "fallback" | "compaction")
             || t.ends_with("_tool_result")
     };
     let mut out = vec![];
-    for (i, b) in blocks.into_iter().enumerate() {
-        let t = b["type"].as_str().unwrap_or("").to_string();
+    for (i, b) in blocks.iter().enumerate() {
+        let t = b["type"].as_str().unwrap_or("");
         let before_fallback = last_fallback.map(|f| i < f).unwrap_or(false);
         if before_fallback {
-            match t.as_str() {
+            match t {
                 "thinking" | "redacted_thinking" | "tool_use" => continue,
                 "server_tool_use" if !server_results.contains(b["id"].as_str().unwrap_or("")) => continue,
                 x if !known(x) => continue,
                 _ => {}
             }
         }
-        match t.as_str() {
+        match t {
             "thinking" => {
                 if b["signature"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
                     continue;
@@ -344,7 +345,7 @@ pub fn sanitize_assistant(content: &Value, answered: &HashSet<String>) -> Vec<Va
                 }
             _ => {}
         }
-        out.push(b);
+        out.push(b.clone());
     }
     out
 }
@@ -361,7 +362,7 @@ fn tool_result_ids(m: &Message) -> HashSet<String> {
 
 /// Convert the stored branch into the API `messages` array.
 pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
-    let compacted = crate::compact::apply(path);
+    let compacted = crate::compact::sent(path);
     let path: &[Message] = &compacted;
     // Thinking blocks produced under a different system prompt / tool set must
     // go: remove the leading run of blocks up to the last mismatching one so
@@ -402,7 +403,7 @@ pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
                 }
                 blocks.push(json!({"type": "text", "text": "(no response)"}));
             }
-            out.push(json!({"role": "assistant", "content": blocks}));
+            out.push(api_message("assistant", blocks));
         } else {
             let mut content: Vec<Value> = match &m.content {
                 Value::Array(a) => a.clone(),
@@ -426,16 +427,16 @@ pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
             if content.is_empty() {
                 continue;
             }
-            out.push(json!({"role": "user", "content": content}));
+            out.push(api_message("user", content));
         }
     }
     // Merge consecutive messages with the same role.
-    let mut merged: Vec<Value> = vec![];
-    for m in out {
+    let mut merged: Vec<Value> = Vec::with_capacity(out.len());
+    for mut m in out {
         if let Some(last) = merged.last_mut() {
             if last["role"] == m["role"] {
-                if let (Some(a), Some(b)) = (last["content"].as_array_mut(), m["content"].as_array()) {
-                    a.extend(b.iter().cloned());
+                if let (Some(a), Some(b)) = (last["content"].as_array_mut(), m["content"].as_array_mut()) {
+                    a.append(b);
                     continue;
                 }
             }
@@ -443,6 +444,15 @@ pub fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
         merged.push(m);
     }
     merged
+}
+
+/// `{"role": role, "content": blocks}`, the blocks moved in (`json!` would
+/// copy them: they are the bulk of every request).
+fn api_message(role: &str, blocks: Vec<Value>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("role".into(), json!(role));
+    m.insert("content".into(), Value::Array(blocks));
+    Value::Object(m)
 }
 
 pub(crate) fn base_body(rc: &ReqCtx, settings: &Settings, conv: &Conversation, messages: Vec<Value>) -> (Value, Vec<String>) {
@@ -1953,6 +1963,208 @@ mod tests {
         assert_eq!(turn_budget(&c, &s), 0.0);
         c.options = json!({"budget_usd": null});
         assert_eq!(turn_budget(&c, &s), 2.0);
+    }
+
+    /// `build_messages` and `sanitize_assistant` as they were (verbatim),
+    /// before they stopped copying the conversation three times over.
+    mod before {
+        use super::super::{is_thinking, tool_result_ids, ReqCtx};
+        use crate::db::Message;
+        use crate::render;
+        use serde_json::{json, Value};
+        use std::collections::HashSet;
+
+        fn sanitize_assistant(content: &Value, answered: &HashSet<String>) -> Vec<Value> {
+            let blocks = content.as_array().cloned().unwrap_or_default();
+            let last_fallback = blocks.iter().rposition(|b| b["type"] == "fallback");
+            let server_results: HashSet<String> = blocks
+                .iter()
+                .filter(|b| b["type"].as_str().map(|t| t.ends_with("_tool_result")).unwrap_or(false))
+                .filter_map(|b| b["tool_use_id"].as_str().map(|s| s.to_string()))
+                .collect();
+            let known = |t: &str| {
+                matches!(t, "text" | "thinking" | "redacted_thinking" | "tool_use" | "server_tool_use" | "fallback" | "compaction")
+                    || t.ends_with("_tool_result")
+            };
+            let mut out = vec![];
+            for (i, b) in blocks.into_iter().enumerate() {
+                let t = b["type"].as_str().unwrap_or("").to_string();
+                let before_fallback = last_fallback.map(|f| i < f).unwrap_or(false);
+                if before_fallback {
+                    match t.as_str() {
+                        "thinking" | "redacted_thinking" | "tool_use" => continue,
+                        "server_tool_use" if !server_results.contains(b["id"].as_str().unwrap_or("")) => continue,
+                        x if !known(x) => continue,
+                        _ => {}
+                    }
+                }
+                match t.as_str() {
+                    "thinking" => {
+                        if b["signature"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+                            continue;
+                        }
+                    }
+                    "redacted_thinking" => {
+                        if b["data"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+                            continue;
+                        }
+                    }
+                    "text" => {
+                        if b["text"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+                            continue;
+                        }
+                    }
+                    "tool_use" => {
+                        if !answered.contains(b["id"].as_str().unwrap_or("")) {
+                            continue;
+                        }
+                    }
+                    "server_tool_use"
+                        if !server_results.contains(b["id"].as_str().unwrap_or("")) => {
+                            continue;
+                        }
+                    _ => {}
+                }
+                out.push(b);
+            }
+            out
+        }
+        pub(super) fn build_messages(path: &[Message], rc: &ReqCtx) -> Vec<Value> {
+            let compacted = crate::compact::apply(path);
+            let path: &[Message] = &compacted;
+            // Thinking blocks produced under a different system prompt / tool set must
+            // go: remove the leading run of blocks up to the last mismatching one so
+            // the remaining blocks stay valid for preserved thinking.
+            let mut strip_upto: Option<usize> = None;
+            for (i, m) in path.iter().enumerate() {
+                if m.role == "assistant"
+                    && m.content.as_array().map(|a| a.iter().any(is_thinking)).unwrap_or(false)
+                    && m.meta["fingerprint"].as_str() != Some(rc.fingerprint.as_str())
+                {
+                    strip_upto = Some(i);
+                }
+            }
+            let mut out: Vec<Value> = vec![];
+            let mut kept_tool_ids: HashSet<String> = HashSet::new();
+            let mut first_user_done = false;
+            for (i, m) in path.iter().enumerate() {
+                if m.role == "assistant" {
+                    let answered = path
+                        .get(i + 1)
+                        .filter(|n| render::is_tool_result_msg(n))
+                        .map(tool_result_ids)
+                        .unwrap_or_default();
+                    let mut blocks = sanitize_assistant(&m.content, &answered);
+                    if strip_upto.map(|s| i <= s).unwrap_or(false) {
+                        blocks.retain(|b| !is_thinking(b));
+                    }
+                    kept_tool_ids = blocks
+                        .iter()
+                        .filter(|b| b["type"] == "tool_use")
+                        .filter_map(|b| b["id"].as_str().map(|s| s.to_string()))
+                        .collect();
+                    if blocks.is_empty() {
+                        // a failed response, or one paused at the spending limit
+                        // before its request was sent
+                        if !m.meta["error"].is_null() || m.meta["budget_stop"].is_object() {
+                            continue;
+                        }
+                        blocks.push(json!({"type": "text", "text": "(no response)"}));
+                    }
+                    out.push(json!({"role": "assistant", "content": blocks}));
+                } else {
+                    let mut content: Vec<Value> = match &m.content {
+                        Value::Array(a) => a.clone(),
+                        Value::String(s) => vec![json!({"type": "text", "text": s})],
+                        _ => vec![],
+                    };
+                    if render::is_tool_result_msg(m) {
+                        content.retain(|b| {
+                            b["type"] != "tool_result"
+                                || kept_tool_ids.contains(b["tool_use_id"].as_str().unwrap_or(""))
+                        });
+                    } else if !first_user_done {
+                        first_user_done = true;
+                        if !rc.prefix_blocks.is_empty() {
+                            let mut c = rc.prefix_blocks.clone();
+                            c.extend(content);
+                            content = c;
+                        }
+                    }
+                    content.retain(|b| !(b["type"] == "text" && b["text"].as_str().map(|s| s.is_empty()).unwrap_or(true)));
+                    if content.is_empty() {
+                        continue;
+                    }
+                    out.push(json!({"role": "user", "content": content}));
+                }
+            }
+            // Merge consecutive messages with the same role.
+            let mut merged: Vec<Value> = vec![];
+            for m in out {
+                if let Some(last) = merged.last_mut() {
+                    if last["role"] == m["role"] {
+                        if let (Some(a), Some(b)) = (last["content"].as_array_mut(), m["content"].as_array()) {
+                            a.extend(b.iter().cloned());
+                            continue;
+                        }
+                    }
+                }
+                merged.push(m);
+            }
+            merged
+        }
+    }
+
+    #[test]
+    fn request_messages_are_the_same_as_before() {
+        let mut path = vec![m("u0", "user", json!([{"type": "text", "text": "Fix the parser."}]), json!({}))];
+        path.extend(crate::render::fixture::turn_prefix(25));
+        // a refusal fallback, interrupted thinking, unanswered and server
+        // tool calls, an empty text, a failed response, a string content
+        path.push(m("a-x", "assistant", json!([
+            {"type": "thinking", "thinking": "x", "signature": ""},
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}},
+            {"type": "tool_use", "id": "gone", "name": "Bash", "input": {}},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {}},
+            {"type": "web_search_tool_result", "tool_use_id": "s2", "content": []},
+            {"type": "redacted_thinking", "data": "d"},
+            {"type": "text", "text": ""},
+            {"type": "mystery"}
+        ]), json!({"fingerprint": "other"})));
+        path.push(m("u-x", "user", json!("plain string content"), json!({})));
+        path.push(m("a-y", "assistant", json!([]), json!({"error": {"message": "x"}})));
+        path.push(m("u-y", "user", json!([{"type": "text", "text": ""}, {"type": "text", "text": "again"}]), json!({})));
+        let mut compacted = path.clone();
+        compacted[10].meta["compact_summary"] = json!("what happened before");
+        for fp in ["fp", "other"] {
+            let mut r = rc(fp);
+            for p in [&path, &compacted] {
+                let want = serde_json::to_string(&before::build_messages(p, &r)).unwrap();
+                assert_eq!(serde_json::to_string(&build_messages(p, &r)).unwrap(), want);
+                r.prefix_blocks.clear();
+                let want = serde_json::to_string(&before::build_messages(p, &r)).unwrap();
+                assert_eq!(serde_json::to_string(&build_messages(p, &r)).unwrap(), want);
+            }
+        }
+    }
+
+    /// Time the request messages built at each step of an agent turn, from
+    /// a conversation of 200 tool calls (a few KB of output each).
+    #[test]
+    #[ignore]
+    fn bench_build_messages() {
+        let mut path = vec![m("u0", "user", json!([{"type": "text", "text": "Fix the parser."}]), json!({}))];
+        path.extend(crate::render::fixture::turn_prefix(200));
+        let r = rc("fp");
+        let _ = build_messages(&path, &r);
+        let n = 50;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(build_messages(&path, &r));
+        }
+        let bytes = serde_json::to_string(&build_messages(&path, &r)).unwrap().len();
+        eprintln!("build_messages: {:.2} ms per step ({} KB of messages)", t0.elapsed().as_secs_f64() * 1000.0 / n as f64, bytes / 1024);
     }
 
     /// Each streaming update renders the turn byte-for-byte as before (when

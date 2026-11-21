@@ -29,8 +29,14 @@ pub fn start_index(path: &[Message]) -> Option<usize> {
 /// The path as sent to the model: messages before the last compaction point
 /// dropped, its summary put in front of that message.
 pub fn apply(path: &[Message]) -> Vec<Message> {
+    sent(path).into_owned()
+}
+
+/// `apply` without copying the path when nothing was compacted (each step of
+/// a turn builds its request from the whole conversation).
+pub fn sent(path: &[Message]) -> std::borrow::Cow<'_, [Message]> {
     match start_index(path) {
-        None => path.to_vec(),
+        None => std::borrow::Cow::Borrowed(path),
         Some(i) => {
             let mut v = path[i..].to_vec();
             let first = &mut v[0];
@@ -38,7 +44,7 @@ pub fn apply(path: &[Message]) -> Vec<Message> {
             let mut content = vec![json!({"type": "text", "text": format!("{CONTINUATION_PREFIX}<summary>\n{summary}\n</summary>")})];
             content.extend(first.content.as_array().cloned().unwrap_or_default());
             first.content = Value::Array(content);
-            v
+            std::borrow::Cow::Owned(v)
         }
     }
 }
