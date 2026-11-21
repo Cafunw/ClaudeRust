@@ -32,8 +32,14 @@ function composerInitial(conv) {
   };
 }
 
+// the latest open request wins: a slow load of a big conversation must not
+// replace the one opened after it
+let openSeq = 0;
+
 export async function openConversation(id, { focus = true } = {}) {
+  const seq = ++openSeq;
   const data = await call('get_conversation', { id });
+  if (seq !== openSeq) return;
   const conv = data.conversation;
   store.codeRoot = conv.kind === 'code' ? conv.cwd : null;
   emit('conversation-opened', { id, kind: conv.kind });
@@ -506,20 +512,29 @@ function startEdit(el, turn, text) {
   ta.style.height = Math.min(ta.scrollHeight + 4, window.innerHeight * 0.5) + 'px';
   ta.focus();
   const cancel = () => renderUserTurn(el, turn);
+  let saving = false;
+  const saveBtn = box.querySelector('[data-a=save]');
   const save = async () => {
     const v = ta.value.trim();
-    if (!v) return;
+    // once: a double click or a held Enter would send the edit twice
+    if (!v || saving) return;
+    saving = true;
+    saveBtn.disabled = true;
     try {
       await call('send_message', { req: { conversation_id: cur.id, text: v, edit: true, parent_id: turn.parent_id || '' } });
       await reload();
       emit('conversations-changed');
-    } catch (e) { errorToast(e); }
+    } catch (e) {
+      errorToast(e);
+      saving = false;
+      saveBtn.disabled = false;
+    }
   };
   box.querySelector('[data-a=cancel]').onclick = cancel;
   box.querySelector('[data-a=save]').onclick = save;
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); save(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.repeat) { e.preventDefault(); save(); }
   });
 }
 
@@ -848,6 +863,7 @@ function showPermission(p) {
 }
 
 export function closeCurrent() {
+  openSeq++; // a load still under way is for a view that's gone
   if (cur && cur.ro) cur.ro.disconnect();
   cur = null;
 }

@@ -3,7 +3,7 @@
 // expand into a prompt.
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { esc, modal } from './util.js';
+import { esc, modal, toast } from './util.js';
 
 const builtins = [];
 let hashHandler = null;
@@ -54,11 +54,20 @@ export function parse(text) {
  * built-in ran, { prompt } when the text should be sent (possibly
  * expanded), or null when it isn't a command.
  */
+/** Commands that act on an existing session's state. */
+const SESSION_ONLY = new Set(['compact', 'context', 'cost', 'budget', 'clear', 'hooks', 'memory', 'todos', 'watch']);
+
 export async function handle(text, ctx) {
   const p = parse(text);
   if (!p) return null;
   const b = builtinCommands(ctx).find((c) => c.name === p.name);
   if (b) {
+    // a command that works on a session, run before there is one (the Code
+    // page's box): keep what was typed and say why nothing happens
+    if (SESSION_ONLY.has(b.name) && !ctx.conversationId) {
+      toast(t('cmd_needs_session', { cmd: `/${p.name}` }));
+      return { keep: true };
+    }
     const r = await b.run(p.args, ctx);
     if (typeof r === 'string') return { prompt: r };
     // false: the command failed; keep what was typed

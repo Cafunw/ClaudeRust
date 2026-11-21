@@ -1,5 +1,6 @@
 // UI strings: English and Turkish.
 const en = {
+  cmd_needs_session: "{cmd} works in a session: send a first message to start one.",
   invalid_number: "Enter a whole number.",
   oss_title: "Open-source licenses",
   oss_d: "ClaudeRust is MIT-licensed and includes open-source libraries under their own licenses.",
@@ -594,6 +595,7 @@ const en = {
 };
 
 const tr = {
+  cmd_needs_session: "{cmd} bir oturum içinde çalışır: başlatmak için önce bir mesaj gönderin.",
   invalid_number: "Bir tam sayı girin.",
   oss_title: "Açık kaynak lisansları",
   oss_d: "ClaudeRust MIT lisanslıdır ve kendi lisanslarıyla açık kaynak kütüphaneler içerir.",

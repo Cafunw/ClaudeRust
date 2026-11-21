@@ -149,14 +149,22 @@ export function createComposer(opts) {
     renderAttachments();
   }
 
+  // the largest attachment the backend takes (text, before its digest);
+  // checked before reading the whole file into the window
+  const MAX_ATTACHMENT = 40 * 1024 * 1024;
+
   async function addFile(file, nameOverride) {
+    if (file.size > MAX_ATTACHMENT) { errorToast(new Error(`${t('file_too_large')}: ${file.name || ''}`)); return; }
     const ph = { name: nameOverride || file.name || 'file', loading: true, size: file.size };
     attachments.push(ph);
     renderAttachments();
     try {
       const data = await fileToBase64(file);
       const a = await call('stage_bytes', { name: ph.name, data });
-      attachments[attachments.indexOf(ph)] = a;
+      const at = attachments.indexOf(ph);
+      // removed while it was loading: drop it in the backend too
+      if (at === -1) { call('unstage', { id: a.id }).catch(() => {}); return; }
+      attachments[at] = a;
     } catch (e) {
       attachments = attachments.filter((x) => x !== ph);
       errorToast(e);

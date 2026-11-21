@@ -2350,8 +2350,13 @@ pub async fn improve_prompt(state: St<'_>, text: String, code: bool) -> AppResul
 
 /// A pull request's details and diff (for `/review <number or URL>`).
 #[tauri::command]
-pub async fn pr_fetch(state: St<'_>, conversation_id: String, pr: String) -> AppResult<Value> {
-    let root = session_repo(&state, &conversation_id).await?;
+pub async fn pr_fetch(state: St<'_>, conversation_id: Option<String>, cwd: Option<String>, pr: String) -> AppResult<Value> {
+    // from a session, or from the Code page's folder before a session exists
+    let root = match (conversation_id.filter(|c| !c.is_empty()), cwd.filter(|c| !c.is_empty())) {
+        (Some(c), _) => session_repo(&state, &c).await?,
+        (None, Some(dir)) => crate::gitops::repo_root(std::path::Path::new(&dir)).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?,
+        (None, None) => return Err(AppError::msg("Choose a folder first.")),
+    };
     crate::pullrequest::fetch(&root, &pr).await
 }
 

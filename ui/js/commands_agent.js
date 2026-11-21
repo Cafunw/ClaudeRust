@@ -45,7 +45,7 @@ registerCommand({
     if (/^#?\d+$/.test(ref || '') || /^https?:\/\/\S+\/(pull|merge_requests)\/\d+\S*$/.test(ref || '')) {
       const focus = focusWords.join(' ');
       try {
-        const pr = await call('pr_fetch', { conversationId: ctx.conversationId, pr: ref });
+        const pr = await call('pr_fetch', { conversationId: ctx.conversationId || null, cwd: ctx.cwd || null, pr: ref });
         const att = await call('stage_text', { name: `PR-${pr.number}.diff`, text: pr.diff || '' });
         return {
           prompt: t('review_pr_p', {

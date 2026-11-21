@@ -164,12 +164,15 @@ function accountMenu(anchor) {
 export async function refreshSidebar() {
   try {
     store.conversations = await call('list_conversations', {});
+    // turns already running (e.g. after the window was reloaded): the
+    // running/finished events only cover turns that start from now on
+    for (const c of store.conversations) if (c.running) store.running.add(c.id);
   } catch (e) { console.error(e); }
   renderLists();
 }
 
 function chatLink(c) {
-  const running = store.running.has(c.id) || c.running && store.running.has(c.id);
+  const running = store.running.has(c.id);
   const waiting = [...store.permissions.values()].some((p) => p.conversation_id === c.id);
   const folder = c.kind === 'code' && c.cwd ? c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd : '';
   const a = h(`<button class="chat-link ${folder ? 'two' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
