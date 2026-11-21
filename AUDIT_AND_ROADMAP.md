@@ -323,3 +323,34 @@ Four read-only hunter agents audited the code at a386bb7: crashes and memory, co
 - No `user_version` check: a database written by a newer version isn't refused by an older one.
 - Files ignored by git that a session created in its worktree (an `.env`) aren't saved when the worktree is removed.
 - Windows-only paths (ConPTY exit, `taskkill`, PowerShell encoding) are compiled, linted and unit-tested on CI, not tried on a Windows machine.
+
+## Performance pass (four optimizer agents, one QA agent) — no behaviour change
+
+Four agents with separate files (Rust memory/CPU, async runtime and I/O, IPC and build, WebView), then an independent QA agent. Before/after numbers are from the same harness on the same machine: a debug build in the app with a mock API streaming one agentic turn of 25 tool calls (~3 KB output each) and a long Markdown answer; release builds for size and idle memory.
+
+| Measure | Before (7b524dd) | After |
+|---|---|---|
+| `turn` event data for that turn | 22.2–22.4 MB (≈200 full turns, up to 218 kB each) | 1.0–1.2 MB (keyframe ≥ 1/s, deltas of ~1.4 kB) |
+| Backend CPU for the turn (debug) | 4.0–4.4 s | 2.2–2.4 s |
+| WebView CPU for the turn (Xvfb, software rendering) | 12.5–13.1 s | 10.5 s |
+| Streamed render per update, 40 tool calls (release) | 14 ms (text with code) | 1.1 ms; allocations 18,760 → 961, 4.9 → 0.8 MB |
+| `get_conversation` calls per turn | 5 | 3 (+2 `conversation_meta`, no rendering) |
+| Storing an answer (insert + search index, 191 MB DB) | 22.8 ms | 0.1 ms |
+| A query during heavy reads (history, usage) | 66 ms avg, 232 ms worst | 0.1 ms avg, ≤1.5 ms worst |
+| New API request on a fresh client (local, keep-alive) | 2.7 ms, new connection each | 24–38 µs, one connection |
+| Release binary | 22,583,576 B | 23,110,168 B (+2.3%) |
+| Idle memory, release, 15 s after start | 481–488 MB total, main 152–160 MB | 481–493 MB total, main ~163 MB |
+
+**Rust (memory/CPU):** the live renderer keeps finished messages of a turn rendered and adds only the reply on each update (byte-identical output, tested against the old renderer); open code blocks are highlighted from where the last update stopped; partial texts stay out of the render caches; no per-tick clones of the content; request building borrows the path; the conversation view finds siblings through an index (quadratic before); the model catalog is built once; streamed text grows in place (it was copied on every delta); `write_atomic` no longer uses `unsafe`.
+
+**Async runtime and I/O:** one shared HTTP client (rebuilt every 60 s so proxy/certificate changes still apply) instead of one per request; a second, read-only SQLite connection for long scans; search-index rows replaced by rowid; prepared-statement cache; heavy commands (rendering a conversation, attachments, extensions, full scans, diffs, permission previews) run on the blocking pool; workers no longer wait for the login shell's PATH.
+
+**IPC and build:** `turn` events are keyframes and deltas (`turnstream.rs` / `turnstream.js`, the UI still gets the full turn); `conversation_meta` for title/option refreshes; release profile `"s"` with opt-level 3 for the hot crates (syntect, regex, pulldown-cmark, sha2…: markdown and highlighting ~20% faster for +221 kB); `crate-type = ["rlib"]` (mobile-only library types dropped); `anyhow`, `once_cell`, tokio's unused feature and syntect's duplicate syntaxes dropped.
+
+**WebView:** pane refreshes coalesced (a burst of 12 `files-changed`: 12 → 1 call), unchanged lists and turns not rebuilt, part comparison without `JSON.stringify`, endless animations paused while the window is hidden, timers idle while hidden, a leaked menu listener that could block ↑/↓ in the message box fixed.
+
+**Decided against, with numbers:**
+- `panic = "abort"`: turns run under `catch_unwind` and tokio isolates panicking tasks; abort would turn a failed turn into a crash.
+- `opt-level = "z"`: 21,470,488 B (−7.1%), but JSON serialisation and turn encoding ~2× slower and the live render +8%; dependencies at `"z"` with the app crate at `"s"` came out at 29.4 MB.
+
+**Left for later:** in this test setup (no GPU), half of the WebView's CPU while a reply streams is repainting endless animations (spinner, streaming mark); with GPU compositing these are cheap, not measured here. The Claude Code engine still re-renders its whole turn per update (the built-in engine's prefix cache could be reused). reqwest 0.12 and 0.13 are both linked (the updater uses 0.13).
