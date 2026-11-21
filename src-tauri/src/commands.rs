@@ -1966,6 +1966,16 @@ pub async fn commit_message_suggest(state: St<'_>, conversation_id: String) -> A
     Ok(if text.is_empty() { fallback } else { text })
 }
 
+/// Secrets in the session's uncommitted changes (added lines only).
+#[tauri::command]
+pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Value> {
+    let root = session_repo(&state, &conversation_id).await?;
+    // new files only show in the diff once git knows about them
+    let _ = crate::gitops::git(&root, &["add", "-A", "--intent-to-add"]).await;
+    let diff = crate::gitops::git(&root, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).await.unwrap_or_default();
+    Ok(serde_json::to_value(crate::secrets::scan_diff(&diff))?)
+}
+
 /// Commit all changes of the session (and optionally push).
 #[tauri::command]
 pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, message: String, push: bool) -> AppResult<String> {

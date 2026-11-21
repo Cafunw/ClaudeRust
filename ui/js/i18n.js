@@ -1,5 +1,7 @@
 // UI strings: English and Turkish.
 const en = {
+  secrets_found: "This commit looks like it contains {n} secret(s):",
+  secrets_anyway: "Commit anyway (I've checked these aren't real secrets)",
   scripts_title: "Project scripts",
   scripts_run: "Run in the terminal",
   scripts_fix: "Ask Claude to run it and fix what fails",
@@ -518,6 +520,8 @@ const en = {
 };
 
 const tr = {
+  secrets_found: "Bu commit {n} gizli bilgi içeriyor gibi görünüyor:",
+  secrets_anyway: "Yine de commit et (bunların gerçek gizli bilgi olmadığını kontrol ettim)",
   scripts_title: "Proje betikleri",
   scripts_run: "Terminalde çalıştır",
   scripts_fix: "Claude çalıştırsın ve hataları düzeltsin",
