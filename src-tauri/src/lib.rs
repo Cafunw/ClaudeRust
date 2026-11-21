@@ -360,6 +360,7 @@ pub fn run() {
             commands::list_conversations,
             commands::create_conversation,
             commands::get_conversation,
+            commands::conversation_meta,
             commands::send_message,
             commands::regenerate,
             commands::switch_branch,

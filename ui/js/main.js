@@ -184,14 +184,15 @@ function bindBackend() {
     refreshSidebarSoon();
     const c = chat.current();
     if (c && c.id === p.conversation_id) {
-      chat.fetchConversation(c.id).then((d) => {
+      // the record only (title, options), not the rendered conversation
+      call('conversation_meta', { id: c.id }).then((conv) => {
         const cc = chat.current();
         if (!cc || cc.id !== c.id) return;
-        cc.conv = d.conversation;
-        document.title = d.conversation.title || 'ClaudeRust';
+        cc.conv = conv;
+        document.title = conv.title || 'ClaudeRust';
         const tt = document.querySelector('.topbar .title-btn .t');
-        if (tt) tt.textContent = d.conversation.title || t('new_chat');
-        if (cc.composer && d.conversation.options && d.conversation.options.permission_mode) cc.composer.setState({ permission_mode: d.conversation.options.permission_mode });
+        if (tt) tt.textContent = conv.title || t('new_chat');
+        if (cc.composer && conv.options && conv.options.permission_mode) cc.composer.setState({ permission_mode: conv.options.permission_mode });
       }).catch(() => {});
     }
   });

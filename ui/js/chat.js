@@ -253,8 +253,11 @@ async function exportConv(c, fmt) {
 async function refreshConversationMeta() {
   if (!cur) return;
   try {
-    const data = await fetchConversation(cur.id);
-    cur.conv = data.conversation;
+    const id = cur.id;
+    // the record only (title, options), not the rendered conversation
+    const conv = await call('conversation_meta', { id });
+    if (!cur || cur.id !== id) return;
+    cur.conv = conv;
     renderTopbar();
     document.title = cur.conv.title || 'ClaudeRust';
   } catch { /* ignore */ }

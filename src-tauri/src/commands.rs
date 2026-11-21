@@ -382,6 +382,14 @@ pub async fn get_conversation(state: St<'_>, id: String) -> AppResult<Value> {
     off_runtime(async move { view::conversation_view(&st, &id).await }).await
 }
 
+/// A conversation's stored record (title, options…) without rendering its
+/// messages: what the UI needs on `conversation-updated`, and the same
+/// object `get_conversation` returns as `conversation`.
+#[tauri::command]
+pub async fn conversation_meta(state: St<'_>, id: String) -> AppResult<crate::db::Conversation> {
+    state.db.conv_get(&id)
+}
+
 #[derive(Deserialize)]
 pub struct SendReq {
     pub conversation_id: Option<String>,
