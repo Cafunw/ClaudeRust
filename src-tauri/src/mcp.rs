@@ -47,7 +47,8 @@ enum Transport {
     Stdio {
         /// Lines to write to the server's stdin (a writer task owns the pipe).
         tx: tokio::sync::mpsc::UnboundedSender<String>,
-        child: Mutex<Option<tokio::process::Child>>,
+        // boxed: a Child is large on Windows (clippy::large_enum_variant)
+        child: Box<Mutex<Option<tokio::process::Child>>>,
         pending: Pending,
     },
     Http {
@@ -769,7 +770,7 @@ async fn connect(name: &str, conf: &Value) -> Result<Arc<McpServer>, (AppError, 
         }
         Transport::Stdio {
             tx,
-            child: Mutex::new(Some(child)),
+            child: Box::new(Mutex::new(Some(child))),
             pending,
         }
     };
