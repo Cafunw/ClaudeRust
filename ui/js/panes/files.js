@@ -30,6 +30,11 @@ async function mention(path, line) {
 
 const base = (p) => p.split('/').pop();
 
+async function emitNav(id) {
+  const { emit } = await import('../store.js');
+  emit('navigate', { name: 'chat', params: { id } });
+}
+
 async function drawTree(el, ctx) {
   const s = st(ctx.convId);
   el.innerHTML = '';
@@ -179,7 +184,16 @@ async function drawFile(el, ctx) {
     { label: t('fv_copy_path'), icon: 'copy', onClick: () => copyText(f.path).then(() => toast(t('copied'))) },
     { label: t('fv_copy_abs'), icon: 'copy', onClick: () => copyText(String(f.abs)).then(() => toast(t('copied'))) },
     { label: t('reveal'), icon: 'folder', onClick: () => call('reveal_path', { path: String(f.abs) }).catch(errorToast) },
-  ], { placement: 'bottom-end', width: 240 });
+    { sep: true },
+    { label: t('fv_sessions'), icon: 'chat', onClick: async () => {
+      let list = [];
+      try { list = await call('file_sessions', { conversationId: ctx.convId, path: f.path }); } catch (e) { errorToast(e); return; }
+      const anchor = head.querySelector('[data-a=more]');
+      showMenu(anchor, list.length
+        ? [{ header: t('fv_sessions') }, ...list.map((c) => ({ label: c.title || t('untitled'), sub: relTime(c.at), icon: 'chat', checked: c.id === ctx.convId, onClick: () => emitNav(c.id) }))]
+        : [{ label: t('fv_sessions_none'), disabled: true }], { placement: 'bottom-end', width: 300 });
+    } },
+  ], { placement: 'bottom-end', width: 260 });
   head.querySelector('[data-a=back]').onclick = () => { s.file = null; s.line = null; drawTree(el, ctx); };
   head.querySelector('[data-a=blame]').onclick = () => { s.blame = !s.blame; drawFile(el, ctx); };
   head.querySelector('[data-a=at]').onclick = () => mention(f.path);

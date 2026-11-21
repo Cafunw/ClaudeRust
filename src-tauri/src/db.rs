@@ -458,6 +458,43 @@ impl Db {
         Ok(out)
     }
 
+    /// Conversations whose answers wrote or edited the file at `abs` (Write /
+    /// Edit / MultiEdit tool calls), most recent first: `(id, title, at)`.
+    /// `rel` is the same file relative to `cwd` (tool calls use either; a
+    /// relative path only counts for conversations working in `cwd`).
+    pub fn conversations_editing(&self, abs: &str, rel: &str, cwd: &str, limit: usize) -> AppResult<Vec<(String, String, i64)>> {
+        // the relative path, as it appears inside stored JSON (both forms contain it)
+        let q = serde_json::to_string(rel)?;
+        let needle = q[1..q.len() - 1].to_string();
+        let c = self.conn.lock();
+        let mut st = c.prepare(
+            "SELECT m.conversation_id, c.title, m.created_at, m.content, coalesce(c.cwd, '') FROM messages m JOIN conversations c ON c.id = m.conversation_id
+             WHERE m.role = 'assistant' AND instr(m.content, ?1) > 0
+             ORDER BY m.created_at DESC LIMIT 400",
+        )?;
+        let rows = st.query_map([&needle], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?;
+        let mut out: Vec<(String, String, i64)> = Vec::new();
+        for (id, title, at, content, conv_cwd) in rows.flatten() {
+            let same_folder = conv_cwd.trim_end_matches('/') == cwd.trim_end_matches('/');
+            if out.iter().any(|(x, _, _)| *x == id) {
+                continue;
+            }
+            let Ok(Value::Array(blocks)) = serde_json::from_str::<Value>(&content) else { continue };
+            let edits = blocks.iter().any(|b| {
+                b["type"] == "tool_use"
+                    && matches!(b["name"].as_str(), Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
+                    && [b["input"]["file_path"].as_str(), b["input"]["notebook_path"].as_str()].into_iter().flatten().any(|p| p == abs || (p == rel && same_folder))
+            });
+            if edits {
+                out.push((id, title, at));
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Remove conversations whose import was cut off (app closed mid-import).
     pub fn delete_unfinished_imports(&self) -> AppResult<usize> {
         let c = self.conn.lock();
@@ -901,6 +938,27 @@ impl Db {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn conversations_that_edited_a_file() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.conv_create("code", "m", None, Some("/p"), &json!({})).unwrap();
+        let b = db.conv_create("code", "m", None, Some("/p"), &json!({})).unwrap();
+        let other = db.conv_create("code", "m", None, Some("/q"), &json!({})).unwrap();
+        let mk = |id: &str, conv: &str, content: Value, t: i64| Message { id: id.into(), conversation_id: conv.into(), parent_id: None, role: "assistant".into(), content, meta: json!({}), created_at: t };
+        db.msg_insert(&mk("6", &other.id, json!([{"type":"tool_use","id":"t","name":"Write","input":{"file_path":"src/x.rs","content":""}}]), 9)).unwrap();
+        db.msg_insert(&mk("1", &a.id, json!([{"type":"tool_use","id":"t","name":"Edit","input":{"file_path":"/p/src/x.rs","old_string":"a","new_string":"b"}}]), 1)).unwrap();
+        db.msg_insert(&mk("2", &b.id, json!([{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/p/src/x.rs"}}]), 2)).unwrap();
+        db.msg_insert(&mk("3", &b.id, json!([{"type":"tool_use","id":"t","name":"Write","input":{"file_path":"/p/src/x.rs.bak","content":""}}]), 3)).unwrap();
+        db.msg_insert(&mk("4", &a.id, json!([{"type":"tool_use","id":"t","name":"Write","input":{"file_path":"/p/src/x.rs","content":""}}]), 4)).unwrap();
+        db.msg_insert(&mk("5", &b.id, json!([{"type":"tool_use","id":"t","name":"Edit","input":{"file_path":"src/x.rs","old_string":"a","new_string":"b"}}]), 0)).unwrap();
+        let r = db.conversations_editing("/p/src/x.rs", "src/x.rs", "/p", 10).unwrap();
+        assert_eq!(r.len(), 2, "relative paths count too, but only in the same folder");
+        let r: Vec<_> = r.into_iter().filter(|x| x.0 == a.id).collect();
+        assert_eq!(r.len(), 1, "reads and other files don't count; one row per conversation");
+        assert_eq!(r[0].0, a.id);
+        assert_eq!(r[0].2, 4);
+    }
 
     #[test]
     fn prompt_history_dedupes_and_filters() {

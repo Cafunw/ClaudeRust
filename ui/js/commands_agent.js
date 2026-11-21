@@ -61,6 +61,13 @@ registerCommand({
 });
 
 registerCommand({
+  name: 'recap',
+  description: () => t('cmd_recap'),
+  hint: '[for whom / format]',
+  run: async (args) => t('recap_p') + (args && args.trim() ? `\n\n${t('recap_for', { what: args.trim() })}` : ''),
+});
+
+registerCommand({
   name: 'init',
   description: () => t('cmd_init'),
   kinds: ['code'],

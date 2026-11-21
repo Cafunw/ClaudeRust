@@ -1275,6 +1275,20 @@ pub async fn file_blame(state: St<'_>, conversation_id: String, path: String) ->
     Ok(crate::gitops::parse_blame(&out))
 }
 
+/// Conversations that edited a project file (Files viewer).
+#[tauri::command]
+pub async fn file_sessions(state: St<'_>, conversation_id: String, path: String) -> AppResult<Value> {
+    let st = state.inner().clone();
+    let Some(cwd) = root_of(&st, Some(&conversation_id), None) else { return Ok(json!([])) };
+    let rel = path.trim_start_matches('/').to_string();
+    let abs = cwd.join(&rel);
+    let dir = cwd.to_string_lossy().to_string();
+    let rows = tokio::task::spawn_blocking(move || st.db.conversations_editing(&abs.to_string_lossy(), &rel, &dir, 20))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    Ok(json!(rows.into_iter().map(|(id, title, at)| json!({"id": id, "title": title, "at": at})).collect::<Vec<_>>()))
+}
+
 /// One level of the project's file tree (for the Files pane).
 #[tauri::command]
 pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {

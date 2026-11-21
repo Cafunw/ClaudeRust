@@ -1,5 +1,10 @@
 // UI strings: English and Turkish.
 const en = {
+  fv_sessions: "Conversations that edited this file",
+  fv_sessions_none: "No conversation has edited this file.",
+  cmd_recap: "Summarize this session (for a teammate, a standup or a PR)",
+  recap_p: "Summarize this session so far for a teammate who wasn't here. In short Markdown: the goal; what was done (for code, each changed file with one line on why); decisions made and the reasons; anything unfinished, risky or untested; and suggested next steps. Only include what actually happened — don't invent details.",
+  recap_for: "Shape it for: {what}",
   branch_menu: "Switch or create a branch",
   branch_switch: "Switch branch",
   branch_new: "New branch…",
@@ -524,6 +529,11 @@ const en = {
 };
 
 const tr = {
+  fv_sessions: "Bu dosyayı düzenleyen sohbetler",
+  fv_sessions_none: "Bu dosyayı düzenleyen bir sohbet yok.",
+  cmd_recap: "Bu oturumu özetle (bir ekip arkadaşı, günlük toplantı ya da PR için)",
+  recap_p: "Bu oturumu burada olmayan bir ekip arkadaşı için özetle. Kısa Markdown ile: amaç; yapılanlar (kodda her değişen dosya ve neden değiştiğine dair bir satır); alınan kararlar ve gerekçeleri; bitmemiş, riskli ya da test edilmemiş noktalar; ve önerilen sonraki adımlar. Yalnızca gerçekten olanları yaz, ayrıntı uydurma.",
+  recap_for: "Şunun için biçimlendir: {what}",
   branch_menu: "Dal değiştir ya da oluştur",
   branch_switch: "Dal değiştir",
   branch_new: "Yeni dal…",
