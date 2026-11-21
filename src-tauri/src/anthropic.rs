@@ -565,13 +565,34 @@ fn append_str(b: &mut Map<String, Value>, key: &str, s: &str) {
     if s.is_empty() {
         return;
     }
-    let cur = b.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    b.insert(key.to_string(), Value::String(cur + s));
+    // in place: copying the text so far on every delta made a long block
+    // cost quadratic time while it streamed
+    match b.get_mut(key) {
+        Some(Value::String(cur)) => cur.push_str(s),
+        // missing, or not a string (an odd block from a server): start anew
+        _ => {
+            b.insert(key.to_string(), Value::String(s.to_string()));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_str_grows_in_place_and_replaces_odd_values() {
+        let mut b = Map::new();
+        append_str(&mut b, "text", "");
+        assert!(b.get("text").is_none(), "nothing added for an empty delta");
+        for piece in ["Hel", "lo, ", "", "world"] {
+            append_str(&mut b, "text", piece);
+        }
+        assert_eq!(b["text"], "Hello, world");
+        b.insert("thinking".into(), json!(42));
+        append_str(&mut b, "thinking", "ok");
+        assert_eq!(b["thinking"], "ok");
+    }
 
     #[test]
     fn sse_parse_and_accumulate() {
