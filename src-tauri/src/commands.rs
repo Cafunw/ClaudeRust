@@ -1186,7 +1186,8 @@ pub async fn term_open(app: AppHandle, state: St<'_>, conversation_id: String, c
 }
 
 #[tauri::command]
-pub async fn term_write(state: St<'_>, id: String, data: String) -> AppResult<()> {
+// synchronous (main thread, in order): keystrokes are only queued, never blocking
+pub fn term_write(state: St<'_>, id: String, data: String) -> AppResult<()> {
     state.terminals.write(&id, &data)
 }
 

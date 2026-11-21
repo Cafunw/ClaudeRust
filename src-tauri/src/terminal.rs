@@ -7,27 +7,41 @@
 use crate::error::{AppError, AppResult};
 use crate::util::new_id;
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 pub struct Term {
     pub id: String,
     pub conv_id: String,
     pub cwd: String,
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// `None` once the shell has ended or the terminal was closed (dropping
+    /// it closes the pseudo console, which ends the reader on Windows).
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    /// Keystrokes for the writer thread. Writing to a PTY blocks while the
+    /// program in it isn't reading, so it never happens on a command thread.
+    input: SyncSender<Vec<u8>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    pid: Option<u32>,
 }
 
 #[derive(Default)]
 pub struct Terminals {
     map: Mutex<HashMap<String, Arc<Term>>>,
 }
+
+/// Queued writes per terminal before typing is refused as "not reading".
+const INPUT_QUEUE: usize = 256;
+/// Output is sent to the UI at most this often, in pieces of at most this
+/// size, so a flood (`yes`, `cat` of a big file) doesn't swamp the window.
+const OUTPUT_EVERY: Duration = Duration::from_millis(16);
+const OUTPUT_MAX: usize = 64 * 1024;
 
 /// The user's interactive shell.
 fn default_shell() -> (String, Vec<String>) {
@@ -59,6 +73,39 @@ fn utf8_complete(buf: &[u8]) -> usize {
     }
 }
 
+/// Collect output chunks from `rx` into batches (one per `OUTPUT_EVERY`,
+/// at most `OUTPUT_MAX` bytes, cut at character boundaries) and hand each
+/// to `emit`, until the sender is gone.
+fn pump_output(rx: Receiver<Vec<u8>>, mut emit: impl FnMut(String)) {
+    let mut carry: Vec<u8> = Vec::new();
+    let mut open = true;
+    while open {
+        match rx.recv() {
+            Ok(b) => carry.extend_from_slice(&b),
+            Err(_) => break,
+        }
+        let deadline = Instant::now() + OUTPUT_EVERY;
+        while carry.len() < OUTPUT_MAX {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(b) => carry.extend_from_slice(&b),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    open = false;
+                    break;
+                }
+            }
+        }
+        let k = utf8_complete(&carry);
+        if k > 0 {
+            emit(String::from_utf8_lossy(&carry[..k]).into_owned());
+            carry.drain(..k);
+        }
+    }
+    if !carry.is_empty() {
+        emit(String::from_utf8_lossy(&carry).into_owned());
+    }
+}
+
 impl Terminals {
     pub fn open(&self, app: &AppHandle, conv_id: &str, cwd: &str, cols: u16, rows: u16) -> AppResult<Value> {
         let pty = native_pty_system();
@@ -75,44 +122,65 @@ impl Terminals {
         for k in crate::display::vars_we_set() {
             cmd.env_remove(k);
         }
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| AppError::msg(format!("Could not start {shell}: {e}")))?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| AppError::msg(e.to_string()))?;
-        let writer = pair.master.take_writer().map_err(|e| AppError::msg(e.to_string()))?;
+        let mut writer = pair.master.take_writer().map_err(|e| AppError::msg(e.to_string()))?;
         let id = format!("term_{}", &new_id()[..8]);
+        let (input, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
         let term = Arc::new(Term {
             id: id.clone(),
             conv_id: conv_id.to_string(),
             cwd: dir.clone(),
-            master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
-            child: Mutex::new(child),
+            master: Mutex::new(Some(pair.master)),
+            input,
+            killer: Mutex::new(child.clone_killer()),
+            pid: child.process_id(),
         });
         self.map.lock().insert(id.clone(), term.clone());
 
-        let app2 = app.clone();
-        let id2 = id.clone();
+        // keystrokes, in order; ends when the terminal is dropped or the PTY closes
+        std::thread::spawn(move || {
+            for data in input_rx {
+                if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        // output: the reader blocks on the PTY, the pump batches for the UI
+        let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
-            let mut carry: Vec<u8> = vec![];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        carry.extend_from_slice(&buf[..n]);
-                        let k = utf8_complete(&carry);
-                        if k > 0 {
-                            let text = String::from_utf8_lossy(&carry[..k]).to_string();
-                            carry.drain(..k);
-                            let _ = app2.emit("term-output", json!({"id": id2, "data": text}));
+                        if out_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
                         }
                     }
                 }
             }
-            let code = term.child.lock().wait().ok().map(|s| s.exit_code());
+        });
+        // the shell's end: drop the master (on Windows the reader only sees
+        // EOF once the pseudo console is closed), then report the exit code
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<Option<u32>>();
+        let waited = term.clone();
+        std::thread::spawn(move || {
+            let code = child.wait().ok().map(|s| s.exit_code());
+            waited.master.lock().take();
+            let _ = exit_tx.send(code);
+        });
+        let app2 = app.clone();
+        let id2 = id.clone();
+        std::thread::spawn(move || {
+            pump_output(out_rx, |text| {
+                let _ = app2.emit("term-output", json!({"id": id2, "data": text}));
+            });
+            let code = exit_rx.recv_timeout(Duration::from_secs(5)).ok().flatten();
             let _ = app2.emit("term-exit", json!({"id": id2, "code": code}));
         });
         Ok(json!({"id": id, "shell": shell, "cwd": dir}))
@@ -122,30 +190,36 @@ impl Terminals {
         self.map.lock().get(id).cloned().ok_or_else(|| AppError::msg("This terminal has closed."))
     }
 
+    /// Queue `data` for the terminal (never blocks: a program that isn't
+    /// reading its input fills the queue, and further typing is refused).
     pub fn write(&self, id: &str, data: &str) -> AppResult<()> {
         let t = self.get(id)?;
-        let mut w = t.writer.lock();
-        w.write_all(data.as_bytes())?;
-        w.flush()?;
-        Ok(())
+        t.input.try_send(data.as_bytes().to_vec()).map_err(|e| match e {
+            TrySendError::Full(_) => AppError::msg("The program in this terminal isn't reading input right now."),
+            TrySendError::Disconnected(_) => AppError::msg("This terminal has closed."),
+        })
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> AppResult<()> {
         let t = self.get(id)?;
-        let r = t.master.lock().resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 });
-        r.map_err(|e| AppError::msg(e.to_string()))
+        let master = t.master.lock();
+        let m = master.as_ref().ok_or_else(|| AppError::msg("This terminal has closed."))?;
+        m.resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 }).map_err(|e| AppError::msg(e.to_string()))
     }
 
     pub fn close(&self, id: &str) {
-        if let Some(t) = self.map.lock().remove(id) {
-            let mut child = t.child.lock();
+        // out of the map first: killing can take a moment, and the map lock
+        // shouldn't be held meanwhile
+        let removed = self.map.lock().remove(id);
+        if let Some(t) = removed {
             // hang up the whole job (background jobs started in the shell
             // too), like closing a terminal window
             #[cfg(unix)]
-            if let Some(pid) = child.process_id() {
+            if let Some(pid) = t.pid {
                 crate::codetools::signal_process_group(pid, libc::SIGHUP);
             }
-            let _ = child.kill();
+            let _ = t.killer.lock().kill();
+            t.master.lock().take();
         }
     }
 
@@ -183,6 +257,55 @@ mod tests {
         assert_eq!(utf8_complete(s), 3);
         assert_eq!(utf8_complete(&s[..2]), 1);
         assert_eq!(utf8_complete(&[0xff, b'a']), 2);
+    }
+
+    #[test]
+    fn output_is_batched_at_character_boundaries() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let e = "é".as_bytes().to_vec();
+        tx.send(b"a".to_vec()).unwrap();
+        tx.send(vec![e[0]]).unwrap(); // half of a character
+        tx.send(vec![e[1]]).unwrap();
+        tx.send(vec![b'x'; OUTPUT_MAX * 2]).unwrap();
+        drop(tx);
+        let mut got = Vec::new();
+        pump_output(rx, |t| got.push(t));
+        assert_eq!(got.concat(), format!("aé{}", "x".repeat(OUTPUT_MAX * 2)));
+        assert!(got.len() <= 3, "batched, not one event per chunk: {}", got.len());
+        assert!(got.iter().all(|t| !t.contains('\u{fffd}')));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_never_block_on_a_program_that_isnt_reading() {
+        let terms = Terminals::default();
+        let pty = native_pty_system();
+        let pair = pty.openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut writer = pair.master.take_writer().unwrap();
+        let (input, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
+        std::thread::spawn(move || {
+            for d in input_rx {
+                if writer.write_all(&d).is_err() {
+                    break;
+                }
+            }
+        });
+        let t = Arc::new(Term { id: "t".into(), conv_id: "c".into(), cwd: ".".into(), master: Mutex::new(Some(pair.master)), input, killer: Mutex::new(child.clone_killer()), pid: child.process_id() });
+        terms.map.lock().insert("t".into(), t);
+        // far more than a PTY buffers: every call returns at once, and once the
+        // queue is full typing is refused instead of hanging the caller
+        let started = Instant::now();
+        let chunk = "x".repeat(4096);
+        let results: Vec<_> = (0..INPUT_QUEUE + 200).map(|_| terms.write("t", &chunk)).collect();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(results.iter().any(|r| r.as_ref().is_err_and(|e| e.to_string().contains("isn't reading"))));
+        terms.close("t");
+        let _ = child.wait();
+        assert!(terms.write("t", "x").is_err(), "closed");
     }
 
     #[cfg(unix)]
