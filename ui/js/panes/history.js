@@ -6,6 +6,8 @@ import { call, on } from '../api.js';
 import { h, esc, errorToast, confirmDialog, toast, relTime, debounce, snapshot, sameSnapshot } from '../util.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
 import { parseUnified } from './changes.js';
+import { keyRows } from './rows.js';
+import { errorText } from '../neterr.js';
 
 const open = new Map(); // convId -> sha
 // A commit's contents can't change: what git_show gave for one is kept
@@ -20,6 +22,7 @@ function remember(key, d) {
 function diffTable(text) {
   // the first line is the "a/x b/x" header of the file section
   const rows = parseUnified(String(text || '').split('\n').slice(1).join('\n'));
+  if (rows.some((r) => r.type === 'binary')) return `<div class="muted" style="padding:10px">${esc(t('files_binary'))}</div>`;
   return `<table class="dv"><tbody>${rows.map((r) => r.type === 'hunk'
     ? `<tr class="dv-hunk"><td colspan="3">${esc(r.text)}</td></tr>`
     : `<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`).join('')}</tbody></table>`;
@@ -45,8 +48,8 @@ function ensureHead(el, ctx) {
   if (el.querySelector('.hist-head')) return;
   const s = searchFor(ctx.convId);
   el.innerHTML = '';
-  const head = h(`<div class="hist-head"><div class="pane-head"><span class="branch">${icon('code', 13)} <span class="b"></span></span><span class="muted cnt"></span><div class="grow"></div><button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>
-    <div class="hist-search"><input class="input sm" placeholder="${esc(t('hist_search_ph'))}" spellcheck="false"><select class="select sm">
+  const head = h(`<div class="hist-head"><div class="pane-head"><span class="branch">${icon('code', 13)} <span class="b"></span></span><span class="muted cnt"></span><div class="grow"></div><button class="icon-btn" data-a="refresh" title="${t('refresh')}" aria-label="${esc(t('refresh'))}">${icon('refreshCw', 14)}</button></div>
+    <div class="hist-search"><input class="input sm" placeholder="${esc(t('hist_search_ph'))}" aria-label="${esc(t('hist_search_ph'))}" spellcheck="false"><select class="select sm" aria-label="${esc(t('hist_search_by'))}">
       <option value="message">${esc(t('hist_mode_message'))}</option><option value="author">${esc(t('hist_mode_author'))}</option><option value="code">${esc(t('hist_mode_code'))}</option></select></div></div>`);
   el.append(head, h('<div class="hist-list"></div>'));
   const input = head.querySelector('input');
@@ -65,7 +68,7 @@ async function draw(el, ctx) {
   const seq = ++s.seq;
   const list = el.querySelector('.hist-list');
   let data;
-  try { data = await call('git_log', { conversationId: ctx.convId, query: s.q.trim() || null, mode: s.mode }); } catch (e) { list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; list.__sig = null; return; }
+  try { data = await call('git_log', { conversationId: ctx.convId, query: s.q.trim() || null, mode: s.mode }); } catch (e) { list.innerHTML = `<div class="pane-empty">${esc(errorText(e))}</div>`; list.__sig = null; return; }
   if (seq !== s.seq) return; // a newer search is on its way
   // the same log, open commit and day (dates are shown relative to today):
   // what's shown is already this, so the list (and its scroll position and
@@ -80,7 +83,7 @@ async function draw(el, ctx) {
   for (const c of data.commits) {
     const isOpen = open.get(ctx.convId) === c.sha;
     const row = h(`<div class="hist-row ${isOpen ? 'on' : ''}">
-      <div class="hist-line"><code class="sha">${esc(c.short)}</code><div class="hist-main"><div class="hist-subj ellipsis">${esc(c.subject)}</div><div class="muted small">${esc(c.author)} · ${esc(relTime(c.time))}${c.refs ? ` · <span class="refs">${esc(c.refs)}</span>` : ''}</div></div>
+      <div class="hist-line" data-k="${esc(c.sha)}" aria-expanded="${isOpen}"><code class="sha">${esc(c.short)}</code><div class="hist-main"><div class="hist-subj ellipsis">${esc(c.subject)}</div><div class="muted small">${esc(c.author)} · ${esc(relTime(c.time))}${c.refs ? ` · <span class="refs">${esc(c.refs)}</span>` : ''}</div></div>
       <button class="icon-btn sm" data-a="explain" title="${t('hist_explain')}">${icon('sparkle', 13)}</button>
       <button class="icon-btn sm" data-a="revert" title="${t('hist_revert')}">${icon('retry', 13)}</button></div>
       <div class="hist-body"></div></div>`);
@@ -101,10 +104,11 @@ async function draw(el, ctx) {
       (shown.has(key) ? Promise.resolve(shown.get(key)) : call('git_show', { conversationId: ctx.convId, sha: c.sha })).then((d) => {
         remember(key, d);
         body.innerHTML = `${d.message && d.message !== c.subject ? `<pre class="hist-msg">${esc(d.message)}</pre>` : ''}${d.files.map((f, i) => `<details class="hist-file" ${i < 3 ? 'open' : ''}><summary><code>${esc(f.path)}</code> <span class="diff-stat"><span class="a">+${f.added}</span> <span class="d">-${f.removed}</span></span></summary><div class="diff-view">${diffTable(f.diff)}</div></details>`).join('')}`;
-      }).catch((e) => { body.textContent = e.message || String(e); list.__sig = null; /* tried again next time */ });
+      }).catch((e) => { body.textContent = errorText(e); list.__sig = null; /* tried again next time */ });
     }
     list.appendChild(row);
   }
+  keyRows(list, '.hist-line');
 }
 
 registerPane({

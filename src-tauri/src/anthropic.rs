@@ -448,6 +448,8 @@ pub fn api_error(status: u16, body: &str) -> AppError {
     if status == 401 && !message.to_lowercase().contains("key") {
         message = format!("Invalid API key ({message})");
     }
+    // the UI says this one in its language (errors.js)
+    let kind = if message.to_lowercase().contains("credit balance is too low") { "credit_low".into() } else { kind };
     AppError::Api {
         status,
         kind,
@@ -857,6 +859,8 @@ mod tests {
     fn error_parsing() {
         let e = api_error(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#);
         assert_eq!(e.kind(), "invalid_request_error");
+        let low = api_error(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#);
+        assert_eq!(low.kind(), "credit_low");
         assert_eq!(e.to_string(), "bad");
     }
 

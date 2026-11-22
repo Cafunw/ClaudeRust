@@ -250,6 +250,17 @@ pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
     })
 }
 
+/// A client for downloads the user started (Node.js, a directory
+/// extension): `redirect` decides where it may follow, and with
+/// `public_only` it connects to public addresses only.
+pub(crate) fn download_client(redirect: reqwest::redirect::Policy, public_only: bool) -> AppResult<reqwest::Client> {
+    let mut b = reqwest::Client::builder().redirect(redirect).connect_timeout(Duration::from_secs(20)).read_timeout(Duration::from_secs(60));
+    if public_only {
+        b = b.dns_resolver(Arc::new(PublicOnly));
+    }
+    Ok(b.build()?)
+}
+
 /// The HTTP client for the sign-in of the server at `url`. It follows
 /// redirects within the same origin only and, for a server outside the
 /// user's network, connects to public addresses only.

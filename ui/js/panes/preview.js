@@ -26,7 +26,7 @@ function mount(el, ctx) {
   el.classList.add('preview-pane');
   el.innerHTML = `<div class="pv-bar">
       <button class="icon-btn sm" data-a="reload" title="${t('reload')}">${icon('refreshCw', 14)}</button>
-      <input class="pv-url" spellcheck="false" placeholder="http://localhost:3000">
+      <input class="pv-url" spellcheck="false" placeholder="http://localhost:3000" aria-label="${esc(t('ws_preview'))}">
       <button class="icon-btn sm" data-a="pick" title="${t('preview_detected')}">${icon('chevDown', 14)}</button>
       <button class="icon-btn sm" data-a="ext" title="${t('open_browser')}">${icon('external', 14)}</button>
     </div>

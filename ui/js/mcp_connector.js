@@ -93,7 +93,7 @@ export function connectorDialog(status, redraw, name = null, preset = null) {
     save.disabled = true;
     save.textContent = t('connecting');
     let st;
-    try { st = await call('mcp_save_config', { config: configWith(status, next) }); } catch (e) { say(errorNotice(e.message)); primary(t(name ? 'save' : 'cc_add')); return; }
+    try { st = await call('mcp_save_config', { config: configWith(status, next) }); } catch (e) { say(errorNotice(e)); primary(t(name ? 'save' : 'cc_add')); return; }
     // saved: from here on the dialog edits this server, as written (its token a reference now)
     status = st; servers = { ...((st.config && st.config.mcpServers) || next) }; name = c.name; old = servers[c.name] || next[c.name];
     keepToken = !!connectorToken(old);
@@ -106,7 +106,7 @@ export function connectorDialog(status, redraw, name = null, preset = null) {
       save.dataset.signin = '1';
       primary(t('mcp_sign_in'));
     } else if (s.error) {
-      say(errorNotice(s.error));
+      say(errorNotice(s.error_info || s.error));
       primary(t('save'));
     } else {
       m.close();
@@ -116,7 +116,7 @@ export function connectorDialog(status, redraw, name = null, preset = null) {
   const signIn = async () => {
     save.disabled = true;
     save.textContent = t('mcp_signing_in');
-    try { await call('mcp_oauth_sign_in', { server: name }); } catch (e) { say(errorNotice(e.message)); primary(t('mcp_sign_in')); return; }
+    try { await call('mcp_oauth_sign_in', { server: name }); } catch (e) { say(errorNotice(e)); primary(t('mcp_sign_in')); return; }
     m.close();
     toast(t('cc_added', { name }));
     try { redraw(await call('mcp_status')); } catch (e) { errorToast(e); }

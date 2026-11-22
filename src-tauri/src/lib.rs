@@ -20,8 +20,11 @@ pub mod diagnostics;
 pub mod display;
 pub mod engine;
 pub mod error;
+pub mod extension_directory;
+pub mod extension_sign;
 pub mod extensions;
 pub mod filesearch;
+pub mod github_source;
 pub mod gitops;
 pub mod grepsearch;
 pub mod highlight;
@@ -31,6 +34,7 @@ pub mod incognito;
 #[cfg(windows)]
 pub mod jobobject;
 pub mod keepawake;
+pub mod link_source;
 pub mod logdigest;
 pub mod markdown;
 pub mod mcp;
@@ -39,6 +43,7 @@ pub mod memory;
 pub mod memory_cmds;
 pub mod memory_synth;
 pub mod models;
+pub mod node_runtime;
 pub mod oai;
 pub mod office;
 pub mod past_chats;
@@ -46,6 +51,7 @@ pub mod pathguard;
 pub mod project_search;
 pub mod prompts;
 pub mod pullrequest;
+pub mod remote_files;
 pub mod render;
 pub mod research;
 pub mod routines;
@@ -58,6 +64,7 @@ pub mod shells;
 pub mod sidebar_cmds;
 pub mod skills;
 pub mod state;
+pub mod style_gen;
 pub mod subagent;
 pub mod symbols;
 pub mod terminal;
@@ -339,6 +346,7 @@ pub fn run() {
             claudecode::sweep_prompt_files(&data_dir);
             // incognito chats a crash left (none of their turns can be running yet)
             incognito::sweep(&db, &data_dir);
+            node_runtime::init(&data_dir);
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             st.shells.set_app(app.handle().clone());
             devtools::start(app.handle());
@@ -582,6 +590,14 @@ pub fn run() {
             extensions::extension_settings,
             extensions::extension_reconfigure,
             extensions::extension_uninstall,
+            extension_directory::extension_directory,
+            extension_directory::extension_directory_download,
+            extension_directory::extension_directory_cancel,
+            extension_directory::extension_directory_install,
+            node_runtime::node_runtime_status,
+            node_runtime::node_runtime_install,
+            node_runtime::node_runtime_cancel,
+            node_runtime::node_runtime_remove,
             import::import_scan,
             import::import_mcp_servers,
             import::import_desktop_extensions,
@@ -607,6 +623,7 @@ pub fn run() {
             memory_cmds::chat_memory_delete_all,
             memory_cmds::chat_memory_import,
             memory_cmds::chat_memory_update_now,
+            style_gen::style_from_samples,
             commands::open_external,
             commands::open_path,
             commands::reveal_path,
@@ -621,6 +638,11 @@ pub fn run() {
             deeplink::deep_link_take,
             commands::usage_stats,
             commands::reset_onboarding,
+            github_source::github_list,
+            github_source::github_add,
+            github_source::github_token_status,
+            github_source::github_token_set,
+            link_source::link_add,
         ]);
 
     let app = builder

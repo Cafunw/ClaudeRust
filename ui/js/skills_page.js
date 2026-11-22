@@ -8,6 +8,7 @@ import { call } from './api.js';
 import { store, emit } from './store.js';
 import { esc, h, modal, button, toast, errorToast, confirmDialog, promptDialog, humanSize } from './util.js';
 import { notRegistered } from './optional_cmd.js';
+import { errorText } from './neterr.js';
 
 const SCRIPT = /\.(py|sh|bash|zsh|js|mjs|cjs|ts|ps1|psm1|bat|cmd|vbs|rb|pl|php|exe|dll|so|dylib|bin|jar)$/i;
 
@@ -32,7 +33,7 @@ export async function renderSkills(body, tab) {
   body.appendChild(h(`<div class="notice">${icon('info', 15)}<div class="grow small">${esc(t('sk_where'))}</div></div>`));
   const actions = h('<div class="row" style="margin-bottom:12px;flex-wrap:wrap"></div>');
   const folders = sessionFolders(store.conversations, store.route.params && store.route.params.id);
-  const pick = h(`<select class="select" style="width:auto;max-width:260px" aria-label="${esc(t('sk_folder'))}"><option value="">${esc(t('sk_no_folder'))}</option>${folders.map((f, i) => `<option value="${esc(f)}" ${i === 0 ? 'selected' : ''} title="${esc(f)}">${esc(folderName(f))}</option>`).join('')}</select>`);
+  const pick = h(`<select class="select" style="width:auto;max-width:min(260px,100%);min-width:0" aria-label="${esc(t('sk_folder'))}"><option value="">${esc(t('sk_no_folder'))}</option>${folders.map((f, i) => `<option value="${esc(f)}" ${i === 0 ? 'selected' : ''} title="${esc(f)}">${esc(folderName(f))}</option>`).join('')}</select>`);
   const list = h('<div></div>');
   body.append(actions, list);
   const project = () => pick.value || null;
@@ -41,7 +42,7 @@ export async function renderSkills(body, tab) {
     list.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
     let skills;
     try { skills = await call('skills_list', { project: project() }); } catch (e) {
-      list.replaceChildren(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('sk_unavailable') : (e.message || String(e)))}</div>`));
+      list.replaceChildren(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('sk_unavailable') : errorText(e))}</div>`));
       actions.querySelectorAll('button').forEach((b) => { b.disabled = notRegistered(e); });
       return;
     }
@@ -54,7 +55,7 @@ export async function renderSkills(body, tab) {
     button(t('sk_create'), '', () => createSkill(tab)),
   );
   if (folders.length) {
-    const w = h(`<label class="row small muted" style="gap:6px;margin-left:auto">${esc(t('sk_folder'))}</label>`);
+    const w = h(`<label class="row small muted" style="gap:6px;margin-left:auto;min-width:0;max-width:100%">${esc(t('sk_folder'))}</label>`);
     w.appendChild(pick);
     actions.appendChild(w);
   }

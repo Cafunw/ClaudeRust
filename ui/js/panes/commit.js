@@ -6,6 +6,7 @@ import { branchFor } from './pr_util.js';
 import { h, esc, modal, button, toast, errorToast } from '../util.js';
 import { onChangesHeader } from './changes.js';
 import { refresh } from '../workspace.js';
+import { errorText } from '../neterr.js';
 
 async function openCommit(ctx, data) {
   const body = h(`<div class="commit-dlg">
@@ -62,14 +63,14 @@ async function openCommit(ctx, data) {
     askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_found', { n: found.length }))}</div>
       <ul>${found.slice(0, 8).map((f) => `<li><code>${esc(f.path)}${f.line ? `:${f.line}` : ''}</code> — ${esc(f.kind)}${f.preview ? ` <code>${esc(f.preview)}</code>` : ''}</li>`).join('')}</ul>`);
   }).catch((e) => {
-    askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_scan_failed'))}</div><div class="small">${esc((e && e.message) || String(e))}</div>`);
+    askAnyway(`<div class="sw-title">${icon('alert', 14)} ${esc(t('secrets_scan_failed'))}</div><div class="small">${esc(errorText(e))}</div>`);
   });
   try {
     const msg = await call('commit_message_suggest', { conversationId: ctx.convId });
     if (!ta.value.trim()) ta.value = msg;
     status.innerHTML = `${icon('sparkle', 12)} ${esc(t('commit_suggested'))}`;
   } catch (e) {
-    status.textContent = (e && e.message) || String(e);
+    status.textContent = errorText(e);
   }
   ta.focus();
 }
@@ -141,7 +142,7 @@ async function openPr(ctx) {
     if ($k('branch') && !branchTouched) $k('branch').value = branchFor($k('title').value);
     status.innerHTML = `${icon('sparkle', 12)} ${esc(t('pr_drafted'))}`;
   } catch (e) {
-    status.textContent = (e && e.message) || String(e);
+    status.textContent = errorText(e);
     if ($k('branch') && !$k('branch').value) $k('branch').value = branchFor('');
   }
   $k('title').focus();
@@ -149,7 +150,7 @@ async function openPr(ctx) {
 
 onChangesHeader((slot, ctx, data) => {
   if (!data || !data.repo) return;
-  const b = h(`<button class="btn sm ghost" title="${esc(t('pr_title'))}">${icon('external', 13)} ${t('pr_btn')}</button>`);
+  const b = h(`<button class="btn sm ghost" title="${esc(t('pr_title'))}" aria-label="${esc(t('pr_title'))}">${icon('external', 13)} <span class="lbl">${esc(t('pr_btn'))}</span></button>`);
   b.onclick = () => openPr(ctx);
   slot.appendChild(b);
 });

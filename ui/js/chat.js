@@ -91,7 +91,12 @@ export function fetchConversation(id) {
 
 export async function openConversation(id, { focus = true } = {}) {
   const seq = ++openSeq;
-  const data = await call('get_conversation', { id, limit: PAGE_TURNS });
+  // another chat that takes a moment: say so rather than leave the last one on screen
+  const slow = cur && cur.id === id ? null : setTimeout(() => {
+    if (seq === openSeq) viewEl().innerHTML = `<div class="view-loading" role="status"><span class="spinner"></span>${esc(t('chat_loading'))}</div>`;
+  }, 150);
+  let data;
+  try { data = await call('get_conversation', { id, limit: PAGE_TURNS }); } finally { clearTimeout(slow); }
   if (seq !== openSeq) return;
   const conv = data.conversation;
   store.codeRoot = conv.kind === 'code' ? conv.cwd : null;
@@ -134,7 +139,7 @@ export async function openConversation(id, { focus = true } = {}) {
   };
   const composer = createComposer({
     mode: conv.kind === 'code' ? 'code' : 'chat',
-    placeholder: conv.kind === 'code' ? t('code_placeholder') : t('reply_placeholder'),
+    placeholder: conv.kind === 'code' ? t('code_ask_ph') : t('reply_placeholder'),
     initial: composerInitial(conv),
     // an incognito chat's draft isn't kept either
     draftKey: incognito ? null : id,
@@ -201,8 +206,10 @@ function renderTopbar() {
     if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool eng" title="${esc(t('engine_cc'))}">${icon('terminal', 12)}<span class="lbl"> Claude Code</span></span>`));
     if (c.options && c.options.worktree && c.options.worktree.branch) cur.topEl.append(h(`<span class="active-tool wt" title="${esc(t('worktree_topbar', { path: c.options.worktree.path }))}">${icon('code', 12)} ${esc(c.options.worktree.branch)}</span>`));
   }
-  const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(convTitle(c))}</span>${icon('chevDown', 14)}</button>`);
+  const tb = h(`<button class="title-btn" aria-haspopup="menu" title="${esc(convTitle(c))}">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(convTitle(c))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
+  // the whole title on hover (it may be cut short, and a new title can arrive after this was drawn)
+  tb.addEventListener('mouseenter', () => { tb.title = tb.querySelector('.t').textContent; });
   cur.topEl.append(tb, h('<div class="spacer"></div>'));
   if (c.kind === 'code') cur.topEl.append(watchBadge(c));
   const outline = h(`<button class="icon-btn" title="${esc(t('outline_title'))}">${icon('list', 17)}</button>`);
@@ -214,7 +221,7 @@ function renderTopbar() {
   cur.topEl.append(usage);
   if (c.kind === 'code') cur.topEl.append(workspace.toggleButton());
   if (cur.artifacts.size) {
-    const ab = h(`<button class="icon-btn" title="${t('artifacts')}">${icon('layers', 17)}</button>`);
+    const ab = h(`<button class="icon-btn ap-toggle ${artifacts.isOpen() ? 'on' : ''}" title="${t('artifacts')}" aria-label="${t('artifacts')}" aria-pressed="${artifacts.isOpen()}">${icon('layers', 17)}</button>`);
     ab.onclick = () => artifacts.togglePanel(cur.id, cur.artifacts);
     cur.topEl.append(ab);
   }
@@ -697,7 +704,7 @@ function upsertTurn(turn, live = true, before = null) {
 
 function attachmentsHtml(items) {
   return `<div class="user-atts">${items.map((a) => a.src && a.kind === 'image'
-    ? `<img src="${esc(a.src)}" alt="${esc(a.name)}" data-zoom>`
+    ? `<img src="${esc(a.src)}" alt="${esc(a.name)}" title="${esc(a.name)}" data-zoom role="button" tabindex="0">`
     : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : attachmentSub(a)}</div></div></div>`).join('')}</div>`;
 }
 
@@ -777,13 +784,21 @@ function renderUserTurn(el, turn) {
   el.innerHTML = `${turn.meta && turn.meta.compact_summary ? '<div class="cd-slot"></div>' : ''}${atts ? attachmentsHtml(atts.items) : ''}
     ${text ? `<div class="user-bubble"><span class="avatar">${esc(initials(name))}</span><div class="user-text">${esc(text)}</div></div>` : ''}
     <div class="turn-actions"></div>`;
-  el.querySelectorAll('[data-zoom]').forEach((img) => img.addEventListener('click', () => lightbox(img.src)));
+  el.querySelectorAll('[data-zoom]').forEach((img) => {
+    img.addEventListener('click', () => lightbox(img.src, img.alt));
+    img.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); lightbox(img.src, img.alt); } });
+  });
   const cds = el.querySelector('.cd-slot');
   if (cds) cds.replaceWith(compactDivider(turn.meta.compact_summary, turn.meta.compact_auto));
   const ut = el.querySelector('.user-text');
   if (ut && text.length > 1500) {
     ut.classList.add('clamped');
-    ut.addEventListener('click', () => ut.classList.remove('clamped'));
+    // a click or Enter shows the rest
+    ut.tabIndex = 0;
+    ut.setAttribute('aria-expanded', 'false');
+    const unclamp = () => { ut.classList.remove('clamped'); ut.removeAttribute('tabindex'); ut.removeAttribute('aria-expanded'); };
+    ut.addEventListener('click', unclamp);
+    ut.addEventListener('keydown', (e) => { if (e.key === 'Enter' && ut.classList.contains('clamped')) { e.preventDefault(); unclamp(); } });
   }
   const actions = el.querySelector('.turn-actions');
   if (String(turn.id).startsWith('pending-')) return;
@@ -972,7 +987,8 @@ function renderAssistantTurn(el, turn) {
     card.dataset.bound = '1';
     const open = () => artifacts.open(cur.id, cur.artifacts, card.dataset.identifier, Number(card.dataset.version));
     card.addEventListener('click', open);
-    card.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    // a role=button opens with Space too
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
   const streaming = !!turn.streaming;
   el.querySelector('.streaming-indicator').classList.toggle('hidden', !streaming);
@@ -1026,7 +1042,8 @@ function renderAssistantTurn(el, turn) {
   rm.onclick = () => showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: tOr(`model_d_${m.id}`, m.description), checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
   actions.append(up, down, rb, rm);
   const model = turn.meta && turn.meta.model;
-  if (model) actions.appendChild(h(`<span class="small muted model-label">${esc(modelInfo(model).name)}</span>`));
+  // ("<synthetic>": a reply Claude Code made up itself, such as its sign-in error, not a model's)
+  if (model && model !== '<synthetic>') actions.appendChild(h(`<span class="small muted model-label">${esc(modelInfo(model).name)}</span>`));
   const stats = turnStats(turn.meta || {});
   if (stats) actions.appendChild(stats);
   actions.appendChild(h(`<span class="disclaimer">${t('disclaimer')}</span>`));

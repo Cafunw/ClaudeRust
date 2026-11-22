@@ -28,7 +28,7 @@ export async function checkNow() {
     const info = await call('update_check');
     set({ phase: info.available ? 'available' : 'none', info });
   } catch (e) {
-    set({ phase: 'error', error: (e && e.message) || String(e) });
+    set({ phase: 'error', error: e });
   }
 }
 
@@ -39,7 +39,7 @@ export async function installNow() {
     await call('update_install');
     set({ phase: 'ready' });
   } catch (e) {
-    set({ phase: 'error', error: (e && e.message) || String(e) });
+    set({ phase: 'error', error: e });
   }
 }
 
@@ -62,7 +62,8 @@ export function updatesSection() {
   // sections that were shown and are gone (Settings closed, another tab):
   // they were only let go of at the next state change, which may not come
   for (const f of [...listeners]) if (f.gone && f.gone()) listeners.delete(f);
-  const el = h('<div class="upd"></div>');
+  // a check's outcome (none, a new version, an error) is said when it comes
+  const el = h('<div class="upd" aria-live="polite" tabindex="-1"></div>');
   let shown = false;
   const draw = () => {
     if (shown && !el.isConnected) { listeners.delete(draw); return; }
@@ -88,14 +89,20 @@ export function updatesSection() {
       html = `<div class="upd-line">${icon('check', 14)} ${esc(t('upd_ready', { v: (info && info.version) || '' }))}</div>
         <div class="row-btns"><button class="btn sm primary" data-a="restart">${icon('refreshCw', 13)} ${esc(t('upd_restart'))}</button></div>`;
     } else if (phase === 'error') {
+      // a coded failure in the UI's language, the backend's own words under Details
       const plain = friendlyError(error);
-      html = `<div class="upd-line upd-err">${icon('alert', 14)} ${esc(plain || error)}</div>
-        ${plain ? `<details class="err-raw"><summary>${esc(t('err_details'))}</summary><div class="mono">${esc(error)}</div></details>` : ''}
+      const raw = (error && error.message) || String(error);
+      html = `<div class="upd-line upd-err">${icon('alert', 14)} ${esc(plain || raw)}</div>
+        ${plain && plain !== raw ? `<details class="err-raw"><summary>${esc(t('err_details'))}</summary><div class="mono">${esc(raw)}</div></details>` : ''}
         <div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_retry'))}</button>${releases ? `<button class="btn sm ghost" data-a="page">${icon('external', 13)} ${esc(t('upd_page'))}</button>` : ''}</div>`;
     } else {
       html = `<div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_check'))}</button></div>`;
     }
+    // the button pressed is drawn away: the keyboard stays in the section; progress is said once it's done
+    const had = el.contains(document.activeElement);
+    el.setAttribute('aria-busy', String(phase === 'checking' || phase === 'downloading'));
     el.innerHTML = html;
+    if (had) (el.querySelector('button') || el).focus();
     el.querySelectorAll('[data-a]').forEach((b) => {
       b.onclick = () => {
         const a = b.dataset.a;

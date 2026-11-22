@@ -115,6 +115,14 @@ export function mountSidebar() {
     if (e.target.closest('[data-act=toggle]')) toggleSidebar();
   });
   $('#sidebar-scrim').addEventListener('click', closeOverlay);
+  // Esc folds the sidebar lying over a narrow window, as a click beside it does (an open menu or dialog closes first)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || !narrow.matches || store.sidebarCollapsed || document.querySelector('.modal-scrim, .popover')) return;
+    e.preventDefault();
+    closeOverlay();
+    const toggle = $('#sidebar [data-act=toggle]');
+    if (toggle) toggle.focus();
+  }, true);
   // folded at start because the window was narrow: it opens once there's room
   autoFolded = store.sidebarCollapsed && !loadLocal().sidebarCollapsed;
   wasTight = tight(window.innerWidth, false);
@@ -186,7 +194,7 @@ function closeOverlay() {
 function renderUserCard() {
   const card = $('#sidebar .user-card');
   if (!card) return;
-  const name = displayName() || 'You';
+  const name = displayName() || t('you');
   const plan = store.settings.has_api_key ? t('api_plan') : store.settings.chat_engine === 'claude-code' ? t('acct_plan') : store.settings.code_engine === 'claude-code' ? 'Claude Code' : t('no_key');
   card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><span class="name ellipsis">${esc(store.settings.full_name || name)}</span><span class="plan ellipsis">· ${esc(plan)}</span></span><span class="chev">${icon('chevDown', 12)}</span>`;
 }
@@ -242,7 +250,7 @@ function chatLink(c) {
   const waiting = [...store.permissions.values()].some((p) => p.conversation_id === c.id);
   const folder = c.kind === 'code' && c.cwd ? c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd : '';
   const unread = !!c.unread && !running && !waiting;
-  const a = h(`<button class="chat-link ${folder ? 'two' : ''} ${unread ? 'unread' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
+  const a = h(`<button class="chat-link ${folder ? 'two' : ''} ${unread ? 'unread' : ''}" data-id="${esc(c.id)}" title="${esc(folder ? `${convTitle(c)} — ${c.cwd}` : convTitle(c))}">
     <span class="txt"><span class="title">${esc(convTitle(c))}</span>${folder ? `<span class="sub">${esc(folder)}</span>` : ''}</span>
     ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : unread ? `<span class="dot unread" title="${esc(t('org_unread'))}"></span><span class="sr-only">${esc(t('org_unread'))}</span>` : ''}
     <span class="icon-btn sm more" aria-hidden="true">${icon('more', 16)}</span></button>`);

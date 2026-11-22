@@ -13,6 +13,7 @@
 //! Project hooks run code from the repository, so they only run once the
 //! user has trusted that exact configuration (`hooks_trust`).
 
+use crate::error::coded_notice;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -34,8 +35,8 @@ pub struct Config {
     /// Project hooks found but not trusted yet: (root, hash, commands)
     pub untrusted: Option<(PathBuf, String, Vec<String>)>,
     /// Settings files that exist but can't be used (their hooks don't run),
-    /// in words for the user.
-    pub problems: Vec<String>,
+    /// as notes for the user (`error::coded_notice`).
+    pub problems: Vec<Value>,
 }
 
 fn parse(v: &Value, out: &mut HashMap<String, Vec<Hook>>) {
@@ -59,36 +60,37 @@ fn parse(v: &Value, out: &mut HashMap<String, Vec<Hook>>) {
 }
 
 /// A settings file; `Ok(None)` when there is none.
-fn read_json(p: &Path) -> Result<Option<Value>, String> {
+fn read_json(p: &Path) -> Result<Option<Value>, Value> {
     let text = match std::fs::read_to_string(p) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{} can't be read ({e}), so its hooks don't run.", p.display())),
+        Err(e) => return Err(coded_notice("hooks_file_unreadable", json!({"path": p}), format!("{} can't be read ({e}), so its hooks don't run.", p.display()))),
     };
     // editors on Windows (Notepad, PowerShell) like to start with a BOM
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     serde_json::from_str(text)
         .map(Some)
-        .map_err(|e| format!("{} isn't valid JSON ({e}), so its hooks don't run.", p.display()))
+        .map_err(|e| coded_notice("hooks_file_invalid", json!({"path": p, "line": e.line()}), format!("{} isn't valid JSON ({e}), so its hooks don't run.", p.display())))
 }
 
 /// Read a settings file, noting (and logging, once) why one can't be used.
-fn read_settings(p: &Path, problems: &mut Vec<String>) -> Option<Value> {
+fn read_settings(p: &Path, problems: &mut Vec<Value>) -> Option<Value> {
     static LOGGED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
     match read_json(p) {
         Ok(v) => v,
-        Err(msg) => {
+        Err(note) => {
+            let msg = note["message"].as_str().unwrap_or_default().to_string();
             if LOGGED.lock().insert(msg.clone()) {
                 log::warn!("hooks: {msg}");
             }
-            problems.push(msg);
+            problems.push(note);
             None
         }
     }
 }
 
 /// The hooks in a project's own settings files.
-fn project_hooks(root: &Path, problems: &mut Vec<String>) -> HashMap<String, Vec<Hook>> {
+fn project_hooks(root: &Path, problems: &mut Vec<Value>) -> HashMap<String, Vec<Hook>> {
     let mut found = HashMap::new();
     for name in ["settings.json", "settings.local.json"] {
         if let Some(v) = read_settings(&root.join(".claude").join(name), problems) {
@@ -388,12 +390,12 @@ mod tests {
         let cfg = load_in(Some(&home.join(".claude")), &dir, &trusted);
         let stop: Vec<&str> = cfg.events["Stop"].iter().map(|h| h.command.as_str()).collect();
         assert_eq!(stop, ["echo user", "echo done"]);
-        assert!(cfg.problems.iter().all(|p| !p.contains(&*dir.to_string_lossy())), "{:?}", cfg.problems);
+        assert!(cfg.problems.iter().all(|p| !p["message"].as_str().unwrap().contains(&*dir.to_string_lossy())), "{:?}", cfg.problems);
         // a broken file isn't silently skipped
         std::fs::write(dir.join(".claude/settings.local.json"), "{\"hooks\": {").unwrap();
         let cfg = load_in(None, &dir, &trusted);
         let local = dir.join(".claude").join("settings.local.json").display().to_string();
-        assert!(cfg.problems.iter().any(|p| p.contains(&local) && p.contains("isn't valid JSON")), "{:?}", cfg.problems);
+        assert!(cfg.problems.iter().any(|p| p["kind"] == "hooks_file_invalid" && p["params"]["path"] == local.as_str() && p["message"].as_str().unwrap().contains("isn't valid JSON")), "{:?}", cfg.problems);
         let _ = std::fs::remove_dir_all(dir);
     }
 

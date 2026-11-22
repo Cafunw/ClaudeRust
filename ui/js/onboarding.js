@@ -1,8 +1,8 @@
 // First-run screen: sign in with a Claude account, or connect an API key.
 import { icon } from './icons.js';
-import { t, LANGUAGES } from './i18n.js';
+import { t, LANGUAGES, setLanguage } from './i18n.js';
 import { call } from './api.js';
-import { store, emit } from './store.js';
+import { store } from './store.js';
 import { $, esc, h, button, errorToast } from './util.js';
 import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
 import { errorNotice } from './neterr.js';
@@ -26,13 +26,31 @@ export function renderOnboarding(view, done) {
   </div></div>`;
   const go = $('[data-f=go]', view);
   const err = $('[data-f=err]', view);
-  $('[data-f=lang]', view).addEventListener('change', (e) => emit('save-settings', { language: e.target.value }));
+  // the page again in the new language, with what was typed (the app's own
+  // re-render on a language change would leave this page for the app)
+  $('[data-f=lang]', view).addEventListener('change', async (e) => {
+    const typed = ['name', 'key', 'base'].map((f) => [f, $(`[data-f=${f}]`, view).value]);
+    try { store.settings = await call('save_settings', { patch: { language: e.target.value } }); } catch (x) { errorToast(x); return; }
+    setLanguage(store.settings.language);
+    renderOnboarding(view, done);
+    for (const [f, v] of typed) $(`[data-f=${f}]`, view).value = v;
+    $('details', view).open = true;
+    $('[data-f=lang]', view).focus();
+  });
+  const keyIn = $('[data-f=key]', view);
+  keyIn.addEventListener('input', () => { keyIn.removeAttribute('aria-invalid'); });
   const submit = async () => {
-    const key = $('[data-f=key]', view).value.trim();
+    const key = keyIn.value.trim();
     const name = $('[data-f=name]', view).value.trim();
     const base = $('[data-f=base]', view).value.trim();
     err.replaceChildren();
-    if (!key && !store.settings.has_api_key) { $('[data-f=key]', view).focus(); return; }
+    if (!key && !store.settings.has_api_key) {
+      // say why nothing happened, next to the field
+      keyIn.setAttribute('aria-invalid', 'true');
+      err.replaceChildren(h(`<div class="notice error" role="alert" style="margin-bottom:12px">${icon('alert', 15)}<div class="grow small">${esc(t('onboard_need_key'))}</div></div>`));
+      keyIn.focus();
+      return;
+    }
     go.disabled = true;
     go.textContent = t('connecting');
     try {
@@ -42,7 +60,7 @@ export function renderOnboarding(view, done) {
       await call('save_settings', { patch: { onboarded: true } });
       done();
     } catch (e) {
-      err.replaceChildren(errorNotice(e.message));
+      err.replaceChildren(errorNotice(e));
       go.disabled = false;
       go.textContent = t('continue_btn');
       if (e.status !== 401 && key) {

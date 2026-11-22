@@ -6,12 +6,12 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 
 | Alan | Değer |
 |---|---|
-| **Release sayacı** | **0/12** (10–15 düzeltmede bir otomatik release; 12 hedef orta nokta) |
-| **Güncel puan** | ****90.75/100** (Puanlayıcı 5, v0.1.6) — HEDEF >= 90 AŞILDI. Claude Desktop feature parity 27/30, Stability and crash resistance 23.5/25, Native performance and resource use 18/20, UI/UX polish and interaction quality 13.25/15, Code quality, tests and packaging 9/10. Önceki: 71 → 71 (daha geniş ölçüt) → 82.5 → 87 → 90.75. Puanlayıcı özellik kategorisinde +0,5 "güçlü yan dengelemesi" uyguladı (kategori içinde, 30 üst sınırı); bu olmadan 90,25.** |
+| **Release sayacı** | **10/12** (10–15 düzeltmede bir otomatik release; 12 hedef orta nokta) |
+| **Güncel puan** | **90.75/100 (Puanlayıcı 5, v0.1.6); Tur 7 sonrası Puanlayıcı 6 (v0.1.7) bekliyor; kullanıcı hedefi: özellik paritesi 30/30 ve UI/UX 15/15** |
 | Hedef | >= 90/100 |
-| Tur | 6 |
-| Son yayın | v0.1.6 (2026-11-22), yayınlandı: https://github.com/Cafunw/ClaudeRust/releases/tag/v0.1.6 (puanlanan sürüm) |
-| Backlog | 215 madde: 74 açık, 68 yapıldı |
+| Tur | 7 |
+| Son yayın | v0.1.6 (2026-11-22); v0.1.7 hazırlanıyor (Tur 7) |
+| Backlog | 215 madde: 74 açık, 74 yapıldı |
 
 ## Puanlama ölçeği (bağımsız puanlayıcı, 100 üzerinden)
 
@@ -41,7 +41,7 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 
 ## Bu turun planı
 
-**DÖNGÜ TAMAMLANDI.** Puanlayıcı 5, v0.1.6'yı 90,75/100 puanladı. Son yayın v0.1.6 (puanlanan sürümün kendisi); ondan sonra yalnızca CI/e2e araçları ve belgeler değişti. Açık kalan: EV5-01..15 (en değerlileri EV5-05 OpenAI uyumlu anahtarı güvenli saklama, EV5-09 yanlış Ayarlar notu, EV5-02 yerleşik Node, EV5-01 kalıcı CLI süreci), CI e2e işi (bilgilendirici), kullanıcı kararları: npm kütüphane indirme izni, Authenticode sertifikası, güncelleyici imza anahtarı, eski CLI kayıtları, v0.1.0 taslağı.
+**Tur 7 tamamlandı** (kullanıcı hedefi: özellik paritesi ve UI/UX tam puan). Kapı ajanı: lint 0, test:ui 217/217, check 0, clippy -D warnings 0, cargo test 0 düştü (lib 412), hermetik e2e 15/15. Sıradaki: v0.1.7 yayını ve Puanlayıcı 6 aynı anda (puanlayıcı kategori 1 ve 4'e derin bakar, 0,25'lik her açığı listeler).
 
 ## Backlog
 
@@ -64,13 +64,13 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 | EV-08 | medium | S | MCP connections do not recover, and tool-list changes are ignored | `mcp.rs` | YAPILDI (Tur 2) |
 | EV2-10 | medium | S | Hard-coded keyring service shares secrets between app copies | `settings.rs` `mcp_oauth.rs` | YAPILDI (Tur 3) |
 | EV3-12 | medium | S | Stalled streams wait up to 600 s; no idle/ping watchdog | `anthropic.rs` | YAPILDI (Tur 4): Anthropic ve OpenAI-uyumlu akışlarda durağanlık bekçisi |
-| EV5-05 | medium | S | OpenAI-compatible API key stored in plain text and sent unmasked to the webview | `settings.rs` `commands.rs` | AÇIK (sonraki tur, ÖNCELİKLİ güvenlik: OpenAI uyumlu uç anahtarı anahtar zincirine ve webview'e maskeli) |
+| EV5-05 | medium | S | OpenAI-compatible API key stored in plain text and sent unmasked to the webview | `settings.rs` `commands.rs` | YAPILDI (Tur 7): OpenAI uyumlu anahtar kimlik deposunda, maskeli, ayar satırından göç; db/WAL bayt araması temiz |
 | BE-07 | medium | M | Code sessions keep every edited file's original bytes, and finished background shells keep 1 MB buffers, for the whole app lifetime | `codetools.rs` `state.rs` `shells.rs` … | AÇIK |
 | BE-08 | medium | M | Checkpoint shadow repos grow forever: one commit per code turn, never pruned, not removed with their sessions | `checkpoints.rs` `engine.rs` `commands.rs` | AÇIK |
 | BE-10 | medium | M | MCP: a crashed stdio server is neither reported nor restarted, and tools/list_changed notifications are ignored | `mcp.rs` `commands.rs` | AÇIK |
 | EV-07 | medium | M | Child processes are orphaned if the app crashes or is killed | `lib.rs` `codetools.rs` `mcp.rs` … | YAPILDI (Tur 2): Windows Job Object; açık kalan: Linux/macOS ebeveyn-ölümü sinyali belgelendi |
 | EV2-11 | medium | M | Linux: API key stored in plain text; MCP OAuth sign-in lost on every quit | `settings.rs` `mcp_oauth.rs` | AÇIK (ertelendi: Linux gizli depo) |
-| EV5-06 | medium | M | Desktop extensions installed without signature or publisher verification | `extensions.rs` `ui/js/extensions_page.js` | AÇIK (sonraki tur) |
+| EV5-06 | medium | M | Desktop extensions installed without signature or publisher verification | `extensions.rs` `ui/js/extensions_page.js` | YAPILDI (Tur 7): MCPB imza ayrıştırma ve PKCS#7 doğrulama; güvenilir/kendinden imzalı/geçersiz/imzasız durumları; imzasız ve kendinden imzalı için ek onay |
 | BE-12 | low | S | CLI chats leave the full system prompt (project instructions and knowledge) on disk forever, even after the chat is deleted | `claudecode.rs` `commands.rs` | AÇIK |
 | BE-13 | low | S | Fork is not transactional: a failure mid-copy leaves a partial, untitled conversation | `db.rs` `commands.rs` | AÇIK |
 | BE-14 | low | S | A stalled API stream (dead TCP connection, no RST) hangs the turn for 10 minutes before erroring | `anthropic.rs` | AÇIK |
@@ -132,13 +132,13 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 | EV4-12 | low | S | Artifact panel stays open and empty after a branch switch | `ui/js/artifacts.js` `ui/js/chat.js` | YAPILDI (Tur 6): artifact'siz dalda panel kapanır, artifact'li dala dönünce açılır |
 | EV4-13 | low | S | Mixed-language strings and inconsistent untitled-chat name | `ui/js/composer.js` `ui/js/i18n.js` `ui/js/search.js` | YAPILDI (Tur 6): karışık dil ve "Adsız/Yeni sohbet" tekleştirildi; ui/js şablon dizgelerini tarayan test |
 | EV4-14 | low | S | Raw markdown in search snippets; code block flush against a following table | `ui/js/search.js` `db.rs` `ui/css/app.css` | YAPILDI (Tur 6): arama parçalarında ham markdown temizlenir; kod bloğu-tablo aralığı |
-| EV5-09 | low | S | Settings wrongly says past-chat search is unavailable on the Claude account | `ui/js/settings.js` `ui/js/i18n.js` `claudecode.rs` | AÇIK (sonraki tur) |
-| EV5-11 | low | S | Layout clipping and narrow-width artifact takeover | `ui/css/app.css` `ui/js/artifacts.js` `ui/js/code.js` | AÇIK (sonraki tur) |
-| EV5-13 | low | S | Artifact error shown twice (app banner and in-frame bar) | `artifact_hook.js` `ui/js/artifacts.js` | AÇIK (sonraki tur) |
+| EV5-09 | low | S | Settings wrongly says past-chat search is unavailable on the Claude account | `ui/js/settings.js` `ui/js/i18n.js` `claudecode.rs` | YAPILDI (Tur 7): yanlış Ayarlar notları kaldırıldı/düzeltildi |
+| EV5-11 | low | S | Layout clipping and narrow-width artifact takeover | `ui/css/app.css` `ui/js/artifacts.js` `ui/js/code.js` | YAPILDI (Tur 7): 900 px altında artifact sayfası "Sohbete dön" ile; 420 px kırpılmaları; tarama: taşma 0, kontrast hatası 0, adsız düğme 0, Türkçe arayüzde İngilizce 0 |
+| EV5-13 | low | S | Artifact error shown twice (app banner and in-frame bar) | `artifact_hook.js` `ui/js/artifacts.js` | YAPILDI (Tur 7): artifact hatası bir kez gösterilir |
 | FE-15 | low | M | Accessibility basics: modals without focus trap or restore, no live regions, non-focusable 'more' menus, unlabeled icon buttons | `ui/js/util.js` `ui/js/sidebar.js` `ui/js/code.js` … | AÇIK |
 | FE-18 | low | M | Composer stubs: 'Add screenshot' is a permanently disabled item, and MCP prompt arguments use window.prompt() | `ui/js/composer.js` | AÇIK |
 | EV-16 | low | M | Mixed-language UI: English model descriptions and backend errors in a localized UI | `models.rs` `error.rs` `ui/js/i18n.js` | KISMEN (Tur 2): model açıklamaları ve hata türleri çevrildi; kalan sabit İngilizce arka uç metinleri açık |
-| EV5-10 | low | M | Backend error messages appear in English inside the Turkish UI | `mcp.rs` `claudecode.rs` `commands.rs` … | AÇIK (sonraki tur) |
+| EV5-10 | low | M | Backend error messages appear in English inside the Turkish UI | `mcp.rs` `claudecode.rs` `commands.rs` … | KISMEN (Tur 7): backend hata kodları + UI tablosu; hâlâ İngilizce: RunSlot meşgul metinleri, motor panik metni, devam hataları, motor bildirimleri, worktree_apply başarı metinleri, tanılama etiketleri |
 
 ### Performans (26)
 
@@ -253,8 +253,8 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 | EV3-11 | medium | M | No connector/extension directory and no 'Add custom connector' form | `ui/js/settings.js` `mcp.rs` | KISMEN (Tur 4): özel bağlayıcı formu (ekle/düzenle/kaldır, OAuth düğmesi); AÇIK GÜVENLİK: taşıyıcı jeton claude_desktop_config.json içinde düz yazı olarak saklanıyor |
 | R5-02 | medium | M | Skills yalnızca Claude Code CLI oturumlarında çalışır; sohbet ve API motoru kullanmaz | `skills.rs` `engine.rs` | AÇIK (sonraki tur) |
 | EV4-03 | medium | M | A dropped or interrupted reply can only be fully regenerated | `engine.rs` `anthropic.rs` `ui/js/retry_ui.js` | YAPILDI (Tur 6): "Devam et": API motorunda aynı mesaja eklenir (tekrar kırpılır), CLI motorunda oturum sürdürülür (ikinci mesaj olarak saklanır); canlı doğrulandı |
-| EV5-02 | medium | M | No built-in Node.js runtime for Node-based desktop extensions | `extensions.rs` | AÇIK (sonraki tur) |
-| EV5-03 | medium | M | No Desktop Extensions directory (browse and one-click install) | `ui/js/extensions_page.js` `ui/js/settings.js` `connector_directory.json` | AÇIK (sonraki tur (Anthropic uzantı dizini yok; elle seçilmiş liste mümkün)) |
+| EV5-02 | medium | M | No built-in Node.js runtime for Node-based desktop extensions | `extensions.rs` | KISMEN (Tur 7): isteğe bağlı Node.js indirme (tıklamayla, sabit hash + nodejs.org listesi, güvenli çıkarma, ilerleme/iptal/kaldır) ve Windows python çözümü; gerçek nodejs.org indirmesi çalıştırılmadı (mock sunucuyla sınandı); npx tabanlı uzantılar hâlâ sistem Node ister |
+| EV5-03 | medium | M | No Desktop Extensions directory (browse and one-click install) | `ui/js/extensions_page.js` `ui/js/settings.js` `connector_directory.json` | YAPILDI (Tur 7): 16 doğrulanmış genel .mcpb sürümü, arama/kategori, tek tık kurulum (yalnız tıklamayla, hash+boyut sabit), güncelleme bildirimi; yerel sürüm sunucusuyla canlı doğrulandı |
 | FP-14 | medium | L | Single main window: no 'Open in new window' and no split view | `lib.rs` `ui/js/main.js` `ui/js/store.js` | AÇIK |
 | FP-15 | medium | L | Claude cannot see or operate the Code tab's Preview pane, so it cannot check its own UI changes | `ui/js/panes/preview.js` `codetools.rs` `claudecode.rs` | AÇIK |
 | FP-17 | medium | L | Code sessions are local only: no SSH hosts, cloud sessions or Remote Control | `ui/js/code.js` `claudecode.rs` `terminal.rs` | AÇIK |
@@ -264,13 +264,13 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 | EV3-04 | medium | L | MCP Apps (interactive ui:// resources) not supported | `mcp.rs` `render.rs` `ui/js/parts.js` | AÇIK (ertelendi: MCP Apps (ui:// etkileşimli kaynaklar) büyük (L); puan 90 altında kalırsa sonraki tur) |
 | R5-01 | medium | L | MCP Apps eksikleri: yan panel/tam ekran, ui/message, model bağlamı güncelleme, sayfadan resources/read, tema bildirimi, hesap motoru araç adları için uygulamalar | `mcp_apps.rs` `ui/js/mcp_apps.js` | AÇIK (sonraki tur) |
 | EV4-02 | medium | L | Artifacts: no publish/share and no typed artifacts (slides/design) | `artifacts.rs` `ui/js/artifacts.js` | AÇIK (ertelendi: yayınlama/paylaşma Anthropic barındırması ister (yapılamaz); yazı/tasarım artifact türleri büyük (L)) |
-| EV5-04 | medium | L | No GitHub or Google Drive sources for attachments and project knowledge | `ui/js/projects.js` `ui/js/composer.js` `attachments.rs` | AÇIK (yapılamaz/büyük: GitHub ve Drive kaynakları Anthropic bağlayıcıları ister) |
+| EV5-04 | medium | L | No GitHub or Google Drive sources for attachments and project knowledge | `ui/js/projects.js` `ui/js/composer.js` `attachments.rs` | KISMEN (Tur 7): GitHub deposundan ekle (ağaç, seçici, jeton anahtar zincirinde) ve Drive/Docs bağlantı kaynağı (yalnız "bağlantıyı bilen herkes"); Google'ın gerçek dışa aktarma biçimleri ve özel Drive doğrulanmadı/desteklenmiyor |
 | FP-20 | low | S | Session lists have star and delete only: no archive, no pinned code sessions, no unread markers | `ui/js/sidebar.js` `ui/js/code.js` `db.rs` | AÇIK |
 | FP-21 | low | S | No fast mode toggle | `claudecode.rs` `ui/js/composer.js` `models.rs` | AÇIK |
 | FP-22 | low | S | No 'keep computer awake' while agents, workflows or routines run | `engine.rs` `claudecode.rs` `routines.rs` … | AÇIK |
 | FP-24 | low | S | MCP tools/list_changed notifications are ignored, so a server's new tools appear only after a manual Reload | `mcp.rs` | AÇIK |
 | EV-10 | low | S | No deep links | `lib.rs` `src-tauri/Cargo.toml` `src-tauri/tauri.conf.json` | YAPILDI (Tur 2): clauderust:// derin bağlantıları |
-| EV5-08 | low | S | Custom styles cannot be generated from writing samples | `ui/js/settings.js` | AÇIK (sonraki tur) |
+| EV5-08 | low | S | Custom styles cannot be generated from writing samples | `ui/js/settings.js` | KISMEN (Tur 7): yazı örneklerinden stil üretme (API motoru canlı mock ile); hesap motoru yolu denenmedi |
 | FP-23 | low | M | No URL protocol handler (deep links) | `src-tauri/Cargo.toml` `src-tauri/tauri.conf.json` `lib.rs` | AÇIK |
 | FP-25 | low | M | Only two interface languages (English, Turkish) against Desktop's eleven | `ui/js/i18n.js` | AÇIK |
 | EV-11 | low | M | Only English and Turkish | `ui/js/i18n.js` | AÇIK (ertelendi: sonraki tur) |
@@ -304,3 +304,4 @@ Bu dosya, ClaudeRust'ı en güncel **Claude Desktop** deneyimiyle kıyaslanabili
 - **Puanlayıcı 4 (v0.1.5): 87/100.** Claude Desktop feature parity 24.5/30; Stability and crash resistance 24/25; Native performance and resource use 18/20; UI/UX polish and interaction quality 12.5/15; Code quality, tests and packaging 8/10. Ölçülenler: boşta 7 süreç / 172-189 MB özel (Rust süreci 8 MB), %0,5-1 CPU; Claude Desktop 14 süreç; kurulum NSIS 8,37 MiB, MSI 11,25 MiB, exe 28,5 MB; 1000 turluk (2000 mesaj) sohbet 122 ms'de açılır, 640 tur sayfalandıktan sonra 1.844 düğüm; akış 78 KB yanıtta uzun görev yok, en büyük kare aralığı 59 ms, ama IPC metnin `79 katı (401 olay, 6,1 MB); hesap motoru ilk metin 3,45 sn; ikinci pencere beyaz çakma 623 ms. Kalan kesintiler: MCP dizini küçük (-2), tipli artifact/yayınlama (-1,5), yarım yanıttan devam yok (-1), tur başına CLI süreci (-1), IPC hacmi (-1), koyu temada beyaz çakma (-1), sahte-CLI testi yok (-1).
 - **Tur 6** (4 uzman + kapı): EV4-05 akış IPC'si 80x → 7,3x, EV4-03 "Devam et", EV4-07 sahte CLI ile 11 uçtan uca test, EV4-06 açılış beyaz çakması, EV4-10 artifact ağ çıkışı kapalı, EV4-01 dizin 48 kayıt, EV4-12/13/14 arayüz, EV4-16 build:unsigned + günlük gürültüsü. Lider: test kopyası penceresi ekran dışı (CLAUDERUST_OFFSCREEN=1 ya da debug + hata ayıklama portu), e2e başlatıcısı port seçer. Testler: 410 + UI 164, e2e 15/15.
 - **Puanlayıcı 5 (v0.1.6): 90.75/100.** Claude Desktop feature parity 27/30; Stability and crash resistance 23.5/25; Native performance and resource use 18/20; UI/UX polish and interaction quality 13.25/15; Code quality, tests and packaging 9/10. Ölçülenler: soğuk açılış 0,80 sn, sıcak 0,50-0,58 sn (400 mesajlı sohbet geri yüklenirken); boşta 7 süreç / 212 MB özel / `%0 CPU (Claude Desktop meşgul: 14 süreç / 2,2 GB özel); kurulum NSIS 8,39 MiB; 400 mesajlık sohbet 90 ms'de içe aktarılıp 27 ms'de çizildi, kaydırmada en kötü kare 32 ms; 100 KB yanıt 18 sn'de 211 olay / 431 KB. 15 yeni bulgu (toplam -9,25): en değerlileri kalıcı CLI süreci (-1,5), yerleşik Node yok (-1), Desktop uzantı dizini yok (-1), GitHub/Drive kaynakları yok (-1), OpenAI uyumlu anahtar düz metin (-1). DÖNGÜ SONU.
+- **Tur 7** (6 uzman + kapı): Node.js isteğe bağlı çalışma zamanı, uzantı dizini (16 doğrulanmış .mcpb) ve MCPB imza doğrulaması, GitHub + Drive bağlantı kaynakları, örnek yazıdan stil, OpenAI anahtarı kimlik deposunda, çevrilmiş backend hata kodları, iki UI kalite taraması (kontrast, taşma, odak, adsız düğme, çeviri taraması), artifact sayfası ve tek hata.

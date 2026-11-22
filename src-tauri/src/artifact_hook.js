@@ -1,23 +1,39 @@
 (function () {
   var seq = 0, waiting = {};
-  function report(message, stack) {
+  // the app shows the error above the frame and says so ('error-ack'): then the page draws none of its own
+  var acked = false, pendingOverlay = null;
+  function overlay(message) {
+    pendingOverlay = null;
+    if (acked) return;
     var d = document.getElementById('__artifact_error') || document.createElement('pre');
     d.id = '__artifact_error';
     d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;margin:0;padding:10px 14px;background:#fde8e4;color:#7a1f0e;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;max-height:40%;overflow:auto;z-index:99999';
     d.textContent = 'Error: ' + message;
     document.body && document.body.appendChild(d);
-    window.parent.postMessage({ __artifact: 'error', message: message, stack: stack }, '*');
+  }
+  function report(message, stack, blocked) {
+    window.parent.postMessage({ __artifact: 'error', message: message, stack: stack, blocked: blocked || null }, '*');
+    if (pendingOverlay) clearTimeout(pendingOverlay);
+    pendingOverlay = setTimeout(function () { overlay(message); }, 400);
   }
   window.addEventListener('error', function (e) {
     report(String(e.message || e.error || 'unknown'), e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 6).join('\n') : '');
   });
   // a request the policy (ARTIFACT_CSP) blocked fails without an error of its own
   window.addEventListener('securitypolicyviolation', function (e) {
-    report('The artifact sandbox blocked ' + (e.blockedURI || 'a request') + ' (' + e.effectiveDirective + '): artifacts cannot reach the network. Only scripts from the allowed CDNs and Google Fonts load, so data and images (inline SVG or data: URLs) must be part of the artifact.', '');
+    var uri = String(e.blockedURI || 'a request'), directive = String(e.effectiveDirective || '');
+    report('The artifact sandbox blocked ' + uri + ' (' + directive + '): artifacts cannot reach the network. Only scripts from the allowed CDNs and Google Fonts load, so data and images (inline SVG or data: URLs) must be part of the artifact.', '', { uri: uri, directive: directive });
   });
   window.addEventListener('message', function (e) {
     var d = e.data;
-    if (e.source !== window.parent || !d || d.__artifact !== 'reply' || !waiting[d.id]) return;
+    if (e.source !== window.parent || !d) return;
+    if (d.__artifact === 'error-ack') {
+      acked = true;
+      var shown = document.getElementById('__artifact_error');
+      if (shown) shown.remove();
+      return;
+    }
+    if (d.__artifact !== 'reply' || !waiting[d.id]) return;
     var w = waiting[d.id];
     delete waiting[d.id];
     if (d.error) w[1](new Error(d.error)); else w[0](d.result);

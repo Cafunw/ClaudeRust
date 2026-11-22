@@ -43,6 +43,7 @@ import { openSettings } from './settings.js';
 import { openSearch } from './search.js';
 import { renderOnboarding } from './onboarding.js';
 import { linkTarget } from './deeplink.js';
+import { errorText } from './neterr.js';
 
 const mq = window.matchMedia('(prefers-color-scheme: dark)');
 
@@ -233,7 +234,7 @@ function bindBackend() {
   onBackend('deep-link', takeDeepLink);
   // things the backend finished in the background (e.g. where a deleted
   // session's work was kept)
-  onBackend('notice', (n) => toast(n.message, n.error ? 'error' : '', { duration: 12000 }));
+  onBackend('notice', (n) => toast(errorText(n), n.error ? 'error' : '', { duration: 12000 }));
   // the backend changed a setting itself (e.g. "always allow" on a prompt)
   onBackend('settings-updated', async () => {
     try { store.settings = await call('get_settings'); emit('settings-changed'); } catch { /* keep the current copy */ }

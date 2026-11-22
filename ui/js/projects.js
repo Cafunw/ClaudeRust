@@ -3,12 +3,17 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, newChatModel } from './store.js';
-import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle } from './util.js';
-import { createComposer } from './composer.js';
+import { $, esc, h, modal, button, relTime, toast, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle } from './util.js';
+import { createComposer, attachmentError } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
 
 const CAPACITY_CHARS = 2_000_000;
+
+/** "1 chat", "3 chats" (Turkish counts take no plural). */
+export function chatCount(n) {
+  return n === 1 ? t('proj_chats_one') : t('proj_chats_n', { n });
+}
 
 export async function refreshProjects() {
   try { store.projects = await call('list_projects'); } catch { store.projects = []; }
@@ -18,7 +23,7 @@ export async function refreshProjects() {
 export async function renderProjects(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head"><h1>${t('projects')}</h1><div class="grow"></div><button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_project')}</button></div>
-    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_projects')}"></div>
+    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_projects')}" aria-label="${esc(t('search_projects'))}"></div>
     <div class="grid projects"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => newProjectDialog();
   searchToggle(view);
@@ -33,7 +38,7 @@ export async function renderProjects(view) {
     grid.innerHTML = '';
     for (const p of list) {
       const card = h(`<button class="card project-card" title="${esc(p.description || '')}"><span class="tile">${icon('folder', 16)}</span><span class="grow"><span class="row"><span class="t ellipsis">${esc(p.name)}</span>${p.starred ? `<span style="color:var(--accent)">${icon('starFill', 13)}</span>` : ''}</span>
-        <span class="f">${t('updated')} ${relTime(p.updated_at)} · ${p.conversation_count} ${t('chats').toLowerCase()}</span></span></button>`);
+        <span class="f">${t('updated')} ${relTime(p.updated_at)} · ${esc(chatCount(p.conversation_count))}</span></span></button>`);
       card.onclick = () => emit('navigate', { name: 'project', params: { id: p.id } });
       grid.appendChild(card);
     }
@@ -72,8 +77,8 @@ export async function renderProject(view, id) {
     <div class="project-layout">
       <div>
         <div class="page-head" style="margin-bottom:6px"><h1 class="grow ellipsis">${esc(p.name)}</h1>
-          <button class="icon-btn" data-act="star" title="${t('star')}">${icon(p.starred ? 'starFill' : 'star', 18)}</button>
-          <button class="icon-btn" data-act="more">${icon('more', 18)}</button></div>
+          <button class="icon-btn" data-act="star" title="${esc(t(p.starred ? 'unstar' : 'star'))}" aria-label="${esc(t('star'))}" aria-pressed="${!!p.starred}">${icon(p.starred ? 'starFill' : 'star', 18)}</button>
+          <button class="icon-btn" data-act="more" title="${esc(t('proj_options'))}" aria-label="${esc(t('proj_options'))}" aria-haspopup="menu">${icon('more', 18)}</button></div>
         <p class="muted" style="margin:0 0 20px">${esc(p.description || '')}</p>
         <div class="composer-slot"></div>
         <div class="section-title" style="padding-left:2px;margin-top:22px">${t('chats_in_project')}</div>
@@ -82,12 +87,19 @@ export async function renderProject(view, id) {
       <aside class="knowledge"></aside>
     </div></div></div>`;
   $('[data-act=back]', view).onclick = () => emit('navigate', { name: 'projects' });
-  $('[data-act=star]', view).onclick = async () => { await call('update_project', { req: { id, starred: !p.starred } }); renderProject(view, id); };
+  // a change that failed says so (it was an unhandled rejection) and leaves the page as it was
+  const update = (req) => call('update_project', { req: { id, ...req } }).then(() => true, (e) => { errorToast(e); return false; });
+  $('[data-act=star]', view).onclick = async () => { if (await update({ starred: !p.starred })) { await refreshProjects(); renderProject(view, id); } };
   $('[data-act=more]', view).onclick = (e) => showMenu(e.currentTarget, [
-    { label: t('rename'), icon: 'edit', onClick: async () => { const v = await promptDialog(t('rename'), p.name); if (v) { await call('update_project', { req: { id, name: v } }); await refreshProjects(); renderProject(view, id); } } },
-    { label: t('description'), icon: 'fileText', onClick: async () => { const v = await promptDialog(t('description'), p.description, { multiline: true }); if (v !== null) { await call('update_project', { req: { id, description: v } }); renderProject(view, id); } } },
+    { label: t('rename'), icon: 'edit', onClick: async () => { const v = await promptDialog(t('rename'), p.name); if (v && v.trim() && await update({ name: v.trim() })) { await refreshProjects(); renderProject(view, id); } } },
+    { label: t('description'), icon: 'fileText', onClick: async () => { const v = await promptDialog(t('description'), p.description, { multiline: true }); if (v !== null && await update({ description: v })) renderProject(view, id); } },
     { sep: true },
-    { label: t('delete'), icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog(t('confirm_delete_project'))) { await call('delete_project', { id }); await refreshProjects(); emit('navigate', { name: 'projects' }); } } },
+    { label: t('delete'), icon: 'trash', danger: true, onClick: async () => {
+      if (!(await confirmDialog(t('confirm_delete_project')))) return;
+      try { await call('delete_project', { id }); } catch (err) { errorToast(err); return; }
+      await refreshProjects();
+      emit('navigate', { name: 'projects' });
+    } },
   ], { placement: 'bottom-end', width: 200 });
 
   const composer = createComposer({
@@ -98,14 +110,19 @@ export async function renderProject(view, id) {
   $('.composer-slot', view).appendChild(composer.el);
 
   const chatsEl = $('.proj-chats', view);
-  const convs = await call('list_conversations', { kind: 'chat', projectId: id });
+  let convs;
+  try { convs = await call('list_conversations', { kind: 'chat', projectId: id }); } catch (e) { convs = []; errorToast(e); }
+  if (stale()) return;
   if (!convs.length) chatsEl.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_chats')}</div>`;
   for (const c of convs) {
-    const row = h(`<button class="list-item"><div class="grow"><div class="t">${esc(convTitle(c))}</div><div class="d">${t('last_message')} ${relTime(c.updated_at)}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+    const row = h(`<button class="list-item"><div class="grow" style="min-width:0"><div class="t ellipsis">${esc(convTitle(c))}</div><div class="d">${t('last_message')} ${relTime(c.updated_at)}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+    const menu = () => conversationMenu(row.querySelector('.more'), c, { onChange: () => renderProject(view, id), onDelete: () => renderProject(view, id) });
     row.addEventListener('click', (e) => {
-      if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), c, { onChange: () => renderProject(view, id), onDelete: () => renderProject(view, id) }); return; }
+      if (e.target.closest('.more')) { e.stopPropagation(); menu(); return; }
       emit('navigate', { name: 'chat', params: { id: c.id } });
     });
+    // right-click, the Menu key or Shift+F10: the row's menu
+    row.addEventListener('contextmenu', (e) => { e.preventDefault(); menu(); });
     chatsEl.appendChild(row);
   }
   renderKnowledge($('.knowledge', view), data, () => renderProject(view, id));
@@ -115,42 +132,55 @@ function renderKnowledge(el, data, rerender) {
   const p = data.project;
   const pct = Math.min(100, (data.knowledge_chars / CAPACITY_CHARS) * 100);
   el.innerHTML = `<div class="row" style="justify-content:space-between"><h3>${t('project_knowledge')}</h3><button class="btn sm" data-act="add">${icon('plus', 14)} ${t('add_content')}</button></div>
-    <div class="k-section"><div class="row" style="justify-content:space-between"><div style="font-weight:500">${t('instructions')}</div><button class="icon-btn sm" data-act="instr">${icon('edit', 14)}</button></div>
+    <div class="k-section"><div class="row" style="justify-content:space-between"><div style="font-weight:500">${t('instructions')}</div><button class="icon-btn sm" data-act="instr" title="${esc(t('instr_edit'))}" aria-label="${esc(t('instr_edit'))}">${icon('edit', 14)}</button></div>
       <div class="small ${p.instructions ? '' : 'muted'}" style="margin-top:6px;white-space:pre-wrap;max-height:160px;overflow:auto">${esc(p.instructions || t('instructions_help'))}</div></div>
     <div class="k-section"><div class="capacity"><div style="width:${pct.toFixed(1)}%"></div></div><div class="small muted" style="margin-top:6px">${pct < 1 && pct > 0 ? '<1' : Math.round(pct)}% ${t('of_capacity')}</div></div>
     <div class="k-section files"></div>`;
   const files = $('.files', el);
   if (!data.files.length) files.innerHTML = `<div class="muted small">${t('no_files')}</div>`;
   for (const f of data.files) {
-    const row = h(`<div class="k-file">${icon(f.kind === 'image' ? 'image' : 'fileText', 15)}<div class="grow ellipsis">${esc(f.name)}</div><span class="small muted">${humanSize(f.size)}</span><button class="icon-btn sm x">${icon('x', 14)}</button></div>`);
-    row.querySelector('.x').onclick = async () => { await call('remove_project_file', { id: f.id }); rerender(); };
+    const remove = t('proj_file_remove', { name: f.name });
+    const row = h(`<div class="k-file">${icon(f.kind === 'image' ? 'image' : 'fileText', 15)}<div class="grow ellipsis" title="${esc(f.name)}">${esc(f.name)}</div><span class="small muted">${humanSize(f.size)}</span><button class="icon-btn sm x" title="${esc(remove)}" aria-label="${esc(remove)}">${icon('x', 14)}</button></div>`);
+    row.querySelector('.x').onclick = async () => { try { await call('remove_project_file', { id: f.id }); } catch (e) { errorToast(e); } rerender(); };
     files.appendChild(row);
   }
   $('[data-act=instr]', el).onclick = async () => {
     const v = await promptDialog(t('set_instructions'), p.instructions, { multiline: true, placeholder: t('instructions_help') });
     if (v === null) return;
-    await call('update_project', { req: { id: p.id, instructions: v } });
+    try { await call('update_project', { req: { id: p.id, instructions: v } }); } catch (e) { errorToast(e); return; }
     rerender();
   };
   $('[data-act=add]', el).onclick = (e) => showMenu(e.currentTarget, [
     { label: t('upload_files'), icon: 'paperclip', onClick: async () => {
-      const paths = await call('pick_files');
-      if (!paths.length) return;
-      const r = await call('add_project_paths', { projectId: p.id, paths });
-      r.errors.forEach((x) => errorToast(new Error(x)));
+      try {
+        const paths = await call('pick_files');
+        if (!paths.length) return;
+        const r = await call('add_project_paths', { projectId: p.id, paths });
+        r.errors.forEach((x) => refused(x, x.name));
+      } catch (e) { errorToast(e); }
       rerender();
     } },
     { label: t('add_text_content'), icon: 'fileText', onClick: () => addTextDialog(p.id, rerender) },
+    { label: t('add_from_github'), icon: 'branch', onClick: () => import('./github_source.js').then((m) => m.openGithubSource({ projectId: p.id, onDone: rerender })).catch(errorToast) },
+    { label: t('add_from_link'), icon: 'download', onClick: () => import('./link_source.js').then((m) => m.openLinkSource({ projectId: p.id, onDone: rerender })).catch(errorToast) },
   ], { placement: 'bottom-end', width: 220 });
-  // drop files onto knowledge panel (HTML5, when available)
-  el.addEventListener('dragover', (e) => e.preventDefault());
+  // drop files onto knowledge panel (HTML5, when available); it lights up while files are over it
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('drop-over'); });
+  el.addEventListener('dragleave', (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove('drop-over'); });
   el.addEventListener('drop', async (e) => {
     e.preventDefault();
+    el.classList.remove('drop-over');
     for (const f of Array.from(e.dataTransfer?.files || [])) {
-      try { await call('add_project_bytes', { projectId: p.id, name: f.name, data: await fileToBase64(f) }); } catch (err) { errorToast(err); }
+      try { await call('add_project_bytes', { projectId: p.id, name: f.name, data: await fileToBase64(f) }); } catch (err) { refused(err, f.name); }
     }
     rerender();
   });
+}
+
+/** A file the project's knowledge didn't take: a refused attachment in the UI's language, anything else as before. */
+function refused(e, name) {
+  const said = attachmentError(e, name);
+  if (said) toast(said, 'error'); else errorToast(e);
 }
 
 function addTextDialog(projectId, done) {

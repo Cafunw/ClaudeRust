@@ -144,7 +144,8 @@ export function createComposer(opts) {
     </div>
   </div>`);
   const ta = $('textarea', el);
-  if (mode === 'chat') $('.composer-note', el).textContent = t('disclaimer');
+  // (cut short in a narrow window: the whole of it on hover)
+  if (mode === 'chat') Object.assign($('.composer-note', el), { textContent: t('disclaimer'), title: t('disclaimer') });
   const sendBtn = $('[data-act=send]', el);
   const attEl = $('.attachments', el);
   const activeEl = $('.active-tools', el);
@@ -393,9 +394,9 @@ export function createComposer(opts) {
     }
     if (m.efforts && m.efforts.length) {
       const cur = effortOf(m);
-      const seg = h(`<div style="padding:6px 10px 8px"><div class="small muted" style="margin-bottom:6px">${t('effort')}</div><div class="segmented">${m.efforts.map((e) => `<button data-e="${e}" class="${e === cur ? 'on' : ''}">${t('effort_' + e)}</button>`).join('')}</div></div>`);
+      const seg = h(`<div style="padding:6px 10px 8px"><div class="small muted" style="margin-bottom:6px">${t('effort')}</div><div class="segmented fill" role="group" aria-label="${esc(t('effort'))}">${m.efforts.map((e) => `<button data-e="${e}" class="${e === cur ? 'on' : ''}" aria-pressed="${e === cur}">${t('effort_' + e)}</button>`).join('')}</div></div>`);
       seg.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-        seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        seg.querySelectorAll('button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
         persist({ effort: b.dataset.e });
       }));
       items.push({ element: seg });
@@ -445,7 +446,7 @@ export function createComposer(opts) {
       const styles = [['normal', t('style_normal')], ['concise', t('style_concise')], ['explanatory', t('style_explanatory')], ['formal', t('style_formal')],
         ...(store.settings.custom_styles || []).map((s) => [s.id, s.name])];
       for (const [id, name] of styles) items.push({ label: name, checked: (st.style || 'normal') === id, onClick: () => persist({ style: id }) });
-      items.push({ label: t('create_style'), icon: 'edit', onClick: () => emit('open-settings', 'profile') });
+      items.push({ label: t('create_style'), icon: 'edit', onClick: () => emit('open-settings', 'styles') });
     }
     // Claude Code sessions use the CLI's own MCP config, not the app's servers
     const ccCode = mode === 'code' && ((opts.context && opts.context()) || {}).engine === 'claude-code';
@@ -496,6 +497,8 @@ export function createComposer(opts) {
       { label: t('upload_file'), icon: 'paperclip', onClick: async () => { const paths = await call('pick_files'); addPaths(paths); } },
     ];
     if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) items.push({ label: t('add_screenshot'), icon: 'image', onClick: addScreenshot });
+    items.push({ label: t('add_from_github'), icon: 'branch', onClick: () => import('./github_source.js').then((m) => m.openGithubSource({ onAdd: addStaged })).catch(errorToast) },
+      { label: t('add_from_link'), icon: 'download', onClick: () => import('./link_source.js').then((m) => m.openLinkSource({ onAdd: addStaged })).catch(errorToast) });
     if (store.mcpServers.some((s) => s.status === 'connected')) {
       items.push({ sep: true }, {
         label: t('prompts_resources'), icon: 'plug', keepOpen: true,
@@ -589,6 +592,9 @@ export function createComposer(opts) {
   if (opts.draftKey && store.drafts.has(opts.draftKey)) ta.value = store.drafts.get(opts.draftKey);
   refreshBar();
   requestAnimationFrame(() => autoGrow(ta));
+  // a narrower box wraps the placeholder (or the text) onto more lines
+  let lastWidth = 0;
+  new ResizeObserver(() => { if (ta.offsetWidth !== lastWidth) { lastWidth = ta.offsetWidth; autoGrow(ta); } }).observe(ta);
 
   const api = {
     el,

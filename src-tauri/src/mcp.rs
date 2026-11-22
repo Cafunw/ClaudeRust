@@ -69,6 +69,10 @@ pub struct ServerStatus {
     pub disabled: bool,
     /// OAuth tokens are stored for this remote server.
     pub signed_in: bool,
+    /// The runtime it couldn't start without ("node", "python", "uv", "npx").
+    pub runtime: Option<String>,
+    /// Why it couldn't start, as the UI reads a coded error ({kind, params, message}).
+    pub error_info: Option<Value>,
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>>;
@@ -407,7 +411,7 @@ fn kill_server_tree(child: &tokio::process::Child) {
 impl McpServer {
     fn not_running(&self) -> AppError {
         let why = self.state.lock().1.clone().map(|e| format!(" ({e})")).unwrap_or_default();
-        AppError::msg(format!("MCP server '{}' is not running{why}. Reload it in Settings → Developer.", self.name))
+        AppError::coded("mcp_not_running", json!({"name": self.name}), format!("MCP server '{}' is not running{why}. Reload it in Settings → Developer.", self.name))
     }
 
     /// Send one request and wait for its answer (no session renewal).
@@ -642,7 +646,7 @@ impl McpServer {
         *session.lock() = None;
         self.handshake()
             .await
-            .map_err(|e| AppError::msg(format!("MCP server '{}' ended its session, and starting a new one failed: {e}", self.name)))
+            .map_err(|e| AppError::coded("mcp_session_failed", json!({"name": self.name}), format!("MCP server '{}' ended its session, and starting a new one failed: {e}", self.name)))
     }
 
     /// The answer `rx` brings by `until` (stdio, and the old HTTP+SSE transport).
@@ -653,11 +657,11 @@ impl McpServer {
                 match answer {
                     Ok(Ok(v)) => Ok(Reply::Done(v)),
                     Ok(Err(e)) => Err(rpc_error(&e)),
-                    Err(_) => Err(AppError::msg(format!("MCP server '{}' disconnected", self.name))),
+                    Err(_) => Err(AppError::coded("mcp_disconnected", json!({"name": self.name}), format!("MCP server '{}' disconnected", self.name))),
                 }
             }
             // the guard withdraws the request
-            Err(_) => Err(AppError::msg(format!("MCP server '{}' timed out on {method}", self.name))),
+            Err(_) => Err(AppError::coded("mcp_timeout", json!({"name": self.name, "method": method}), format!("MCP server '{}' timed out on {method}", self.name))),
         }
     }
 
@@ -806,6 +810,8 @@ impl McpServer {
                 Transport::Http { oauth: Some(o), .. } => o.tokens.try_lock().map_or(true, |t| t.is_some()),
                 _ => false,
             },
+            runtime: None,
+            error_info: None,
         }
     }
 }
@@ -1138,6 +1144,8 @@ impl McpManager {
                     logs: vec![],
                     disabled: true,
                     signed_in: false,
+                    runtime: None,
+                    error_info: None,
                 });
                 continue;
             }
@@ -1186,6 +1194,8 @@ impl McpManager {
                 self.failed.lock().push(ServerStatus {
                     transport: transport_of(&conf).into(),
                     status: if matches!(&e, AppError::Api { kind, .. } if kind == "needs_auth") { "needs_auth" } else { "failed" }.into(),
+                    runtime: crate::node_runtime::missing_runtime(e.kind()),
+                    error_info: serde_json::to_value(&e).ok(),
                     error: Some(e.to_string()),
                     tools: vec![],
                     server_info: Value::Null,
@@ -1240,6 +1250,8 @@ impl McpManager {
             logs: vec![],
             disabled: false,
             signed_in: false,
+            runtime: None,
+            error_info: None,
         }));
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
@@ -1548,11 +1560,13 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs, roo
     } else {
         let command = conf["command"]
             .as_str()
-            .ok_or_else(|| (AppError::msg("Missing \"command\" (or \"url\") in server config"), vec![]))?;
+            .ok_or_else(|| (AppError::coded("mcp_no_command", Value::Null, "Missing \"command\" (or \"url\") in server config"), vec![]))?;
         // an extension's secret settings are references to the credential store (extensions.rs)
         let args = conf["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| resolve_secrets(s, "setting"));
         let args: Vec<String> = args.collect::<AppResult<_>>().map_err(|e| (e, vec![]))?;
         crate::shellenv::ready().await;
+        // the downloaded node when the PATH has none, a missing runtime named (node_runtime.rs)
+        let command = &crate::node_runtime::resolve(command, conf["extension"].is_object()).map_err(|e| (e, vec![]))?;
         let mut cmd = crate::shellenv::command(command, &args);
         for (k, v) in conf["env"].as_object().into_iter().flatten() {
             if let Some(s) = v.as_str() {
@@ -1569,7 +1583,7 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs, roo
         cmd.process_group(0);
         let mut child = cmd
             .spawn()
-            .map_err(|e| (AppError::msg(format!("Could not start `{command}`: {e}")), vec![]))?;
+            .map_err(|e| (AppError::coded("mcp_start_failed", json!({"cmd": command, "io": format!("{:?}", e.kind())}), format!("Could not start `{command}`: {e}")), vec![]))?;
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();

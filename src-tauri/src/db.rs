@@ -445,6 +445,12 @@ impl Db {
         Ok(())
     }
 
+    /// Move the log into the file and empty it, so a secret just rewritten
+    /// out of a row (zeroed by secure_delete) leaves no old copy in either.
+    pub fn flush_log(&self) {
+        let _ = self.conn.lock().execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
     // ----------------------------------------------------------- conversations
 
     pub fn conv_create(

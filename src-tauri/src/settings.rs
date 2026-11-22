@@ -1,6 +1,6 @@
 //! Application settings, persisted as one JSON document in the settings table.
-//! The API key is kept out of this struct: it lives in the OS keychain
-//! (macOS/Windows) or in a separate settings row (Linux).
+//! The API keys are kept out of that document: they live in the OS keychain
+//! (macOS/Windows) or in separate settings rows (Linux).
 
 use crate::db::Db;
 use crate::error::AppResult;
@@ -107,6 +107,9 @@ pub struct Settings {
     pub trusted_hooks: serde_json::Map<String, Value>,
     /// OpenAI-compatible endpoint for local / other models ("" = off), e.g. http://localhost:11434/v1
     pub oai_base_url: String,
+    /// Read from a patch or an older version's stored settings, never written out: it is kept
+    /// with `store_oai_key`, and the UI only learns whether there is one (`oai_key_view`).
+    #[serde(skip_serializing)]
     pub oai_api_key: String,
     /// Editor for "open in editor": auto | code | cursor | windsurf | zed | subl | idea | system
     pub editor: String,
@@ -184,6 +187,8 @@ const KEY_SETTINGS: &str = "app_settings";
 /// The last stored settings that couldn't be read as a whole.
 const KEY_SETTINGS_BACKUP: &str = "app_settings.unreadable";
 const KEY_API: &str = "api_key";
+/// The OpenAI-compatible endpoint's key, in the credential store or (where it keeps nothing) its own row.
+const KEY_OAI: &str = "oai_api_key";
 /// Marks a settings backup file.
 const EXPORT_MARKER: &str = "clauderust_settings";
 /// Kept out of backups: secrets, trust decisions, machine-specific paths.
@@ -227,7 +232,7 @@ pub(crate) fn secret_service() -> &'static str {
 
 impl Settings {
     pub fn load(db: &Db) -> Settings {
-        match db.setting_get(KEY_SETTINGS) {
+        let mut s = match db.setting_get(KEY_SETTINGS) {
             Ok(Some(raw)) => match serde_json::from_str::<Settings>(&raw) {
                 Ok(s) => s,
                 Err(e) => {
@@ -236,12 +241,21 @@ impl Settings {
                     // every field that still fits, rather than starting over
                     // (and then saving the defaults over the user's settings)
                     log::warn!("settings didn't load as a whole ({e}); recovering them field by field");
-                    let _ = db.setting_set(KEY_SETTINGS_BACKUP, &raw);
+                    let _ = db.setting_set(KEY_SETTINGS_BACKUP, &without_oai_key(&raw));
                     Settings::recovered(&raw)
                 }
             },
             _ => Settings::default(),
+        };
+        if s.oai_api_key.is_empty() {
+            s.oai_api_key = load_oai_key(db);
+        } else if store_oai_key(db, &s.oai_api_key).is_ok() {
+            // an older version kept the endpoint key in this row: written again without it
+            if s.save(db).is_ok() {
+                db.flush_log();
+            }
         }
+        s
     }
 
     /// The fields of stored settings that still deserialize, on defaults.
@@ -277,7 +291,7 @@ impl Settings {
     /// These settings with a backup file's values applied (only known,
     /// exportable fields are taken).
     pub fn imported(&self, backup: &Value) -> AppResult<Settings> {
-        let o = backup.as_object().filter(|o| o.contains_key(EXPORT_MARKER)).ok_or_else(|| crate::error::AppError::msg("That isn't a ClaudeRust settings file."))?;
+        let o = backup.as_object().filter(|o| o.contains_key(EXPORT_MARKER)).ok_or_else(|| crate::error::AppError::coded("settings_file_invalid", Value::Null, "That isn't a ClaudeRust settings file."))?;
         let known = serde_json::to_value(Settings::default())?;
         // field by field, so one value of the wrong type (an older or edited
         // file) is skipped instead of failing the whole restore
@@ -309,13 +323,25 @@ impl Settings {
             }
         }
         let mut s: Settings = serde_json::from_value(v)?;
+        if patch.get("oai_api_key").is_none() {
+            s.oai_api_key = self.oai_api_key.clone();
+        }
         s.normalize();
         Ok(s)
+    }
+
+    /// What the UI is told about the endpoint key: whether there is one, its masked
+    /// form, and whether it is (or would be) kept in the app's database. Never the key.
+    pub fn oai_key_view(&self, db: &Db) -> Value {
+        let k = self.oai_api_key.as_str();
+        let in_db = !crate::mcp_oauth::STORE_PERSISTS || db.setting_get(KEY_OAI).ok().flatten().is_some();
+        json!({"oai_has_key": !k.is_empty(), "oai_key_masked": (!k.is_empty()).then(|| mask_key(k)), "oai_key_in_db": in_db})
     }
 
     pub fn normalize(&mut self) {
         let b = self.base_url.trim().trim_end_matches('/').to_string();
         self.base_url = if b.is_empty() { DEFAULT_BASE_URL.into() } else { b };
+        self.oai_api_key = self.oai_api_key.trim().to_string();
         self.max_tokens = self.max_tokens.clamp(1024, 128_000);
         self.zoom = self.zoom.clamp(0.5, 2.5);
         self.bash_timeout_secs = self.bash_timeout_secs.clamp(5, 600);
@@ -373,6 +399,43 @@ pub fn store_api_key(db: &Db, key: Option<&str>) -> AppResult<()> {
     match key {
         Some(k) => db.setting_set(KEY_API, k),
         None => db.setting_delete(KEY_API),
+    }
+}
+
+/// The OpenAI-compatible endpoint's key ("" when none).
+pub fn load_oai_key(db: &Db) -> String {
+    let stored = crate::mcp_oauth::STORE_PERSISTS.then(|| crate::mcp_oauth::secret_get(KEY_OAI)).flatten();
+    stored.or_else(|| db.setting_get(KEY_OAI).ok().flatten()).unwrap_or_default()
+}
+
+/// Keep (or, with "", forget) the endpoint key: in the credential store where it keeps
+/// secrets across restarts, else in its own settings row, never in the settings document.
+pub fn store_oai_key(db: &Db, key: &str) -> AppResult<()> {
+    if crate::mcp_oauth::STORE_PERSISTS {
+        if key.is_empty() {
+            crate::mcp_oauth::secret_delete(KEY_OAI);
+        } else {
+            match crate::mcp_oauth::secret_set(KEY_OAI, key) {
+                Ok(()) => return db.setting_delete(KEY_OAI),
+                Err(e) => log::warn!("the credential store didn't take the endpoint key ({e}); it is kept in the app's database"),
+            }
+        }
+    }
+    if key.is_empty() {
+        db.setting_delete(KEY_OAI)
+    } else {
+        db.setting_set(KEY_OAI, key)
+    }
+}
+
+/// A stored settings document without the endpoint key an older version kept in it.
+fn without_oai_key(raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Object(mut o)) if o.contains_key("oai_api_key") => {
+            o.remove("oai_api_key");
+            Value::Object(o).to_string()
+        }
+        _ => raw.to_string(),
     }
 }
 
@@ -442,6 +505,62 @@ mod tests {
         assert_eq!(s.tool_policies["srv__t"], "allow");
         assert_eq!(s.max_tokens, Settings::default().max_tokens);
         assert_eq!(db.setting_get(KEY_SETTINGS_BACKUP).unwrap().as_deref(), Some(raw), "the original is kept");
+    }
+
+    #[test]
+    fn the_endpoint_key_moves_out_of_the_settings_row() {
+        let db = Db::open_in_memory().unwrap();
+        // as an older version stored it
+        db.setting_set(KEY_SETTINGS, r#"{"theme":"dark","oai_base_url":"http://localhost:11434/v1","oai_api_key":"sk-or-legacy-1234567890"}"#).unwrap();
+        let s = Settings::load(&db);
+        assert_eq!((s.oai_api_key.as_str(), s.theme.as_str()), ("sk-or-legacy-1234567890", "dark"));
+        let row = db.setting_get(KEY_SETTINGS).unwrap().unwrap();
+        assert!(!row.contains("sk-or-legacy") && row.contains("localhost:11434"), "{row}");
+        // tests keep it in its own row, as Linux does here; the next start reads it there
+        assert_eq!(load_oai_key(&db), "sk-or-legacy-1234567890");
+        assert_eq!(Settings::load(&db).oai_api_key, "sk-or-legacy-1234567890");
+        // changing anything else keeps it; a patch replaces or removes it
+        assert_eq!(s.patched(&json!({"theme": "light"})).unwrap().oai_api_key, s.oai_api_key);
+        assert_eq!(s.patched(&json!({"oai_api_key": " new-key \n"})).unwrap().oai_api_key, "new-key");
+        store_oai_key(&db, "").unwrap();
+        assert_eq!((load_oai_key(&db).as_str(), Settings::load(&db).oai_api_key.as_str()), ("", ""));
+        // a document that can't be read whole is kept as a copy, without the key
+        db.setting_set(KEY_SETTINGS, r#"{"max_tokens":"lots","oai_api_key":"sk-or-legacy-2"}"#).unwrap();
+        assert_eq!(Settings::load(&db).oai_api_key, "sk-or-legacy-2");
+        let copy = db.setting_get(KEY_SETTINGS_BACKUP).unwrap().unwrap();
+        assert!(!copy.contains("sk-or-legacy-2") && copy.contains("lots"), "{copy}");
+    }
+
+    #[test]
+    fn no_copy_of_the_old_settings_row_stays_in_the_database_files() {
+        let dir = std::env::temp_dir().join(format!("cr-oai-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).unwrap();
+        db.setting_set(KEY_SETTINGS, r#"{"theme":"dark","oai_api_key":"sk-or-legacy-on-disk"}"#).unwrap();
+        assert_eq!(Settings::load(&db).oai_api_key, "sk-or-legacy-on-disk");
+        // (tests keep the key in its own row, as Linux does: only the old document's copy must be gone)
+        let old = br#""oai_api_key":"sk-or-legacy-on-disk""#;
+        for f in [path.clone(), dir.join("t.db-wal")] {
+            let bytes = std::fs::read(&f).unwrap_or_default();
+            assert!(!bytes.windows(old.len()).any(|w| w == old), "{} still has the old row", f.display());
+        }
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ui_and_backups_never_get_the_endpoint_key() {
+        let db = Db::open_in_memory().unwrap();
+        let s = Settings { oai_api_key: "sk-or-v1-abcdefghijklmnopqrstuvwxyz".into(), ..Default::default() };
+        assert!(!serde_json::to_string(&s).unwrap().contains("abcdefghij"), "not in the stored document nor the UI's copy");
+        assert!(!s.export_json().unwrap().to_string().contains("abcdefghij"));
+        let v = s.oai_key_view(&db);
+        let masked = v["oai_key_masked"].as_str().unwrap();
+        assert!(v["oai_has_key"] == true && masked.contains('…') && !masked.contains("klmnopq"), "{v}");
+        assert_eq!(v["oai_key_in_db"], true, "tests keep it in the database, as Linux does");
+        let none = Settings::default().oai_key_view(&db);
+        assert_eq!((&none["oai_has_key"], &none["oai_key_masked"]), (&json!(false), &Value::Null));
     }
 
     #[test]

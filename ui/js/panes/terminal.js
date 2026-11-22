@@ -5,6 +5,7 @@ import { call, on } from '../api.js';
 import { h, esc, errorToast, toast, showMenu } from '../util.js';
 import { icon } from '../icons.js';
 import { registerPane, context, show } from '../workspace.js';
+import { errorText } from '../neterr.js';
 
 let lib = null;
 const sessions = new Map(); // convId -> { term, fit, ptyId, el, exited }
@@ -49,7 +50,7 @@ async function start(s, ctx) {
     const early = unclaimed.get(r.id);
     if (early) { unclaimed.delete(r.id); s.term.write(early.data); }
   } catch (e) {
-    s.term.writeln(`\r\n\x1b[31m${(e && e.message) || e}\x1b[0m`);
+    s.term.writeln(`\r\n\x1b[31m${errorText(e)}\x1b[0m`);
   }
 }
 

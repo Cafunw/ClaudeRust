@@ -1094,7 +1094,7 @@ async fn auto_compact<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_i
         }
         Err(e) => {
             log::warn!("auto-compaction failed: {e}");
-            let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true, "error": e.to_string()}));
+            let _ = app.emit("compacted", json!({"conversation_id": conv_id, "auto": true, "error": e.to_string(), "error_info": e}));
         }
     }
 }

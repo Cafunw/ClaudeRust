@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t, LANGUAGES } from './i18n.js';
 import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
-import { $, esc, h, modal, button, toast, errorToast, promptDialog, confirmDialog } from './util.js';
+import { $, esc, h, modal, button, toast, errorToast, confirmDialog } from './util.js';
 import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
@@ -13,9 +13,12 @@ import { errorNotice } from './neterr.js';
 import { connectorDialog, removeConnector } from './mcp_connector.js';
 import { diagnosticsReport } from './diagnostics.js';
 import { openDirectory } from './connector_directory.js';
-import { installExtension, installedExtension, extensionControls } from './extensions_page.js';
+import { installExtension, installedExtension, extensionControls, nodeRuntimeRow } from './extensions_page.js';
+import { openExtensionDirectory } from './extension_directory.js';
 import { renderSkills } from './skills_page.js';
 import { renderMemory } from './memory_page.js';
+import { styleEditor } from './style_gen.js';
+import { wholeIn, acceleratorLabel } from './settings_values.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -48,7 +51,7 @@ export function openSettings(tab = 'general') {
   const nav = $('.settings-nav', root);
   const body = $('.settings-body', root);
   for (const [id, ic, label] of TABS) {
-    const b = h(`<button class="nav-item" data-tab="${id}">${icon(ic, 16)}<span class="label">${t(label)}</span></button>`);
+    const b = h(`<button class="nav-item" data-tab="${id}" title="${esc(t(label))}">${icon(ic, 16)}<span class="label">${esc(t(label))}</span></button>`);
     b.onclick = () => show(id);
     nav.appendChild(b);
   }
@@ -63,11 +66,15 @@ export function openSettings(tab = 'general') {
   let active = tab;
   function show(id) {
     leave();
+    // "styles" is the Profile tab scrolled to its styles
+    const section = id === 'styles' ? id : null;
+    if (!RENDER[id]) id = 'general';
     active = id;
     nav.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
     body.innerHTML = '';
     body.scrollTop = 0;
-    (RENDER[id] || RENDER.general)(body, { onLeave: (f) => leaving.push(f), close: () => m.close() });
+    RENDER[id](body, { onLeave: (f) => leaving.push(f), close: () => m.close() });
+    if (section) body.querySelector(`[data-sec=${section}]`)?.scrollIntoView({ block: 'start' });
   }
   // redraw for changes made elsewhere, but not under the user's cursor: a
   // field being typed in would lose its text
@@ -78,13 +85,22 @@ export function openSettings(tab = 'general') {
   const off = () => { offSettings(); offMcp.then((u) => u()); };
   current = { show };
   show(tab);
+  // the keyboard starts on the tab that is shown, not on the first one
+  nav.querySelector('.nav-item.active')?.focus({ preventScroll: true });
 }
 
 function save(patch) { emit('save-settings', patch); }
 
+/** `control` named for assistive tech by `label`, unless it already has a name. */
+function named(control, label) {
+  const el = control.matches('input, select, textarea') ? control : control.querySelector('.switch input, select');
+  if (el && !el.getAttribute('aria-label')) el.setAttribute('aria-label', label);
+  return control;
+}
+
 function row(title, desc, control) {
   const r = h(`<div class="setting-row"><div class="txt"><div class="t">${esc(title)}</div>${desc ? `<div class="d">${esc(desc)}</div>` : ''}</div></div>`);
-  r.appendChild(control);
+  r.appendChild(named(control, title));
   return r;
 }
 
@@ -95,22 +111,26 @@ function toggle(key) {
 }
 
 function select(key, options) {
-  const sel = h(`<select class="select" style="width:auto;min-width:200px">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(store.settings[key]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
+  const sel = h(`<select class="select" style="width:auto;min-width:min(200px,100%);max-width:100%">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(store.settings[key]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
   sel.addEventListener('change', () => save({ [key]: sel.value }));
   return sel;
 }
 
-function textField(key, { multiline = false, placeholder = '', type = 'text' } = {}) {
+function textField(key, { multiline = false, placeholder = '', type = 'text', min = 0, max = Infinity } = {}) {
   const el = multiline
     ? h(`<textarea class="textarea" rows="5" placeholder="${esc(placeholder)}"></textarea>`)
     : h(`<input class="input" type="${type}" placeholder="${esc(placeholder)}">`);
   el.value = store.settings[key] ?? '';
   el.addEventListener('change', () => {
     if (type !== 'number') { save({ [key]: el.value }); return; }
-    // whole, non-negative numbers only (the settings are integers); an empty
-    // or invalid entry goes back to the current value instead of saving 0
-    const n = Number(el.value);
-    if (el.value.trim() === '' || !Number.isInteger(n) || n < 0) { el.value = store.settings[key] ?? ''; toast(t('invalid_number'), 'error'); return; }
+    // whole numbers in the setting's range only; an empty or invalid entry
+    // goes back to the current value instead of saving 0 (or being clamped unseen)
+    const n = wholeIn(el.value, min, max);
+    if (n === null) {
+      el.value = store.settings[key] ?? '';
+      toast(max === Infinity ? t('invalid_number') : t('invalid_range', { min, max }), 'error');
+      return;
+    }
     save({ [key]: n });
   });
   return el;
@@ -118,7 +138,7 @@ function textField(key, { multiline = false, placeholder = '', type = 'text' } =
 
 function field(label, control, help) {
   const f = h(`<div class="field"><label class="label">${esc(label)}</label></div>`);
-  f.appendChild(control);
+  f.appendChild(named(control, label));
   if (help) f.appendChild(h(`<div class="help">${esc(help)}</div>`));
   return f;
 }
@@ -173,33 +193,28 @@ const RENDER = {
     body.appendChild(field(t('preferences'), textField('preferences', { multiline: true }), t('preferences_help')));
     body.appendChild(row(t('language'), '', select('language', LANGUAGES.map((l) => [l.id, l.name]))));
     // custom styles
-    body.appendChild(h(`<h4>${t('style')}</h4>`));
+    body.appendChild(h(`<h4 data-sec="styles">${t('style')}</h4>`));
+    body.appendChild(h(`<p class="help" style="margin:-4px 0 6px">${esc(t('style_help'))}</p>`));
     const list = h('<div></div>');
     const draw = () => {
       list.innerHTML = '';
       for (const s of store.settings.custom_styles || []) {
-        const r = h(`<div class="setting-row"><div class="txt"><div class="t">${esc(s.name)}</div><div class="d ellipsis">${esc(s.prompt)}</div></div><button class="icon-btn" data-a="e">${icon('edit', 15)}</button><button class="icon-btn" data-a="d">${icon('trash', 15)}</button></div>`);
+        const r = h(`<div class="setting-row"><div class="txt"><div class="t">${esc(s.name)}</div><div class="d ellipsis">${esc(s.prompt)}</div></div><button class="icon-btn" data-a="e" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))} · ${esc(s.name)}">${icon('edit', 15)}</button><button class="icon-btn" data-a="d" title="${esc(t('delete'))}" aria-label="${esc(t('delete'))} · ${esc(s.name)}">${icon('trash', 15)}</button></div>`);
         r.querySelector('[data-a=e]').onclick = () => editStyle(s);
         r.querySelector('[data-a=d]').onclick = async () => {
-          if (!(await confirmDialog(`${t('delete')} “${s.name}”?`))) return;
+          if (!(await confirmDialog(t('style_delete_q', { name: s.name })))) return;
           save({ custom_styles: (store.settings.custom_styles || []).filter((x) => x.id !== s.id) });
         };
         list.appendChild(r);
       }
-      const add = h(`<button class="btn sm" style="margin-top:8px">${icon('plus', 14)} ${t('create_style')}</button>`);
+      const add = h(`<button class="btn sm" style="margin-top:8px">${icon('plus', 14)} ${esc(t('style_new'))}</button>`);
       add.onclick = () => editStyle(null);
       list.appendChild(add);
     };
-    const editStyle = async (s) => {
-      const name = await promptDialog(t('name'), s ? s.name : '');
-      if (!name) return;
-      const prompt = await promptDialog(t('style'), s ? s.prompt : '', { multiline: true, placeholder: 'e.g. Write like a friendly expert. Use short paragraphs and concrete examples.' });
-      if (prompt === null) return;
-      const styles = (store.settings.custom_styles || []).slice();
-      if (s) Object.assign(styles.find((x) => x.id === s.id), { name, prompt });
-      else styles.push({ id: 'custom-' + Date.now().toString(36), name, prompt });
-      save({ custom_styles: styles });
-    };
+    const editStyle = (s) => styleEditor(s, ({ name, prompt }) => {
+      const styles = store.settings.custom_styles || [];
+      save({ custom_styles: s ? styles.map((x) => (x.id === s.id ? { ...x, name, prompt } : x)) : [...styles, { id: 'custom-' + Date.now().toString(36), name, prompt }] });
+    });
     draw();
     // (an observer of the whole document watched for the list going away:
     // it saw every change anywhere, a streaming answer's too, while open)
@@ -210,13 +225,13 @@ const RENDER = {
   appearance(body) {
     body.appendChild(h(`<h3>${t('s_appearance')}</h3>`));
     const cur = store.settings.theme === 'light' || store.settings.theme === 'dark' ? store.settings.theme : 'system';
-    const th = h(`<div class="segmented icons">${[['system', 'monitor', t('system')], ['light', 'sun', t('light')], ['dark', 'moon', t('dark')]].map(([id, ic, label]) => `<button data-th="${id}" title="${esc(label)}" aria-label="${esc(label)}" class="${cur === id ? 'on' : ''}">${icon(ic, 15)}</button>`).join('')}</div>`);
+    const th = h(`<div class="segmented icons">${[['system', 'monitor', t('system')], ['light', 'sun', t('light')], ['dark', 'moon', t('dark')]].map(([id, ic, label]) => `<button data-th="${id}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${cur === id}" class="${cur === id ? 'on' : ''}">${icon(ic, 15)}</button>`).join('')}</div>`);
     th.querySelectorAll('button').forEach((b) => b.onclick = () => save({ theme: b.dataset.th }));
     body.appendChild(row(t('theme'), '', th));
     const fonts = [['default', t('font_default')], ['sans', t('font_sans')], ['system', t('font_system')], ['dyslexic', t('font_dyslexic')]];
     body.appendChild(row(t('chat_font'), '', select('chat_font', fonts)));
     body.appendChild(row(t('chat_width'), t('chat_width_d'), select('chat_width', [['normal', t('width_normal')], ['wide', t('width_wide')], ['full', t('width_full')]])));
-    const z = h(`<div class="segmented">${[0.8, 0.9, 1, 1.1, 1.25].map((v) => `<button data-z="${v}" class="${Math.abs((store.settings.zoom || 1) - v) < 0.01 ? 'on' : ''}">${Math.round(v * 100)}%</button>`).join('')}</div>`);
+    const z = h(`<div class="segmented">${[0.8, 0.9, 1, 1.1, 1.25].map((v) => { const on = Math.abs((store.settings.zoom || 1) - v) < 0.01; return `<button data-z="${v}" aria-pressed="${on}" class="${on ? 'on' : ''}">${Math.round(v * 100)}%</button>`; }).join('')}</div>`);
     z.querySelectorAll('button').forEach((b) => b.onclick = () => emit('set-zoom', Number(b.dataset.z)));
     body.appendChild(row(t('zoom'), '', z));
   },
@@ -232,17 +247,18 @@ const RENDER = {
     const keyInput = h(`<input class="input mono" type="password" placeholder="sk-ant-…" autocomplete="off">`);
     const saveKey = button(s.has_api_key ? t('replace_key') : t('save'), 'primary', async () => {
       const k = keyInput.value.trim();
-      if (!k) return;
+      if (!k) { keyInput.focus(); return; }
       try { await call('set_api_key', { key: k }); toast(t('key_saved')); keyInput.value = ''; emit('reload-settings'); } catch (e) { errorToast(e); }
     });
+    keyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveKey.click(); });
     const f = field(t('api_key'), keyInput, t('api_key_help'));
-    const actions = h('<div class="row" style="margin-top:10px"></div>');
+    const actions = h('<div class="row" style="margin-top:10px;flex-wrap:wrap"></div>');
     actions.appendChild(saveKey);
     const testOut = h('<div style="margin-top:10px"></div>');
     const test = button(t('test_connection'), '', async () => {
       test.disabled = true;
       testOut.replaceChildren();
-      try { const r = await call('test_connection'); toast(t('connection_ok', { n: r.models })); emit('models-refresh'); } catch (e) { testOut.append(errorNotice((e && e.message) || String(e))); } finally { test.disabled = false; }
+      try { const r = await call('test_connection'); toast(t('connection_ok', { n: r.models })); emit('models-refresh'); } catch (e) { testOut.append(errorNotice(e)); } finally { test.disabled = false; }
     });
     actions.appendChild(test);
     if (s.has_api_key) actions.appendChild(button(t('remove_key'), 'ghost', async () => { await call('set_api_key', { key: null }); toast(t('key_removed')); emit('reload-settings'); }));
@@ -252,23 +268,39 @@ const RENDER = {
     body.appendChild(f);
     body.appendChild(field(t('base_url'), textField('base_url', { placeholder: 'https://api.anthropic.com' }), t('base_url_help')));
     {
-      const sec = h(`<div class="section-title" style="margin-top:22px">${esc(t('oai_title'))}</div>`);
-      body.appendChild(sec);
+      body.appendChild(h(`<h4>${esc(t('oai_title'))}</h4>`));
       body.appendChild(field(t('oai_url'), textField('oai_base_url', { placeholder: 'http://localhost:11434/v1' }), t('oai_url_help')));
-      body.appendChild(field(t('oai_key'), textField('oai_api_key', { type: 'password', placeholder: t('optional') })));
-      const st = h('<div class="row-inline" style="gap:10px;align-items:center"></div>');
+      // the key itself never comes to the UI: only whether there is one, masked
+      if (s.oai_has_key) body.appendChild(row(t('current_key'), s.oai_key_masked || '', h('<span></span>')));
+      const oaiKey = h(`<input class="input mono" type="password" autocomplete="off" placeholder="${esc(t('optional'))}">`);
+      const setOaiKey = async (k, done) => {
+        try { store.settings = await call('save_settings', { patch: { oai_api_key: k } }); toast(t(done)); emit('settings-changed'); } catch (e) { errorToast(e); }
+      };
+      const saveOai = button(s.oai_has_key ? t('replace_key') : t('save'), '', () => {
+        const k = oaiKey.value.trim();
+        return k ? setOaiKey(k, 'key_saved') : oaiKey.focus();
+      });
+      oaiKey.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveOai.click(); });
+      const oaiActs = h('<div class="row" style="margin-top:10px;flex-wrap:wrap"></div>');
+      oaiActs.appendChild(saveOai);
+      if (s.oai_has_key) oaiActs.appendChild(button(t('remove_key'), 'ghost', () => setOaiKey('', 'key_removed')));
+      const of = field(t('oai_key'), oaiKey, t(s.oai_key_in_db ? 'oai_key_db' : 'oai_key_store'));
+      of.appendChild(oaiActs);
+      body.appendChild(of);
+      const st = h('<div class="row" style="gap:10px;flex-wrap:wrap"></div>');
       const btn = h(`<button class="btn sm">${esc(t('oai_load'))}</button>`);
       const out = h('<span class="muted small"></span>');
       const err = h('<div style="margin-top:10px"></div>');
       btn.onclick = async () => {
-        out.textContent = '…';
+        btn.disabled = true;
+        out.replaceChildren(h('<span class="spinner"></span>'));
         err.replaceChildren();
         try {
           await new Promise((r) => setTimeout(r, 150)); // let a just-edited field save
           const list = await call('oai_refresh');
           out.textContent = list.length ? t('oai_found', { n: list.length, list: list.slice(0, 6).join(', ') }) : t('oai_off');
           emit('refresh-models');
-        } catch (e) { out.textContent = ''; err.append(errorNotice((e && e.message) || String(e))); }
+        } catch (e) { out.textContent = ''; err.append(errorNotice(e)); } finally { btn.disabled = false; }
       };
       st.append(btn, out);
       body.append(st, err);
@@ -276,7 +308,8 @@ const RENDER = {
     body.appendChild(h(`<h4>${t('model')}</h4>`));
     body.appendChild(row(t('default_model'), '', select('default_model', modelOptions())));
     body.appendChild(row(t('title_model'), '', select('title_model', modelOptions())));
-    const mt = textField('max_tokens', { type: 'number' });
+    // the range settings.rs keeps it in
+    const mt = textField('max_tokens', { type: 'number', min: 1024, max: 128000 });
     mt.style.width = '140px';
     body.appendChild(row(t('max_tokens_setting'), '', mt));
   },
@@ -290,10 +323,8 @@ const RENDER = {
     // settings this build's backend may not have yet
     if ('fast_mode' in store.settings) body.appendChild(row(t('set_fast_default'), t('set_fast_default_d'), toggle('fast_mode')));
     if ('code_execution' in store.settings) body.appendChild(row(t('set_code_exec'), t('set_code_exec_d'), toggle('code_execution')));
-    // past-chat search runs only in the API engine (claudecode.rs leaves it off)
-    const onAccount = store.settings.chat_engine === 'claude-code' || (store.settings.chat_engine !== 'api' && !store.settings.has_api_key);
-    body.appendChild(row(t('chat_search_toggle'), onAccount ? `${t('chat_search_toggle_d')} ${t('chat_search_cc_note')}` : t('chat_search_toggle_d'), toggle('chat_search')));
-    body.appendChild(row(t('send_enter'), t('send_enter_d'), toggle('send_on_enter')));
+    body.appendChild(row(t('chat_search_toggle'), t('chat_search_toggle_d'), toggle('chat_search')));
+    body.appendChild(row(t('send_enter'), t('send_enter_d', { key: `${isMac ? '⌘' : 'Ctrl'}+Enter` }), toggle('send_on_enter')));
     body.appendChild(h(`<h4>API</h4>`));
     body.appendChild(row(t('fallbacks_toggle'), t('fallbacks_toggle_d'), toggle('refusal_fallbacks')));
     {
@@ -308,7 +339,7 @@ const RENDER = {
     body.appendChild(h(`<p class="muted" style="margin:-6px 0 16px">${esc(t('mcp_desc'))}</p>`));
     const actions = h('<div class="row" style="margin-bottom:16px;flex-wrap:wrap"></div>');
     const servers = h('<div></div>');
-    body.append(actions, servers);
+    body.append(actions, servers, nodeRuntimeRow());
     let status;
     const draw = async (st) => {
       status = st || await call('mcp_status');
@@ -330,12 +361,14 @@ const RENDER = {
       actions.appendChild(button(t('open_file'), '', () => call('open_path', { path: status.config_path }).catch(errorToast)));
       actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
       actions.appendChild(button(t('install_extension'), '', () => installExtension(draw)));
+      actions.appendChild(button(t('ed_title'), '', () => openExtensionDirectory(draw)));
       if (status.claude_desktop_config) {
         actions.appendChild(button(t('import_claude'), '', () => emit('open-settings', 'import')));
       }
       actions.appendChild(h(`<span class="small muted mono ellipsis" style="max-width:100%" title="${esc(status.config_path)}">${esc(status.config_path)}</span>`));
     };
-    await draw();
+    servers.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
+    try { await draw(); } catch (e) { servers.replaceChildren(errorNotice(e)); }
   },
 
   async code(body) {
@@ -345,14 +378,20 @@ const RENDER = {
     body.appendChild(row(t('checkpoints_setting'), t('checkpoints_setting_d'), toggle('code_checkpoints')));
     {
       const cur = Number(store.settings.auto_compact_pct ?? 85);
-      const ac = h(`<select class="select" style="width:auto;min-width:200px">${[[0, t('worktree_never')], [70, '70%'], [85, '85%'], [95, '95%']].map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${esc(String(l))}</option>`).join('')}</select>`);
+      const ac = h(`<select class="select" style="width:auto;min-width:min(200px,100%);max-width:100%">${[[0, t('worktree_never')], [70, '70%'], [85, '85%'], [95, '95%']].map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${esc(String(l))}</option>`).join('')}</select>`);
       ac.addEventListener('change', () => save({ auto_compact_pct: Number(ac.value) }));
       body.appendChild(row(t('auto_compact_setting'), t('auto_compact_setting_d'), ac));
     }
     {
       const cur = Number(store.settings.turn_budget_usd || 0);
       const bi = h(`<input class="input" type="number" min="0" step="0.5" style="width:120px" placeholder="${esc(t('budget_none'))}" value="${cur > 0 ? cur : ''}">`);
-      bi.addEventListener('change', () => { const v = Number(bi.value); save({ turn_budget_usd: Number.isFinite(v) && v > 0 ? v : 0 }); });
+      bi.addEventListener('change', () => {
+        const v = Number(bi.value);
+        const ok = Number.isFinite(v) && v > 0;
+        // what isn't a positive amount means no limit, and the field says so
+        if (!ok) bi.value = '';
+        save({ turn_budget_usd: ok ? v : 0 });
+      });
       body.appendChild(row(t('budget_setting'), t('budget_setting_d'), bi));
     }
     body.appendChild(row(t('worktree_setting'), t('worktree_setting_d'), select('code_worktree', [['parallel', t('worktree_parallel')], ['always', t('worktree_always')], ['off', t('worktree_never')]])));
@@ -378,7 +417,7 @@ const RENDER = {
     const modes = ['default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'].map((m) => [m, t('mode_' + m)]);
     body.appendChild(row(t('default_mode'), '', select('code_permission_mode', modes)));
     body.appendChild(row(t('code_model'), '', select('code_model', modelOptions())));
-    const to = textField('bash_timeout_secs', { type: 'number' });
+    const to = textField('bash_timeout_secs', { type: 'number', min: 5, max: 600 });
     to.style.width = '120px';
     body.appendChild(row(t('bash_timeout'), '', to));
   },
@@ -462,10 +501,12 @@ const RENDER = {
     };
     const fixed = h('<div class="kb-fixed"></div>');
     body.appendChild(fixed);
+    const onEnter = store.settings.send_on_enter !== false;
     const list = [
-      [t('sc_send'), 'Enter'], [t('sc_newline'), 'Shift+Enter'], [t('sc_stop'), 'Esc'], [t('sc_edit_last'), '↑'],
+      [t('sc_send'), onEnter ? 'Enter' : `${mod}+Enter`], [t('sc_newline'), onEnter ? 'Shift+Enter' : 'Enter'], [t('sc_stop'), 'Esc'], [t('sc_edit_last'), '↑'],
       [t('sc_switch_conv'), 'Ctrl+Tab'], [t('sc_panes'), 'Alt+1 … Alt+8'],
-      [t('sc_zoom'), `${mod} + / − / 0`], [t('quick_entry'), store.settings.quick_entry_shortcut],
+      [t('sc_zoom'), `${mod} + / − / 0`],
+      [t('quick_entry'), store.settings.quick_entry_enabled && store.settings.quick_entry_shortcut ? acceleratorLabel(store.settings.quick_entry_shortcut, mod) : t('kb_off')],
     ];
     for (const [a, b] of list) body.appendChild(row(a, '', h(`<span class="chip mono" style="height:26px">${esc(b)}</span>`)));
     draw();
@@ -479,7 +520,10 @@ const RENDER = {
     body.appendChild(updatesSection());
     const dl = h(`<button class="btn sm">${t('reveal')}</button>`);
     dl.onclick = () => call('open_path', { path: store.dataDir }).catch(errorToast);
-    body.appendChild(row(t('data_location'), store.dataDir, dl));
+    const where = row(t('data_location'), store.dataDir, dl);
+    // a long path breaks anywhere rather than running under the button
+    where.querySelector('.d').style.overflowWrap = 'anywhere';
+    body.appendChild(where);
     const diag = h(`<div class="row-btns"><button class="btn sm" data-a="logs">${esc(t('diag_show_logs'))}</button><button class="btn sm" data-a="copy">${esc(t('diag_copy'))}</button></div>`);
     const sep = store.dataDir.includes('\\') ? '\\' : '/';
     diag.querySelector('[data-a=logs]').onclick = () => call('open_path', { path: `${store.dataDir}${sep}logs` }).catch(errorToast);
@@ -492,7 +536,7 @@ const RENDER = {
     body.appendChild(row(t('diag_title'), t('diag_d'), diag));
     const backup = h(`<div class="row-btns"><button class="btn sm" data-a="exp">${esc(t('settings_backup'))}</button><button class="btn sm" data-a="imp">${esc(t('settings_restore'))}</button></div>`);
     backup.querySelector('[data-a=exp]').onclick = async () => {
-      try { await call('save_text_file', { name: 'clauderust-settings.json', content: await call('settings_export') }); } catch (e) { errorToast(e); }
+      try { if (await call('save_text_file', { name: 'clauderust-settings.json', content: await call('settings_export') })) toast(t('cx_saved')); } catch (e) { errorToast(e); }
     };
     backup.querySelector('[data-a=imp]').onclick = async () => {
       try {
@@ -527,7 +571,7 @@ function serverCard(s, redraw, status) {
     <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t('tools_count', { n: s.tools.length }) : ''}</div></div>
     <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
     ${s.transport === 'http' ? `<button class="icon-btn sm" data-a="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">${icon('edit', 15)}</button><button class="icon-btn sm" data-a="remove" title="${esc(t('cc_remove'))}" aria-label="${esc(t('cc_remove'))}">${icon('trash', 15)}</button>` : ''}
-    <label class="switch" title="${t('enabled')}"><input type="checkbox" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);
+    <label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(t('enabled'))} · ${esc(s.name)}" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);
   if (s.transport === 'http') {
     card.querySelector('[data-a=edit]').onclick = () => connectorDialog(status, redraw, s.name);
     card.querySelector('[data-a=remove]').onclick = () => removeConnector(status, s, redraw).catch(errorToast);
@@ -539,7 +583,7 @@ function serverCard(s, redraw, status) {
     setTimeout(redraw, 1500);
   });
   // (a server waiting for a sign-in says so in its badge and its Sign in button)
-  if (s.error && s.status !== 'needs_auth') card.appendChild(errorNotice(s.error)).style.margin = '10px 0 0';
+  if (s.error && s.status !== 'needs_auth') card.appendChild(errorNotice(s.error_info || s.error)).style.margin = '10px 0 0';
   card.appendChild(oauthControls(s, redraw));
   if (s.tools.length) {
     const tl = h('<div class="tools-list"></div>');
@@ -547,9 +591,9 @@ function serverCard(s, redraw, status) {
       const key = `${s.name}/${tool.name}`;
       const pol = (store.settings.tool_policies || {})[key] || 'ask';
       const r = h(`<div class="tool-policy"><span class="nm" title="${esc(tool.description)}">${esc(tool.name)}</span>
-        <div class="segmented">${['ask', 'allow', 'deny'].map((p) => `<button data-p="${p}" class="${p === pol ? 'on' : ''}">${t('policy_' + p)}</button>`).join('')}</div></div>`);
+        <div class="segmented" role="group" aria-label="${esc(tool.name)}">${['ask', 'allow', 'deny'].map((p) => `<button data-p="${p}" aria-pressed="${p === pol}" class="${p === pol ? 'on' : ''}">${t('policy_' + p)}</button>`).join('')}</div></div>`);
       r.querySelectorAll('button').forEach((b) => b.onclick = () => {
-        r.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        r.querySelectorAll('button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
         // just this tool: the backend merges per tool, so an "always allow"
         // given meanwhile from a prompt isn't overwritten by this copy
         save({ tool_policies: { [key]: b.dataset.p } });

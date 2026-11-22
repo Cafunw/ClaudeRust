@@ -13,20 +13,27 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// The most an extension may unpack to (a small zip can expand to fill the disk).
 const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+fn not_a_bundle(e: impl std::fmt::Display) -> AppError {
+    AppError::coded("ext_not_zip", Value::Null, format!("Not a valid extension file (not a zip archive, or a damaged one): {e}"))
+}
+
+fn manifest_too_large() -> AppError {
+    AppError::coded("ext_manifest_large", Value::Null, "The extension's manifest.json is too large (over 1 MB).")
+}
+
 fn read_manifest(zip_path: &Path) -> AppResult<Value> {
     let file = std::fs::File::open(zip_path)?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::msg(format!("Not a valid extension file: {e}")))?;
-    let entry = zip.by_name("manifest.json").map_err(|_| AppError::msg("The extension has no manifest.json."))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(not_a_bundle)?;
+    let entry = zip.by_name("manifest.json").map_err(|_| AppError::coded("ext_no_manifest", Value::Null, "The extension has no manifest.json."))?;
     let declared = entry.size();
-    let bytes = crate::util::read_capped(entry, declared, MAX_MANIFEST_BYTES)?
-        .ok_or_else(|| AppError::msg("The extension's manifest.json is too large (over 1 MB)."))?;
+    let bytes = crate::util::read_capped(entry, declared, MAX_MANIFEST_BYTES).map_err(not_a_bundle)?.ok_or_else(manifest_too_large)?;
     parse_manifest(&bytes)
 }
 
 fn parse_manifest(bytes: &[u8]) -> AppResult<Value> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|e| AppError::msg(format!("Invalid manifest.json: {e}")))?;
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| AppError::coded("ext_manifest_json", Value::Null, format!("Invalid manifest.json: {e}")))?;
     if !v["server"].is_object() || v["name"].as_str().unwrap_or("").is_empty() {
-        return Err(AppError::msg("manifest.json must define \"name\" and \"server\"."));
+        return Err(AppError::coded("ext_manifest_fields", Value::Null, "manifest.json must define \"name\" and \"server\"."));
     }
     Ok(v)
 }
@@ -40,9 +47,15 @@ pub(crate) fn sanitize_name(s: &str) -> String {
     if n.is_empty() { "extension".into() } else { n }
 }
 
-/// Manifest summary for the install dialog.
+/// Manifest summary for the install dialog: what it is, who signed it, what
+/// it runs (and whether that runtime is here), and its settings.
 pub fn inspect(zip_path: &Path) -> AppResult<Value> {
     let m = read_manifest(zip_path)?;
+    let (signature, sha256) = crate::extension_sign::check_file(zip_path)?;
+    let cfg = server_config(&m);
+    let command = cfg["command"].as_str().unwrap_or("");
+    let args = cfg["args"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    let platforms: Vec<&str> = m["compatibility"]["platforms"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     Ok(json!({
         "name": m["name"],
         "display_name": m["display_name"].as_str().or(m["name"].as_str()),
@@ -52,7 +65,35 @@ pub fn inspect(zip_path: &Path) -> AppResult<Value> {
         "server_type": m["server"]["type"],
         "user_config": m["user_config"],
         "tools": m["tools"],
+        "run": std::iter::once(command).chain(args).collect::<Vec<_>>().join(" "),
+        "env": cfg["env"].as_object().map(|e| e.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        "runtime_missing": crate::node_runtime::resolve(command, true).err().and_then(|e| crate::node_runtime::missing_runtime(e.kind())),
+        "compatible": platforms.is_empty() || platforms.contains(&platform_key()),
+        "signature": signature.to_json(),
+        "sha256": sha256,
+        "size": std::fs::metadata(zip_path)?.len(),
     }))
+}
+
+/// The server's `mcp_config` (derived from its type and entry point when
+/// missing), this platform's overrides applied; `${…}` not filled in yet.
+fn server_config(manifest: &Value) -> Value {
+    let mut cfg = manifest["server"]["mcp_config"].clone();
+    if !cfg.is_object() {
+        let entry = manifest["server"]["entry_point"].as_str().unwrap_or("");
+        let path = format!("${{__dirname}}/{entry}");
+        cfg = match manifest["server"]["type"].as_str().unwrap_or("") {
+            "node" => json!({"command": "node", "args": [path]}),
+            "python" => json!({"command": "python3", "args": [path]}),
+            _ => json!({"command": path, "args": []}),
+        };
+    }
+    if let Some(ov) = cfg["platform_overrides"][platform_key()].as_object().cloned() {
+        for (k, v) in ov {
+            cfg[k] = v;
+        }
+    }
+    cfg
 }
 
 fn platform_key() -> &'static str {
@@ -141,11 +182,11 @@ fn unzip(zip_path: &Path, dest: &Path) -> AppResult<()> {
 
 fn unzip_limited(zip_path: &Path, dest: &Path, limit: u64) -> AppResult<()> {
     let file = std::fs::File::open(zip_path)?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| AppError::msg(format!("Not a valid extension file: {e}")))?;
-    let too_large = || AppError::msg(format!("The extension unpacks to more than {}; it was not installed.", crate::util::human_size(limit)));
+    let mut zip = zip::ZipArchive::new(file).map_err(not_a_bundle)?;
+    let too_large = || AppError::coded("ext_too_large", Value::Null, format!("The extension unpacks to more than {}; it was not installed.", crate::util::human_size(limit)));
     let mut total: u64 = 0;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| AppError::msg(e.to_string()))?;
+        let mut entry = zip.by_index(i).map_err(not_a_bundle)?;
         // enclosed_name rejects absolute paths and `..` (zip-slip)
         let Some(rel) = entry.enclosed_name() else { continue };
         let out = dest.join(rel);
@@ -180,7 +221,17 @@ fn unzip_limited(zip_path: &Path, dest: &Path, limit: u64) -> AppResult<()> {
 /// An installed version is replaced only once the new one has been unpacked
 /// and its settings checked; until then it's left untouched.
 pub fn install(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value) -> AppResult<String> {
+    install_from(zip_path, extensions_dir, config_path, user_values, None)
+}
+
+/// `install`, noting where the bundle came from (`source`: the extension
+/// directory's {id, version, sha256}) in its config entry. A bundle whose
+/// signature doesn't match it is refused.
+pub fn install_from(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value, source: Option<&Value>) -> AppResult<String> {
     let manifest = read_manifest(zip_path)?;
+    if crate::extension_sign::check_file(zip_path)?.0.status == "invalid" {
+        return Err(AppError::coded("ext_signature_invalid", Value::Null, "The extension's signature doesn't match the file: it was changed after it was signed. It was not installed."));
+    }
     let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
     let tmp = staging_dir(extensions_dir, &name)?;
     let checked = unzip(zip_path, &tmp).and_then(|_| dry_run(&tmp, &name, &manifest, extensions_dir, user_values));
@@ -188,16 +239,16 @@ pub fn install(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true))
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true, source))
 }
 
 /// Install an extension that is already unpacked in a folder (for example one
 /// installed by the Claude desktop app): copy it and register it.
 pub fn install_from_dir(src: &Path, extensions_dir: &Path, config_path: &Path, user_values: &Value) -> AppResult<String> {
     let mf = src.join("manifest.json");
-    let size = std::fs::metadata(&mf).map_err(|_| AppError::msg("The extension has no manifest.json."))?.len();
+    let size = std::fs::metadata(&mf).map_err(|_| AppError::coded("ext_no_manifest", Value::Null, "The extension has no manifest.json."))?.len();
     if size > MAX_MANIFEST_BYTES {
-        return Err(AppError::msg("The extension's manifest.json is too large (over 1 MB)."));
+        return Err(manifest_too_large());
     }
     let manifest = parse_manifest(&std::fs::read(&mf)?)?;
     let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
@@ -208,7 +259,7 @@ pub fn install_from_dir(src: &Path, extensions_dir: &Path, config_path: &Path, u
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true))
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true, None))
 }
 
 /// A fresh, empty folder next to the install to unpack into; leftovers of
@@ -237,7 +288,7 @@ fn staging_dir(extensions_dir: &Path, name: &str) -> AppResult<PathBuf> {
 /// run), writing to a throwaway config rather than the real one.
 fn dry_run(dir: &Path, name: &str, manifest: &Value, extensions_dir: &Path, user_values: &Value) -> AppResult<()> {
     let scratch = extensions_dir.join(format!(".dry-run-{}.json", &crate::util::new_id()[..8]));
-    let r = register(dir, name, manifest, &scratch, user_values, false);
+    let r = register(dir, name, manifest, &scratch, user_values, false, None);
     let _ = std::fs::remove_file(&scratch);
     r.map(|_| ())
 }
@@ -323,8 +374,8 @@ fn copy_dir(src: &Path, dst: &Path) -> AppResult<()> {
 }
 
 /// `keep`: put secret settings (`sensitive`) in the credential store, the
-/// config holding references (a dry run keeps nothing).
-fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_values: &Value, keep: bool) -> AppResult<String> {
+/// config holding references (a dry run keeps nothing). `source`: see `install_from`.
+fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_values: &Value, keep: bool, source: Option<&Value>) -> AppResult<String> {
     let name = name.to_string();
     // user config: provided values, else defaults; check required ones
     let mut user = Map::new();
@@ -360,25 +411,10 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
         }
     }
 
-    let mut cfg = manifest["server"]["mcp_config"].clone();
-    if !cfg.is_object() {
-        // derive from server type + entry point
-        let entry = manifest["server"]["entry_point"].as_str().unwrap_or("");
-        let path = format!("${{__dirname}}/{entry}");
-        cfg = match manifest["server"]["type"].as_str().unwrap_or("") {
-            "node" => json!({"command": "node", "args": [path]}),
-            "python" => json!({"command": "python3", "args": [path]}),
-            _ => json!({"command": path, "args": []}),
-        };
-    }
-    if let Some(ov) = cfg["platform_overrides"][platform_key()].as_object().cloned() {
-        for (k, v) in ov {
-            cfg[k] = v;
-        }
-    }
+    let cfg = server_config(manifest);
     let command = substitute(cfg["command"].as_str().unwrap_or(""), &vars, &user).join(" ");
     if command.trim().is_empty() {
-        return Err(AppError::msg("The extension does not define a command to run."));
+        return Err(AppError::coded("ext_no_command", Value::Null, "The extension does not define a command to run."));
     }
     let args: Vec<String> = cfg["args"]
         .as_array()
@@ -408,6 +444,9 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
         // for changing them later (reconfigure)
         "user_config": user,
     });
+    if let Some(s) = source.filter(|s| s.is_object()) {
+        entry["extension"]["source"] = s.clone();
+    }
 
     let mut config = mcp::read_config_for_update(config_path)?;
     config["mcpServers"][&name] = entry;
@@ -426,7 +465,7 @@ fn installed(name: &str, extensions_dir: &Path, config: &Value) -> AppResult<(Pa
     }
     let mf = dir.join("manifest.json");
     if std::fs::metadata(&mf)?.len() > MAX_MANIFEST_BYTES {
-        return Err(AppError::msg("The extension's manifest.json is too large (over 1 MB)."));
+        return Err(manifest_too_large());
     }
     Ok((dir, parse_manifest(&std::fs::read(&mf)?)?))
 }
@@ -478,7 +517,8 @@ pub fn reconfigure(name: &str, extensions_dir: &Path, config_path: &Path, values
             merged.insert(k.clone(), v.clone());
         }
     }
-    register(&dir, name, &manifest, config_path, &Value::Object(merged), true).map(|_| ())
+    let source = config["mcpServers"][name]["extension"]["source"].clone();
+    register(&dir, name, &manifest, config_path, &Value::Object(merged), true, Some(&source)).map(|_| ())
 }
 
 /// Take extension `name` out of the config (its secrets go with it); the
@@ -495,7 +535,7 @@ pub fn unregister(name: &str, extensions_dir: &Path, config_path: &Path) -> AppR
 
 type St<'a> = tauri::State<'a, std::sync::Arc<crate::state::AppState>>;
 
-async fn on_pool<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + 'static) -> AppResult<T> {
+pub(crate) async fn on_pool<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + 'static) -> AppResult<T> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))?
 }
 
@@ -721,6 +761,80 @@ mod tests {
         let dest = tmp.join("out");
         std::fs::create_dir_all(&dest).unwrap();
         assert!(unzip_limited(&ok, &dest, 4096).unwrap_err().to_string().contains("more than"));
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn broken_bundles_say_what_is_wrong() {
+        let tmp = std::env::temp_dir().join(format!("ext-broken-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let kind = |name: &str, write: &dyn Fn(&Path)| {
+            let p = tmp.join(name);
+            write(&p);
+            inspect(&p).unwrap_err().kind().to_string()
+        };
+        assert_eq!(kind("text.mcpb", &|p| std::fs::write(p, "not a zip").unwrap()), "ext_not_zip");
+        assert_eq!(kind("empty.mcpb", &|p| bundle_without_manifest(p)), "ext_no_manifest");
+        assert_eq!(kind("json.mcpb", &|p| raw_manifest(p, b"{ nope")), "ext_manifest_json");
+        assert_eq!(kind("fields.mcpb", &|p| bundle(p, &json!({"name": "x"}), &[])), "ext_manifest_fields");
+        assert_eq!(kind("noname.mcpb", &|p| bundle(p, &json!({"server": {"type": "node"}}), &[])), "ext_manifest_fields");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    fn bundle_without_manifest(path: &Path) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        z.start_file("index.js", zip::write::SimpleFileOptions::default()).unwrap();
+        z.finish().unwrap();
+    }
+
+    fn raw_manifest(path: &Path, bytes: &[u8]) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        z.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(bytes).unwrap();
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn the_preview_shows_what_runs_its_signature_and_hash() {
+        let tmp = std::env::temp_dir().join(format!("ext-prev-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let b = tmp.join("p.mcpb");
+        bundle(&b, &json!({"name": "prev", "version": "1.0.0", "compatibility": {"platforms": ["sunos"]},
+            "server": {"type": "binary", "mcp_config": {"command": "${__dirname}/srv", "args": ["--port", "1"], "env": {"TOKEN": "${user_config.t}"},
+                "platform_overrides": {platform_key(): {"args": ["--here"]}}}}}), &[]);
+        let info = inspect(&b).unwrap();
+        assert_eq!(info["run"], "${__dirname}/srv --here", "this platform's override");
+        assert_eq!(info["env"], json!(["TOKEN"]));
+        assert_eq!(info["compatible"], false);
+        assert_eq!(info["signature"]["status"], "unsigned");
+        assert_eq!(info["sha256"], hex::encode(<sha2::Sha256 as sha2::Digest>::digest(std::fs::read(&b).unwrap())));
+        assert_eq!(info["runtime_missing"], Value::Null, "a bundled program needs no runtime");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn a_directory_install_keeps_its_source_and_a_tampered_signed_one_is_refused() {
+        let tmp = std::env::temp_dir().join(format!("ext-src-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ext, cfg) = (tmp.join("ext"), tmp.join("config.json"));
+        let b = tmp.join("s.mcpb");
+        bundle(&b, &manifest("1.0.0", false), &[("index.js", b"x")]);
+        let source = json!({"id": "up-dir", "version": "1.0.0", "sha256": "ab"});
+        install_from(&b, &ext, &cfg, &json!({}), Some(&source)).unwrap();
+        assert_eq!(mcp::read_config(&cfg)["mcpServers"]["up"]["extension"]["source"], source);
+        reconfigure("up", &ext, &cfg, &json!({"key": "k"})).unwrap();
+        assert_eq!(mcp::read_config(&cfg)["mcpServers"]["up"]["extension"]["source"], source, "kept when reconfigured");
+        install(&b, &ext, &cfg, &json!({})).unwrap();
+        assert!(mcp::read_config(&cfg)["mcpServers"]["up"]["extension"]["source"].is_null(), "a file install isn't from the directory");
+        // the signed test bundle with one byte changed
+        let mut signed = include_bytes!("testdata/signed_ca.mcpb").to_vec();
+        // in index.js, so the manifest still reads
+        let at = signed.windows(8).position(|w| w == b"'signed'").unwrap() + 1;
+        signed[at] ^= 1;
+        let bad = tmp.join("bad.mcpb");
+        std::fs::write(&bad, signed).unwrap();
+        assert_eq!(install(&bad, &ext, &cfg, &json!({})).unwrap_err().kind(), "ext_signature_invalid");
+        assert!(!ext.join("signed-demo").exists());
         let _ = std::fs::remove_dir_all(tmp);
     }
 }

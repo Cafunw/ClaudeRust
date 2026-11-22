@@ -6,7 +6,7 @@ export async function call(cmd, args = {}) {
     return await T.core.invoke(cmd, args);
   } catch (e) {
     const err = new Error(typeof e === 'string' ? e : (e && e.message) || 'Error');
-    if (e && typeof e === 'object') { err.kind = e.kind; err.status = e.status; }
+    if (e && typeof e === 'object') { err.kind = e.kind; err.status = e.status; err.params = e.params; }
     throw err;
   }
 }

@@ -65,9 +65,9 @@ impl Shadow {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000);
         }
-        let out = c.output().map_err(|e| AppError::msg(format!("Could not run git: {e}")))?;
+        let out = c.output().map_err(crate::gitops::git_unavailable)?;
         if !out.status.success() {
-            return Err(AppError::msg(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+            return Err(crate::gitops::git_failed(args, &out.stderr));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
@@ -134,7 +134,7 @@ impl Shadow {
         let _held = lock.lock();
         self.ensure()?;
         self.git(&["cat-file", "-e", &format!("{id}^{{commit}}")])
-            .map_err(|_| AppError::msg("This checkpoint is no longer available."))?;
+            .map_err(|_| AppError::coded("checkpoint_gone", serde_json::Value::Null, "This checkpoint is no longer available."))?;
         let before = self.snapshot_locked("before rewind")?;
         self.git(&["read-tree", "-u", "--reset", id])?;
         // make the index match the restored tree for the next snapshot

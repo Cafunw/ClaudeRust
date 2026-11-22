@@ -6,17 +6,21 @@ if (window.__QUICK_OPAQUE__) document.body.classList.add('opaque');
 const q = document.getElementById('q');
 const go = document.getElementById('go');
 const mq = window.matchMedia('(prefers-color-scheme: dark)');
+let themePref = 'system';
 
-async function init() {
+function applyTheme() {
+  document.documentElement.dataset.theme = themePref === 'light' || themePref === 'dark' ? themePref : (mq.matches ? 'dark' : 'light');
+}
+
+/** The main window's language and theme, as they are now (they may have changed since the last time this was shown). */
+async function applySettings() {
   try {
-    const b = await call('bootstrap');
-    const s = b.settings;
+    const s = await call('get_settings');
     setLanguage(s.language);
-    const theme = s.theme === 'light' || s.theme === 'dark' ? s.theme : (mq.matches ? 'dark' : 'light');
-    document.documentElement.dataset.theme = theme;
+    themePref = s.theme;
+    applyTheme();
     q.placeholder = t('help_today');
-  } catch { /* ignore */ }
-  q.focus();
+  } catch { /* keep what was shown */ }
 }
 
 function grow() {
@@ -29,7 +33,8 @@ async function submit() {
   if (!text) return;
   q.value = '';
   grow();
-  await call('quick_entry_submit', { text }).catch(() => {});
+  // not sent: what was typed comes back rather than being lost
+  await call('quick_entry_submit', { text }).catch(() => { if (!q.value) { q.value = text; grow(); } });
 }
 
 q.addEventListener('input', grow);
@@ -38,6 +43,7 @@ q.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { e.preventDefault(); call('quick_entry_hide').catch(() => {}); }
 });
 go.addEventListener('click', submit);
-on('quick-entry-shown', () => { q.focus(); q.select(); });
+on('quick-entry-shown', () => { applySettings(); q.focus(); q.select(); });
+mq.addEventListener('change', applyTheme);
 window.addEventListener('focus', () => q.focus());
-init();
+applySettings().then(() => q.focus());

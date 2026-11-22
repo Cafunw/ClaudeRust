@@ -15,10 +15,24 @@ use std::path::{Path, PathBuf};
 pub async fn git(cwd: &Path, args: &[&str]) -> AppResult<String> {
     let out = git_raw(cwd, args).await?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AppError::msg(if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err }));
+        return Err(git_failed(args, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// A git command that failed, named by its subcommand; git's own words are the detail.
+pub(crate) fn git_failed(args: &[&str], stderr: &[u8]) -> AppError {
+    let err = String::from_utf8_lossy(stderr).trim().to_string();
+    let message = if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err };
+    AppError::coded("git_failed", json!({"cmd": subcommand(args).unwrap_or("")}), message)
+}
+
+pub(crate) fn git_unavailable(e: impl std::fmt::Display) -> AppError {
+    AppError::coded("git_start_failed", Value::Null, format!("Could not run git: {e}"))
+}
+
+pub(crate) fn git_timed_out(args: &[&str], limit: std::time::Duration, message: String) -> AppError {
+    AppError::coded("git_timeout", json!({"cmd": subcommand(args).unwrap_or(""), "s": limit.as_secs()}), message)
 }
 
 pub async fn git_raw(cwd: &Path, args: &[&str]) -> AppResult<std::process::Output> {
@@ -40,12 +54,12 @@ async fn git_raw_env(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> AppRes
     let limit = git_timeout(args);
     match output_within(cmd, limit).await {
         Ok(Some(out)) => Ok(out),
-        Ok(None) => Err(AppError::msg(format!(
-            "git {} took longer than {} and was stopped.",
-            subcommand(args).unwrap_or(""),
-            if limit.as_secs() >= 120 { format!("{} minutes", limit.as_secs() / 60) } else { format!("{} seconds", limit.as_secs()) }
-        ))),
-        Err(e) => Err(AppError::msg(format!("Could not run git: {e}"))),
+        Ok(None) => {
+            let s = limit.as_secs();
+            let took = if s >= 120 { format!("{} minutes", s / 60) } else { format!("{s} seconds") };
+            Err(git_timed_out(args, limit, format!("git {} took longer than {took} and was stopped.", subcommand(args).unwrap_or(""))))
+        }
+        Err(e) => Err(git_unavailable(e)),
     }
 }
 
@@ -306,7 +320,7 @@ fn abs_in(root: &Path, rel: &str) -> AppResult<PathBuf> {
     let canonical = crate::codetools::canonical_or_self;
     let plain = Path::new(rel).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
     if !plain || !canonical(&full).starts_with(canonical(root)) {
-        return Err(AppError::msg("Invalid path."));
+        return Err(AppError::coded("path_invalid", json!({"path": rel}), "Invalid path."));
     }
     Ok(full)
 }
@@ -345,7 +359,7 @@ pub async fn file_diff(session: &CodeSession, path: &str) -> AppResult<String> {
     let orig = session.originals.lock().get(&full).cloned();
     let old = match orig {
         Some(Original::Content(b)) => String::from_utf8_lossy(&b).to_string(),
-        Some(Original::Unknown) => return Err(AppError::msg(UNKNOWN_ORIGINAL)),
+        Some(Original::Unknown) => return Err(AppError::coded("original_unknown", Value::Null, UNKNOWN_ORIGINAL)),
         Some(Original::Missing) | None => String::new(),
     };
     let path = path.to_string();
@@ -379,14 +393,14 @@ pub fn hunk_patch(diff: &str, index: usize, expect: &str) -> Option<String> {
 
 /// Undo one hunk of a tracked file's uncommitted changes (`git apply -R`).
 pub async fn revert_hunk(session: &CodeSession, path: &str, index: usize, expect: &str) -> AppResult<()> {
-    let top = repo_root(&session.root).await.ok_or_else(|| AppError::msg("Reverting part of a file needs a git repository."))?;
+    let top = repo_root(&session.root).await.ok_or_else(|| AppError::coded("not_git_repo", Value::Null, "Reverting part of a file needs a git repository."))?;
     let tracked = git_raw(&top, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", path]).await.map(|o| o.status.success()).unwrap_or(false);
     if !tracked {
-        return Err(AppError::msg("This is a new file: revert it as a whole."));
+        return Err(AppError::coded("revert_new_file", Value::Null, "This is a new file: revert it as a whole."));
     }
     let base = base_rev(&top).await;
     let diff = git(&top, &["--literal-pathspecs", "diff", base, "--no-color", "--no-ext-diff", "--no-textconv", PREFIX_A, PREFIX_B, "--", path]).await?;
-    let patch = hunk_patch(&diff, index, expect).ok_or_else(|| AppError::msg("The file changed since the diff was shown. Refresh and try again."))?;
+    let patch = hunk_patch(&diff, index, expect).ok_or_else(|| AppError::coded("diff_stale", Value::Null, "The file changed since the diff was shown. Refresh and try again."))?;
     // when the whole file is staged as it is, the hunk is unstaged too (else
     // a later `git commit` would still commit it); a partly staged file's
     // index is left alone
@@ -468,8 +482,7 @@ pub async fn diff_including_new(root: &Path, args: &[&str]) -> AppResult<String>
     let _ = std::fs::remove_file(&tmp_index);
     let out = out?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AppError::msg(if err.is_empty() { "git diff failed".to_string() } else { err }));
+        return Err(git_failed(&full, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
@@ -497,7 +510,7 @@ pub async fn apply_patch(root: &Path, patch: &str) -> AppResult<Vec<String>> {
     };
     let lf = with_nl(patch.replace("\r\n", "\n"));
     if !lf.lines().any(|l| l.starts_with("@@") || l.starts_with("GIT binary patch") || l.starts_with("rename from")) {
-        return Err(AppError::msg("That doesn't look like a patch (no @@ hunks)."));
+        return Err(AppError::coded("patch_invalid", Value::Null, "That doesn't look like a patch (no @@ hunks)."));
     }
     // as given first (a patch for a file with CRLF line endings needs its
     // `\r`s); with LF endings when that doesn't fit (a patch whose line
@@ -513,8 +526,8 @@ pub async fn apply_patch(root: &Path, patch: &str) -> AppResult<Vec<String>> {
         std::fs::write(&tmp, &text)?;
         let p = tmp.to_string_lossy().to_string();
         let r: AppResult<Vec<String>> = async {
-            let files = git(root, &["apply", "--numstat", &p]).await.map_err(|e| AppError::msg(format!("Not a valid patch: {e}")))?;
-            git(root, &["apply", "--check", "--whitespace=nowarn", &p]).await.map_err(|e| AppError::msg(format!("The patch doesn't apply here: {e}")))?;
+            let files = git(root, &["apply", "--numstat", &p]).await.map_err(|e| AppError::coded("patch_invalid", Value::Null, format!("Not a valid patch: {e}")))?;
+            git(root, &["apply", "--check", "--whitespace=nowarn", &p]).await.map_err(|e| AppError::coded("patch_conflict", Value::Null, format!("The patch doesn't apply here: {e}")))?;
             git(root, &["apply", "--whitespace=nowarn", &p]).await?;
             Ok(files.lines().filter_map(|l| l.splitn(3, '\t').nth(2).map(str::to_string)).collect())
         }
@@ -525,7 +538,7 @@ pub async fn apply_patch(root: &Path, patch: &str) -> AppResult<Vec<String>> {
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| AppError::msg("The patch doesn't apply here.")))
+    Err(last_err.unwrap_or_else(|| AppError::coded("patch_conflict", Value::Null, "The patch doesn't apply here.")))
 }
 
 /// Put one file back to the baseline (deleting it if it didn't exist).
@@ -557,8 +570,8 @@ pub async fn revert_file(session: &CodeSession, path: &str) -> AppResult<()> {
                 std::fs::remove_file(&full)?;
             }
         }
-        Some(Original::Unknown) => return Err(AppError::msg(format!("{UNKNOWN_ORIGINAL} It was left as it is."))),
-        None => return Err(AppError::msg("No earlier version of this file is known.")),
+        Some(Original::Unknown) => return Err(AppError::coded("original_unknown", Value::Null, format!("{UNKNOWN_ORIGINAL} It was left as it is."))),
+        None => return Err(AppError::coded("original_none", Value::Null, "No earlier version of this file is known.")),
     }
     session.originals.lock().remove(&full);
     Ok(())

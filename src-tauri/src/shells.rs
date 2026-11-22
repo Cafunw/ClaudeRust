@@ -126,13 +126,17 @@ impl BgShell {
 
 /// The notification text for a background command that ended, or None when
 /// it shouldn't notify (stopped on purpose, or too quick to be worth it).
-fn finished_note(sh: &BgShell, code: i32, took_ms: i64) -> Option<String> {
+fn finished_note(sh: &BgShell, code: i32, took_ms: i64, turkish: bool) -> Option<String> {
     if sh.killed.load(Ordering::Relaxed) || took_ms < NOTIFY_AFTER_MS {
         return None;
     }
     let what = if sh.description.trim().is_empty() { sh.command.as_str() } else { sh.description.as_str() };
     let what: String = what.chars().take(80).collect();
     let secs = took_ms / 1000;
+    if turkish {
+        let dur = if secs >= 60 { format!("{} dk {} sn", secs / 60, secs % 60) } else { format!("{secs} sn") };
+        return Some(if code == 0 { format!("{what} {dur} sonra bitti.") } else { format!("{what} {dur} sonra başarısız oldu (çıkış kodu {code}).") });
+    }
     let dur = if secs >= 60 { format!("{}m {}s", secs / 60, secs % 60) } else { format!("{secs}s") };
     Some(if code == 0 { format!("{what} finished after {dur}.") } else { format!("{what} failed (exit code {code}) after {dur}.") })
 }
@@ -158,18 +162,19 @@ impl Shells {
     /// window isn't in front (not when it was stopped on purpose).
     fn notify_finished(&self, sh: &BgShell, code: i32) {
         let Some(app) = self.app.get() else { return };
-        let Some(body) = finished_note(sh, code, now_ms() - sh.started_at) else { return };
         use tauri::Manager;
         let Some(st) = app.try_state::<Arc<crate::state::AppState>>() else { return };
         if !st.settings.read().notifications {
             return;
         }
+        let turkish = st.turkish();
+        let Some(body) = finished_note(sh, code, now_ms() - sh.started_at, turkish) else { return };
         let focused = app.get_webview_window("main").map(|w| w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false)).unwrap_or(false);
         if focused {
             return;
         }
         use tauri_plugin_notification::NotificationExt;
-        let _ = app.notification().builder().title("Background command").body(body).show();
+        let _ = app.notification().builder().title(if turkish { "Arka plan komutu" } else { "Background command" }).body(body).show();
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<BgShell>> {
@@ -323,11 +328,13 @@ mod tests {
     fn finish_notes() {
         let mut sh = shell();
         sh.description = "Build".into();
-        assert_eq!(finished_note(&sh, 0, 5_000), None, "quick commands don't notify");
-        assert_eq!(finished_note(&sh, 0, 95_000).as_deref(), Some("Build finished after 1m 35s."));
-        assert_eq!(finished_note(&sh, 2, 30_000).as_deref(), Some("Build failed (exit code 2) after 30s."));
+        assert_eq!(finished_note(&sh, 0, 5_000, false), None, "quick commands don't notify");
+        assert_eq!(finished_note(&sh, 0, 95_000, false).as_deref(), Some("Build finished after 1m 35s."));
+        assert_eq!(finished_note(&sh, 2, 30_000, false).as_deref(), Some("Build failed (exit code 2) after 30s."));
+        assert_eq!(finished_note(&sh, 0, 95_000, true).as_deref(), Some("Build 1 dk 35 sn sonra bitti."));
+        assert_eq!(finished_note(&sh, 2, 30_000, true).as_deref(), Some("Build 30 sn sonra başarısız oldu (çıkış kodu 2)."));
         sh.killed.store(true, Ordering::Relaxed);
-        assert_eq!(finished_note(&sh, -1, 95_000), None, "stopped on purpose");
+        assert_eq!(finished_note(&sh, -1, 95_000, false), None, "stopped on purpose");
     }
 
     fn shell() -> BgShell {

@@ -7,6 +7,7 @@ import { call } from './api.js';
 import { store, emit } from './store.js';
 import { esc, h, button, toast, errorToast, confirmDialog, promptDialog, relTime } from './util.js';
 import { notRegistered } from './optional_cmd.js';
+import { errorText } from './neterr.js';
 
 /** The memory of `scope` ('global' or a project id) in a chat_memory_list reply. */
 export function memoryOf(list, scope) {
@@ -20,7 +21,7 @@ export async function renderMemory(parent) {
   body.appendChild(h(`<div class="notice">${icon('shield', 15)}<div class="grow small">${esc(t('mem_privacy'))}</div></div>`));
   let list;
   try { list = await call('chat_memory_list'); } catch (e) {
-    body.appendChild(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('mem_unavailable') : (e.message || String(e)))}</div>`));
+    body.appendChild(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('mem_unavailable') : errorText(e))}</div>`));
     return;
   }
   const switchRow = (key, title, desc, on) => {
@@ -33,7 +34,7 @@ export async function renderMemory(parent) {
   const enabled = switchRow('memory_enabled', t('mem_enable'), t('mem_enable_d'), !!store.settings.memory_enabled);
   const perProject = switchRow('memory_project_scope', t('mem_per_project'), t('mem_per_project_d'), store.settings.memory_project_scope !== false);
 
-  const sel = h(`<select class="select" style="width:auto;min-width:200px" aria-label="${esc(t('mem_scope'))}"></select>`);
+  const sel = h(`<select class="select" style="width:auto;min-width:min(200px,100%);max-width:100%" aria-label="${esc(t('mem_scope'))}"></select>`);
   const fillScopes = () => {
     const scopes = [['global', t('mem_scope_global')], ...(perProject.checked ? store.projects || [] : []).map((p) => [p.id, t('mem_scope_project', { name: p.name })])];
     const cur = sel.value;

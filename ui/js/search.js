@@ -16,9 +16,9 @@ const TABS = [['all', () => t('pal_all')], ['chat', () => t('chats')], ['code', 
 
 export function openSearch() {
   if (open) { open.querySelector('input').focus(); return; }
-  const scrim = h(`<div class="modal-scrim" style="align-items:flex-start"><div class="modal palette">
-    <div class="pinput">${icon('search', 16)}<input placeholder="${t('search_placeholder')}"><span class="small muted">esc</span></div>
-    <div class="ptabs">${TABS.map(([k, label]) => `<button data-tab="${k}" class="${k === 'all' ? 'on' : ''}">${esc(label())}</button>`).join('')}</div>
+  const scrim = h(`<div class="modal-scrim" style="align-items:flex-start"><div class="modal palette" role="dialog" aria-modal="true" aria-label="${esc(t('sc_search'))}">
+    <div class="pinput">${icon('search', 16)}<input placeholder="${t('search_placeholder')}" aria-label="${esc(t('search_placeholder'))}"><span class="small muted" aria-hidden="true">Esc</span></div>
+    <div class="ptabs" role="group">${TABS.map(([k, label]) => `<button data-tab="${k}" class="${k === 'all' ? 'on' : ''}" aria-pressed="${k === 'all'}">${esc(label())}</button>`).join('')}</div>
     <div class="results"></div><div class="pal-hint small muted">${esc(t('pal_hint'))}</div></div></div>`);
   document.body.appendChild(scrim);
   open = scrim;
@@ -37,20 +37,26 @@ export function openSearch() {
     res.innerHTML = '';
     if (!items.length) { res.innerHTML = `<div class="muted" style="padding:16px;text-align:center">${t('no_results')}</div>`; return; }
     items.forEach((it, i) => {
-      const b = h(`<button class="res ${i === idx ? 'kb' : ''}">${icon(it.icon, 16)}<div class="grow" style="min-width:0"><div class="t ellipsis">${esc(it.title)}</div>${it.snippet ? `<div class="s">${it.snippet}</div>` : ''}</div><span class="small muted">${esc(it.meta || '')}</span></button>`);
+      const b = h(`<button class="res ${i === idx ? 'kb' : ''}">${icon(it.icon, 16)}<div class="grow" style="min-width:0"><div class="t ellipsis" title="${esc(it.tip || it.title)}">${esc(it.title)}</div>${it.snippet ? `<div class="s">${it.snippet}</div>` : ''}</div><span class="small muted">${esc(it.meta || '')}</span></button>`);
       b.onclick = () => choose(it);
       b.onmouseenter = () => { idx = i; res.querySelectorAll('.res').forEach((x, j) => x.classList.toggle('kb', j === i)); };
       res.appendChild(b);
     });
   };
+  // a slower search for what was typed before must not replace the newer one's results
+  let seq = 0;
   const run = async () => {
+    const my = ++seq;
     const raw = input.value;
     const ctx = await chatContext();
     const pick = (list) => (tab === 'all' ? list : list.filter((x) => x.cat === tab));
     // "@file": files of the current code session, inserted as a mention
     if (raw.startsWith('@') && ctx && ctx.cwd) {
       const r = await call('file_search', { conversationId: ctx.conversationId, cwd: ctx.cwd, query: raw.slice(1) }).catch(() => []);
-      items = r.map((f) => ({ title: f.path, icon: f.dir ? 'folder' : 'file', meta: t('pal_mention'), run: () => { if (ctx.composer) ctx.composer.insertText(/\s/.test(f.path) ? `@"${f.path}" ` : `@${f.path} `); } }));
+      if (my !== seq) return;
+      // the name first and its folder under it: a long path would cut off the name
+      const parts = (f) => f.path.replace(/\/+$/, '').split('/');
+      items = r.map((f) => ({ title: parts(f).pop(), snippet: esc(parts(f).slice(0, -1).join('/')), tip: f.path, icon: f.dir ? 'folder' : 'file', meta: t('pal_mention'), run: () => { if (ctx.composer) ctx.composer.insertText(/\s/.test(f.path) ? `@"${f.path}" ` : `@${f.path} `); } }));
       idx = 0;
       draw();
       return;
@@ -63,6 +69,7 @@ export function openSearch() {
     // would push the conversations down
     const acts = scored.filter((x) => actionsOnly || x.s >= 150).map((x) => x.a);
     void match;
+    if (my !== seq) return;
     if (actionsOnly) {
       items = acts.slice(0, 40);
       idx = 0;
@@ -71,6 +78,7 @@ export function openSearch() {
     }
     // archived chats are out of the sidebar, not out of reach
     const hits = await call('search_conversations', { query: q, includeArchived: true }).catch(() => []);
+    if (my !== seq) return;
     items = hits.map((x) => ({
       title: convTitle(x),
       snippet: snippetHtml(x.snippet),
@@ -91,7 +99,7 @@ export function openSearch() {
     const b = e.target.closest('[data-tab]');
     if (!b) return;
     tab = b.dataset.tab;
-    scrim.querySelectorAll('.ptabs button').forEach((x) => x.classList.toggle('on', x === b));
+    scrim.querySelectorAll('.ptabs button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
     input.focus();
     run();
   });
@@ -141,23 +149,23 @@ async function chatContext() {
 
 async function actionItems(ctx) {
   const a = [
-    { title: t('new_chat'), icon: 'plus', meta: 'Ctrl+Shift+O', run: () => emit('navigate', { name: 'new' }) },
+    { title: t('new_chat'), icon: 'plus', meta: keymap.shown('new_chat'), run: () => emit('navigate', { name: 'new' }) },
     { title: t('pal_new_code'), icon: 'code', run: () => emit('navigate', { name: 'code' }) },
     ...(incognitoSupported() ? [{ title: t('incog_new'), icon: 'eyeOff', meta: keymap.shown('incognito'), run: newIncognitoChat }] : []),
     { title: t('chats'), icon: 'chat', run: () => emit('navigate', { name: 'chats' }) },
     { title: t('projects'), icon: 'folder', run: () => emit('navigate', { name: 'projects' }) },
     { title: t('artifacts'), icon: 'layers', run: () => emit('navigate', { name: 'artifacts' }) },
-    { title: t('settings'), icon: 'settings', meta: 'Ctrl+,', run: () => emit('open-settings') },
+    { title: t('settings'), icon: 'settings', meta: keymap.shown('settings'), run: () => emit('open-settings') },
     { title: `${t('settings')}: ${t('pal_appearance')}`, icon: 'sun', run: () => emit('open-settings', 'appearance') },
     { title: `${t('settings')}: ${t('s_developer')} / MCP`, icon: 'plug', run: () => emit('open-settings', 'developer') },
     { title: t('pal_import'), icon: 'download', run: () => emit('open-settings', 'import') },
     { title: t('pal_routines'), icon: 'clock', run: async () => (await import('./routines.js')).openRoutines() },
     { title: t('pal_usage'), icon: 'zap', run: async () => (await import('./usage_ui.js')).openUsage() },
-    { title: t('sc_sheet_title'), icon: 'key', meta: 'Ctrl+/', run: async () => (await import('./shortcuts.js')).openShortcuts() },
+    { title: t('sc_sheet_title'), icon: 'key', meta: keymap.shown('shortcuts'), run: async () => (await import('./shortcuts.js')).openShortcuts() },
     { title: t('pal_toggle_theme'), icon: 'moon', run: () => emit('save-settings', { theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }) },
   ];
   if (ctx && ctx.kind === 'code') {
-    a.push({ title: t('ws_toggle'), icon: 'sidebar', meta: 'Ctrl+`', run: () => workspace.toggle() });
+    a.push({ title: t('ws_toggle'), icon: 'sidebar', meta: keymap.shown('workspace'), run: () => workspace.toggle() });
     for (const p of ['changes', 'terminal', 'plan', 'tasks', 'preview']) a.push({ title: t('cmd_open_pane', { pane: t('ws_' + p) }), icon: { changes: 'edit', terminal: 'terminal', plan: 'compass', tasks: 'list', preview: 'globe' }[p], run: () => workspace.show(p) });
   }
   if (ctx) {

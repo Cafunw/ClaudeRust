@@ -281,7 +281,9 @@ const BASE_STYLE: &str = r#"<style>:root{color-scheme:light dark}html,body{margi
 /// HTML is written against the browser's default of dark text on white, so a
 /// fragment keeps that pair in the dark theme too: themed dark, a light box
 /// it draws without a text colour of its own would come out white on white.
-const FRAGMENT_STYLE: &str = "<style>:root{color-scheme:light}body{background:#ffffff;color:#141413}</style>";
+/// It also gets back the browser's own 8px margin (BASE_STYLE takes it away),
+/// which a fragment is written against: without it, text touches the frame.
+const FRAGMENT_STYLE: &str = "<style>:root{color-scheme:light}body{background:#ffffff;color:#141413}body{margin:8px}</style>";
 
 /// Content Security Policy for artifact documents: they may load common
 /// libraries from public CDNs (and Google Fonts) but reach no other host, as
@@ -640,6 +642,8 @@ mod tests {
         assert!(at(FRAGMENT_STYLE) < at(ERROR_HOOK));
         assert!(at(ERROR_HOOK) < at(content));
         assert!(d.ends_with(&format!("<body>{content}</body></html>")));
+        // the browser's margin, which BASE_STYLE took away, comes back after it: text doesn't touch the frame
+        assert!(FRAGMENT_STYLE.contains("margin:8px"));
     }
 
     #[test]
@@ -669,7 +673,7 @@ mod tests {
             ("application/vnd.ant.mermaid", "graph TD; A-->B"),
         ] {
             let d = build_document(kind, content, false);
-            assert!(d.contains("window.parent.postMessage({ __artifact: 'error', message: message, stack: stack }, '*');"), "{kind}");
+            assert!(d.contains("window.parent.postMessage({ __artifact: 'error', message: message, stack: stack, blocked: blocked || null }, '*');"), "{kind}");
             assert!(d.contains("window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };"), "{kind}");
         }
         // React's own errors (Babel, a missing export) carry their stack to the app

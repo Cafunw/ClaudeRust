@@ -120,11 +120,44 @@ impl AppState {
             })
             .clone()
     }
+
+    /// Whether the UI speaks Turkish, for the few texts the backend shows itself (desktop notifications).
+    pub fn turkish(&self) -> bool {
+        ui_turkish(&self.settings.read().language, system_language())
+    }
+}
+
+/// The language setting (auto | en | tr) as the UI resolves it: "auto" follows the system's language.
+fn ui_turkish(setting: &str, system: Option<String>) -> bool {
+    match setting {
+        "tr" => true,
+        "en" => false,
+        _ => system.is_some_and(|l| l.to_ascii_lowercase().starts_with("tr")),
+    }
+}
+
+/// The system's display language (as the WebView's `navigator.language` follows it), e.g. "tr-TR".
+fn system_language() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let first = |path: &str, name: &str| windows_registry::CURRENT_USER.open(path).ok()?.get_multi_string(name).ok()?.into_iter().next();
+        if let Some(l) = first(r"Control Panel\Desktop", "PreferredUILanguages").or_else(|| first(r"Control Panel\Desktop\MuiCached", "MachinePreferredUILanguages")) {
+            return Some(l);
+        }
+    }
+    ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ui_language_follows_the_setting_then_the_system() {
+        assert!(ui_turkish("tr", Some("en-US".into())) && !ui_turkish("en", Some("tr-TR".into())));
+        assert!(ui_turkish("auto", Some("tr-TR".into())) && ui_turkish("auto", Some("tr_TR.UTF-8".into())));
+        assert!(!ui_turkish("auto", Some("en-GB".into())) && !ui_turkish("auto", None));
+    }
 
     #[test]
     fn a_code_session_starts_with_its_conversation() {

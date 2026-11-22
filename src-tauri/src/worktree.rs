@@ -6,7 +6,7 @@
 //! from the repository's current `HEAD`. Deleting the conversation removes
 //! the worktree; the branch is deleted too unless it has commits of its own.
 
-use crate::error::{AppError, AppResult};
+use crate::error::{coded_notice, AppError, AppResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,11 +33,10 @@ fn git_bytes(dir: &Path, args: &[&str]) -> AppResult<Vec<u8>> {
     }
     let limit = crate::gitops::git_timeout(args);
     let out = output_within(c, limit)
-        .map_err(|e| AppError::msg(format!("Could not run git: {e}")))?
-        .ok_or_else(|| AppError::msg(format!("git {} didn't finish within {} minutes and was stopped.", args.join(" "), limit.as_secs().div_ceil(60))))?;
+        .map_err(crate::gitops::git_unavailable)?
+        .ok_or_else(|| crate::gitops::git_timed_out(args, limit, format!("git {} didn't finish within {} minutes and was stopped.", args.join(" "), limit.as_secs().div_ceil(60))))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(AppError::msg(if err.is_empty() { format!("git {} failed", args.join(" ")) } else { err }));
+        return Err(crate::gitops::git_failed(args, &out.stderr));
     }
     Ok(out.stdout)
 }
@@ -105,21 +104,28 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).ok().filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
+/// A folder's name as part of another: its letters and digits in any script, runs of anything else one '-'.
 fn sanitize(name: &str) -> String {
-    let s: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let mut s = String::new();
+    for c in name.chars() {
+        let c = if c.is_alphanumeric() || c == '_' { c } else { '-' };
+        if !(c == '-' && s.ends_with('-')) {
+            s.push(c);
+        }
+    }
     s.trim_matches('-').chars().take(40).collect()
 }
 
 /// Create a worktree for a session started in `cwd`. Returns the session's
 /// working directory inside the worktree and the info to store.
 pub fn create(cwd: &Path, data_dir: &Path, id: &str) -> AppResult<(PathBuf, Value)> {
-    let root = repo_root(cwd).ok_or_else(|| AppError::msg("This folder is not in a git repository, so it can't get its own worktree."))?;
+    let root = repo_root(cwd).ok_or_else(|| AppError::coded("worktree_not_git", Value::Null, "This folder is not in a git repository, so it can't get its own worktree."))?;
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let rel = std::fs::canonicalize(cwd)
         .ok()
         .and_then(|c| c.strip_prefix(&root).ok().map(|r| r.to_path_buf()))
         .unwrap_or_default();
-    let base = git(&root, &["rev-parse", "HEAD"]).map_err(|_| AppError::msg("The repository has no commits yet; make a first commit to use worktrees."))?;
+    let base = git(&root, &["rev-parse", "HEAD"]).map_err(|_| AppError::coded("worktree_no_commits", Value::Null, "The repository has no commits yet; make a first commit to use worktrees."))?;
     let base_branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let repo_name = sanitize(&root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into()));
     let slug: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
@@ -145,7 +151,7 @@ pub fn create(cwd: &Path, data_dir: &Path, id: &str) -> AppResult<(PathBuf, Valu
 /// could not be saved (or the state can't be read), so the caller keeps the
 /// worktree.
 fn save_uncommitted(wt: &Path) -> AppResult<bool> {
-    let kept = |why: String| AppError::msg(format!("The worktree at {} was kept: {why}", wt.display()));
+    let kept = |why: String| AppError::coded("worktree_kept", json!({"path": wt}), format!("The worktree at {} was kept: {why}", wt.display()));
     let status = git(wt, &["status", "--porcelain"]).map_err(|e| kept(format!("its changes could not be checked ({e}).")))?;
     if status.is_empty() {
         return Ok(false);
@@ -170,13 +176,13 @@ fn save_uncommitted(wt: &Path) -> AppResult<bool> {
 }
 
 /// Remove a session's worktree; delete its branch unless it has commits
-/// that aren't on the base. Returns a note when the branch was kept.
+/// that aren't on the base. Returns a note (`error::coded_notice`) when the branch was kept.
 ///
 /// Uncommitted work is never thrown away: it's committed to the session's
 /// branch first (which is then kept). When that isn't possible, or the
 /// repository can't be found (a disconnected drive), the worktree stays
 /// where it is and the error says where.
-pub fn remove(info: &Value) -> AppResult<Option<String>> {
+pub fn remove(info: &Value) -> AppResult<Option<Value>> {
     let (Some(path), Some(root), Some(branch)) = (info["path"].as_str(), info["repo_root"].as_str(), info["branch"].as_str()) else {
         return Ok(None);
     };
@@ -184,7 +190,7 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
     let wt = Path::new(path);
     if !root.is_dir() {
         if std::fs::symlink_metadata(wt).is_ok() {
-            return Err(AppError::msg(format!(
+            return Err(AppError::coded("worktree_repo_missing", json!({"repo": root, "path": wt}), format!(
                 "The repository {} can't be found (is its drive connected?), so the session's worktree at {} was kept.",
                 root.display(),
                 wt.display()
@@ -202,7 +208,7 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
         let _ = git(root, &["worktree", "prune"]);
     }
     if saved {
-        return Ok(Some(format!("Saved the session's uncommitted changes on branch {branch}.")));
+        return Ok(Some(coded_notice("worktree_saved", json!({"branch": branch}), format!("Saved the session's uncommitted changes on branch {branch}."))));
     }
     if git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
         return Ok(None); // already gone
@@ -213,17 +219,21 @@ pub fn remove(info: &Value) -> AppResult<Option<String>> {
             let _ = git(root, &["branch", "-D", branch]);
             Ok(None)
         }
-        Some(own) => Ok(Some(format!("Kept branch {branch}: it has {own} commit(s) of its own."))),
+        Some(own) => Ok(Some(coded_notice("worktree_branch_kept", json!({"branch": branch, "n": own}), format!("Kept branch {branch}: it has {own} commit(s) of its own.")))),
         // the branch may hold work: keep it when that can't be checked
-        None => Ok(Some(format!("Kept branch {branch}: whether it has commits of its own couldn't be checked."))),
+        None => Ok(Some(coded_notice("worktree_branch_unchecked", json!({"branch": branch}), format!("Kept branch {branch}: whether it has commits of its own couldn't be checked.")))),
     }
+}
+
+fn no_worktree() -> AppError {
+    AppError::coded("no_worktree", Value::Null, "No worktree.")
 }
 
 /// Apply the worktree's changes (committed and uncommitted, new files
 /// included) to the original working tree with a 3-way apply.
 pub fn apply_to_origin(info: &Value) -> AppResult<String> {
-    let path = Path::new(info["path"].as_str().ok_or_else(|| AppError::msg("No worktree."))?);
-    let root = Path::new(info["repo_root"].as_str().ok_or_else(|| AppError::msg("No repository."))?);
+    let path = Path::new(info["path"].as_str().ok_or_else(no_worktree)?);
+    let root = Path::new(info["repo_root"].as_str().ok_or_else(|| AppError::coded("not_git_repo", Value::Null, "No repository."))?);
     let base = info["base"].as_str().unwrap_or("HEAD");
     // Stage everything (intent-to-add for new files) so one diff covers it.
     git(path, &["add", "-A", "--intent-to-add"])?;
@@ -255,7 +265,7 @@ pub fn is_disposable(info: &Value) -> bool {
 
 /// Commit everything in the worktree on its branch.
 pub fn commit_all(info: &Value, message: &str) -> AppResult<String> {
-    let path = Path::new(info["path"].as_str().ok_or_else(|| AppError::msg("No worktree."))?);
+    let path = Path::new(info["path"].as_str().ok_or_else(no_worktree)?);
     git(path, &["add", "-A"])?;
     let status = git(path, &["status", "--porcelain"])?;
     if status.is_empty() {
@@ -269,6 +279,15 @@ pub fn commit_all(info: &Value, message: &str) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_names_keep_their_letters() {
+        assert_eq!(sanitize("proje-çalışma ğüşiöç"), "proje-çalışma-ğüşiöç");
+        assert_eq!(sanitize("  my repo (v2)!! "), "my-repo-v2");
+        assert_eq!(sanitize("a_b--c"), "a_b-c");
+        assert_eq!(sanitize("..."), "");
+        assert_eq!(sanitize(&"x".repeat(60)).len(), 40);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -333,7 +352,8 @@ mod tests {
         assert!(repo.join("new.txt").exists());
         // uncommitted work is saved on the branch, which is kept
         let note = remove(&info).unwrap().unwrap();
-        assert!(note.contains("Saved"), "{note}");
+        assert_eq!((note["kind"].as_str(), &note["params"]["branch"]), (Some("worktree_saved"), &info["branch"]));
+        assert!(note["message"].as_str().unwrap().contains("Saved"), "{note}");
         assert!(!wt.exists());
         let branch = info["branch"].as_str().unwrap();
         assert!(git(&repo, &["show", &format!("{branch}:new.txt")]).unwrap().contains("new"));
@@ -364,7 +384,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("work.txt")).unwrap(), "unsaved work\n");
         // once the lock is gone, the work is saved and the worktree removed
         std::fs::remove_file(gitdir.join("index.lock")).unwrap();
-        assert!(remove(&info).unwrap().unwrap().contains("Saved"));
+        assert!(remove(&info).unwrap().unwrap()["message"].as_str().unwrap().contains("Saved"));
         assert!(!wt.exists());
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);
@@ -391,7 +411,7 @@ mod tests {
         assert!(remove(&info).unwrap_err().to_string().contains("was kept"));
         assert!(wt.join("work.txt").exists());
         std::fs::write(wt.join(".git"), dotgit).unwrap();
-        assert!(remove(&info).unwrap().unwrap().contains("Saved"));
+        assert!(remove(&info).unwrap().unwrap()["message"].as_str().unwrap().contains("Saved"));
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -409,8 +429,9 @@ mod tests {
         git(&wt, &["config", "user.name", "t"]).unwrap();
         std::fs::write(wt.join("c.txt"), "c\n").unwrap();
         assert!(commit_all(&info, "work").unwrap().starts_with("Committed"));
-        let note = remove(&info).unwrap();
-        assert!(note.unwrap().contains("Kept branch"));
+        let note = remove(&info).unwrap().unwrap();
+        assert_eq!((note["kind"].as_str(), note["params"]["n"].as_u64()), (Some("worktree_branch_kept"), Some(1)));
+        assert!(note["message"].as_str().unwrap().contains("Kept branch"));
         assert!(git(&repo, &["rev-parse", "--verify", info["branch"].as_str().unwrap()]).is_ok());
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&data);

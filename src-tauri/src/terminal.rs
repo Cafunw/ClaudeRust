@@ -109,11 +109,15 @@ fn pump_output(rx: Receiver<Vec<u8>>, mut emit: impl FnMut(String)) {
     }
 }
 
+fn closed() -> AppError {
+    AppError::coded("terminal_closed", Value::Null, "This terminal has closed.")
+}
+
 impl Terminals {
     pub fn open<R: tauri::Runtime>(&self, app: &AppHandle<R>, conv_id: &str, cwd: &str, cols: u16, rows: u16) -> AppResult<Value> {
         let pty = native_pty_system();
         let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
-        let pair = pty.openpty(size).map_err(|e| AppError::msg(format!("Could not open a terminal: {e}")))?;
+        let pair = pty.openpty(size).map_err(|e| AppError::coded("terminal_open_failed", Value::Null, format!("Could not open a terminal: {e}")))?;
         let (shell, args) = default_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.args(&args);
@@ -128,10 +132,10 @@ impl Terminals {
         let mut child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| AppError::msg(format!("Could not start {shell}: {e}")))?;
+            .map_err(|e| AppError::coded("terminal_start_failed", json!({"shell": shell}), format!("Could not start {shell}: {e}")))?;
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().map_err(|e| AppError::msg(e.to_string()))?;
-        let mut writer = pair.master.take_writer().map_err(|e| AppError::msg(e.to_string()))?;
+        let mut reader = pair.master.try_clone_reader().map_err(|e| AppError::coded("terminal_open_failed", Value::Null, e.to_string()))?;
+        let mut writer = pair.master.take_writer().map_err(|e| AppError::coded("terminal_open_failed", Value::Null, e.to_string()))?;
         let id = format!("term_{}", &new_id()[..8]);
         let (input, input_rx) = sync_channel::<Vec<u8>>(INPUT_QUEUE);
         let term = Arc::new(Term {
@@ -194,7 +198,7 @@ impl Terminals {
     }
 
     fn get(&self, id: &str) -> AppResult<Arc<Term>> {
-        self.map.lock().get(id).cloned().ok_or_else(|| AppError::msg("This terminal has closed."))
+        self.map.lock().get(id).cloned().ok_or_else(closed)
     }
 
     /// Queue `data` for the terminal (never blocks: a program that isn't
@@ -202,15 +206,15 @@ impl Terminals {
     pub fn write(&self, id: &str, data: &str) -> AppResult<()> {
         let t = self.get(id)?;
         t.input.try_send(data.as_bytes().to_vec()).map_err(|e| match e {
-            TrySendError::Full(_) => AppError::msg("The program in this terminal isn't reading input right now."),
-            TrySendError::Disconnected(_) => AppError::msg("This terminal has closed."),
+            TrySendError::Full(_) => AppError::coded("terminal_busy", Value::Null, "The program in this terminal isn't reading input right now."),
+            TrySendError::Disconnected(_) => closed(),
         })
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> AppResult<()> {
         let t = self.get(id)?;
         let master = t.master.lock();
-        let m = master.as_ref().ok_or_else(|| AppError::msg("This terminal has closed."))?;
+        let m = master.as_ref().ok_or_else(closed)?;
         m.resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 }).map_err(|e| AppError::msg(e.to_string()))
     }
 

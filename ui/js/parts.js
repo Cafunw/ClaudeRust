@@ -69,10 +69,18 @@ export function decorate(root) {
     const sub = c.querySelector('.artifact-card-sub');
     if (sub && !sub.dataset.ready) {
       sub.dataset.ready = '1';
-      const label = sub.textContent;
+      const label = artifactKindText(sub.textContent);
       sub.textContent = c.dataset.complete === 'false' ? `${label} · ${t('generating')}` : `${label} · ${t('click_to_open')}`;
     }
   });
+}
+
+// the kinds artifacts.rs kind_label names in English (the rest are names: HTML, SVG, React, Python…)
+const KIND_KEYS = { Diagram: 'ak_diagram', Document: 'ak_document', Code: 'ak_code', Artifact: 'ak_artifact' };
+
+/** An artifact's kind (artifacts.rs kind_label) in the app's language. */
+export function artifactKindText(label) {
+  return KIND_KEYS[label] ? t(KIND_KEYS[label]) : label;
 }
 
 const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'fish', 'console', 'shellsession', 'terminal', 'powershell', 'ps1', 'pwsh', 'cmd', 'bat']);
@@ -138,7 +146,7 @@ export async function copyText(text) {
   try {
     await call('copy_text', { text });
   } catch {
-    try { await navigator.clipboard.writeText(text); } catch { toast('Copy failed', 'error'); }
+    try { await navigator.clipboard.writeText(text); } catch { toast(t('copy_failed'), 'error'); }
   }
 }
 
@@ -240,7 +248,7 @@ export function setToolProgress(id, text) {
     const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
     pre.textContent = text;
     if (atEnd) pre.scrollTop = pre.scrollHeight;
-    if (!el.dataset.userClosed) el.classList.add('open');
+    if (!el.dataset.userClosed) { el.classList.add('open'); expanded(el); }
   }
 }
 
@@ -276,11 +284,17 @@ function todosHtml(todos) {
 
 // ------------------------------------------------------------- part render
 
+/** A card's head says whether its body is shown (for screen readers). */
+function expanded(el) {
+  const head = el.querySelector('.thinking-head, .tool-head');
+  if (head && head.tagName === 'BUTTON') head.setAttribute('aria-expanded', String(el.classList.contains('open')));
+}
+
 function renderThinking(el, p) {
   if (!el.classList.contains('thinking')) {
     el.className = 'thinking';
-    el.innerHTML = `<button class="thinking-head"><span class="ic"></span><span class="lab"></span>${icon('chevRight', 14, 'class="chev"')}</button><div class="thinking-body md"></div>`;
-    el.querySelector('.thinking-head').addEventListener('click', () => { el.classList.toggle('open'); el.dataset.userToggled = '1'; });
+    el.innerHTML = `<button class="thinking-head" aria-expanded="false"><span class="ic"></span><span class="lab"></span>${icon('chevRight', 14, 'class="chev"')}</button><div class="thinking-body md"></div>`;
+    el.querySelector('.thinking-head').addEventListener('click', () => { el.classList.toggle('open'); el.dataset.userToggled = '1'; expanded(el); });
   }
   const lab = el.querySelector('.lab');
   const ic = el.querySelector('.ic');
@@ -295,6 +309,7 @@ function renderThinking(el, p) {
     ic.innerHTML = icon('clock', 15);
     if (!el.dataset.userToggled) el.classList.remove('open');
   }
+  expanded(el);
   const body = el.querySelector('.thinking-body');
   if (p.redacted && !p.raw) {
     body.textContent = t('redacted_thinking');
@@ -321,12 +336,16 @@ function renderTool(el, p) {
   const drawn = open || p.status === 'running' || p.status === 'awaiting_permission';
   el.innerHTML = `<button class="tool-head">${icon(ic, 15)}<span class="tname">${esc(sum.name)}</span><span class="targ">${esc(sum.arg)}</span>${stat}${statusHtml(p)}${isTodo ? '' : icon('chevRight', 14, 'class="chev"')}</button>
     <div class="tool-body">${isTodo ? todosHtml(p.input && p.input.todos) : drawn ? toolBody(p) : ''}</div>`;
-  if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => {
-    el.classList.toggle('open');
-    const body = el.querySelector('.tool-body');
-    if (!el.classList.contains('open')) el.dataset.userClosed = '1';
-    else if (!body.firstChild) body.innerHTML = toolBody(p);
-  });
+  if (!isTodo) {
+    expanded(el);
+    el.querySelector('.tool-head').addEventListener('click', () => {
+      el.classList.toggle('open');
+      expanded(el);
+      const body = el.querySelector('.tool-body');
+      if (!el.classList.contains('open')) el.dataset.userClosed = '1';
+      else if (!body.firstChild) body.innerHTML = toolBody(p);
+    });
+  }
   // file tools: the path opens the file in the editor
   const fp = p.input && (p.input.file_path || p.input.notebook_path);
   if (fp && ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(p.tool)) {
@@ -355,8 +374,9 @@ function renderSearch(el, p) {
   el.innerHTML = `<button class="tool-head">${icon('globe', 15)}<span class="tname">${running ? `<span class="shimmer">${t('searching_web')}</span>` : t('searched_web')}</span><span class="targ">${esc(p.query || '')}</span>
     ${p.status === 'error' ? `<span class="status err">${esc(p.error || t('failed'))}</span>` : running ? '<span class="status"><span class="spinner"></span></span>' : `<span class="status">${n} ${t('results')}</span>`}
     ${icon('chevRight', 14, 'class="chev"')}</button>
-    <div class="tool-body"><div class="tool-section search-results">${(p.results || []).filter((r) => /^https?:/i.test(r.url || '')).map((r) => `<a class="search-result" href="${esc(r.url)}">${favicon(r.domain)}<span class="t">${esc(r.title || r.url)}</span><span class="d">${esc(r.domain || '')}</span></a>`).join('')}</div></div>`;
-  el.querySelector('.tool-head').addEventListener('click', () => el.classList.toggle('open'));
+    <div class="tool-body"><div class="tool-section search-results">${(p.results || []).filter((r) => /^https?:/i.test(r.url || '')).map((r) => `<a class="search-result" href="${esc(r.url)}" title="${esc(r.url)}">${favicon(r.domain)}<span class="t">${esc(r.title || r.url)}</span><span class="d">${esc(r.domain || '')}</span></a>`).join('')}</div></div>`;
+  expanded(el);
+  el.querySelector('.tool-head').addEventListener('click', () => { el.classList.toggle('open'); expanded(el); });
 }
 
 function renderFetch(el, p) {
@@ -374,7 +394,12 @@ export function errorMessage(err) {
   if (err.status === 401 || k === 'authentication_error') return t('err_auth');
   if (err.status === 429 || k === 'rate_limit_error') return t('err_rate_limit');
   if (err.status === 529 || k === 'overloaded_error') return t('err_overloaded');
-  return friendlyError(err.message) || (k === 'network' ? t('err_network') : err.message || t('error_title'));
+  const plain = friendlyError(err) || (k === 'network' ? t('err_network') : null);
+  if (plain) return plain;
+  // the API's own words are English: said here in the app's language, they stay under "Details"
+  if (err.status >= 500 || k === 'api_error') return t('neterr_server', { code: err.status || 500 });
+  if (err.status >= 400) return t('neterr_http', { code: err.status });
+  return err.message || t('error_title');
 }
 
 function renderNotice(el, p, ctx) {

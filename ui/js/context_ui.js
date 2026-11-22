@@ -4,6 +4,7 @@ import { t } from './i18n.js';
 import { call, on } from './api.js';
 import { h, esc, toast, errorToast, fmtTokens, fmtUsd, modal } from './util.js';
 import { registerCommand } from './slash.js';
+import { errorText } from './neterr.js';
 
 /** A topbar element showing context use and cost; refreshes itself. */
 export function contextMeter(conversationId, onClick) {
@@ -83,10 +84,10 @@ async function isOpen(convId) {
 on('compacting', async ({ conversation_id: id, auto }) => {
   if (await isOpen(id)) toast(auto ? t('compacting_auto') : t('compacting'));
 });
-on('compacted', async ({ conversation_id: id, error, auto }) => {
+on('compacted', async ({ conversation_id: id, error, error_info: info, auto }) => {
   refreshMeters(id);
   const open = await isOpen(id);
-  if (error) { if (open || !auto) toast(`${t('compact_failed')}: ${error}`, 'error'); } else if (open) toast(auto ? t('compacted_auto') : t('compacted'));
+  if (error) { if (open || !auto) toast(`${t('compact_failed')}: ${errorText(info || error)}`, 'error'); } else if (open) toast(auto ? t('compacted_auto') : t('compacted'));
 });
 on('generation-state', ({ conversation_id: id, running }) => { if (!running) refreshMeters(id); });
 

@@ -1,6 +1,6 @@
 // DOM helpers, menus, modals and toasts.
 import { icon } from './icons.js';
-import { t, tOr } from './i18n.js';
+import { t } from './i18n.js';
 import { friendlyError } from './neterr.js';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -161,12 +161,9 @@ export function toast(msg, kind = '', { action, onAction, duration } = {}) {
 
 /** A failure as a toast: a transport error said plainly, its raw text a click away. */
 export function errorToast(e) {
-  // a refusal the backend names by its code (memory_synth::coded), in the UI's language
-  const coded = e && typeof e.kind === 'string' ? tOr(`errk_${e.kind}`, null) : null;
-  if (coded) { toast(coded, 'error'); return; }
   const raw = (e && e.message) || String(e);
-  const plain = friendlyError(raw);
-  if (!plain) { toast(raw, 'error'); return; }
+  const plain = friendlyError(e);
+  if (!plain || plain === raw) { toast(plain || raw, 'error'); return; }
   toast(plain, 'error', { action: t('err_details'), onAction: () => modal({ title: t('err_details'), body: h(`<div class="mono small" style="white-space:pre-wrap;word-break:break-word">${esc(raw)}</div>`) }) });
 }
 
@@ -177,6 +174,17 @@ export function scrollBehavior() {
 
 // ------------------------------------------------------------------- menus
 let openMenu = null;
+
+/** Where `key` moves the focus among the `n` controls of a menu from the one
+ *  at `at` (-1: none of them): an index, or -1 when the key doesn't move it. */
+export function menuStep(n, at, key) {
+  if (!n) return -1;
+  if (key === 'Home') return 0;
+  if (key === 'End') return n - 1;
+  if (key === 'ArrowDown') return at < 0 ? 0 : (at + 1) % n;
+  if (key === 'ArrowUp') return at < 0 ? n - 1 : (at - 1 + n) % n;
+  return -1;
+}
 
 export function closeMenu() {
   if (openMenu) {
@@ -198,13 +206,14 @@ export function showMenu(anchor, items, opts = {}) {
   closeMenu();
   const el = h('<div class="popover" role="menu"></div>');
   if (opts.width) el.style.minWidth = opts.width + 'px';
-  const btns = [];
   for (const it of items) {
     if (!it) continue;
     if (it.sep) { el.appendChild(h('<div class="menu-sep"></div>')); continue; }
     if (it.header) { el.appendChild(h(`<div class="menu-label">${esc(it.header)}</div>`)); continue; }
     if (it.element) { el.appendChild(it.element); continue; }
-    const b = h(`<button class="menu-item ${it.danger ? 'danger' : ''}" role="menuitem">
+    // a choice among several (a model, a version): which one is on is said, not only drawn
+    const role = 'checked' in it ? `role="menuitemradio" aria-checked="${!!it.checked}"` : 'role="menuitem"';
+    const b = h(`<button class="menu-item ${it.danger ? 'danger' : ''}" ${role}>
       ${it.icon ? icon(it.icon, 16) : ''}
       <span class="mtext">${esc(it.label)}${it.sub ? `<span class="sub">${esc(it.sub)}</span>` : ''}</span>
       ${it.right ? `<span class="right">${esc(it.right)}</span>` : ''}
@@ -217,21 +226,23 @@ export function showMenu(anchor, items, opts = {}) {
       // async actions report their failure instead of rejecting unseen
       if (it.onClick) (async () => it.onClick(e))().catch(errorToast);
     });
-    btns.push(b);
     el.appendChild(b);
   }
   document.body.appendChild(el);
   position(el, anchor, opts.placement || 'bottom-start');
-  let idx = -1;
   const outside = (e) => { if (!el.contains(e.target) && !(anchor && anchor.contains(e.target))) closeMenu(); };
   const key = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); anchor && anchor.focus && anchor.focus(); }
-    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      btns.forEach((b) => b.classList.remove('kb'));
-      idx = (idx + (e.key === 'ArrowDown' ? 1 : -1) + btns.length) % btns.length;
-      btns[idx].classList.add('kb'); btns[idx].focus();
-    }
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); anchor && anchor.focus && anchor.focus(); return; }
+    // a text field keeps its own Home and End
+    if ((e.key === 'Home' || e.key === 'End') && e.target.matches && e.target.matches('input:not([type=checkbox]), textarea')) return;
+    // every control of the menu, its switches and effort levels too
+    const all = [...el.querySelectorAll('button:not(:disabled), input[type=checkbox]:not(:disabled)')];
+    const to = menuStep(all.length, all.indexOf(document.activeElement), e.key);
+    if (to < 0) return;
+    e.preventDefault();
+    all.forEach((b) => b.classList.remove('kb'));
+    all[to].classList.add('kb');
+    all[to].focus();
   };
   const entry = { el, anchor, outside, key, onClose: opts.onClose };
   setTimeout(() => {
@@ -329,8 +340,23 @@ export function promptDialog(title, value = '', { multiline = false, placeholder
 export function autoGrow(ta, max) {
   ta.style.height = 'auto';
   const limit = max || Math.round(window.innerHeight * 0.4);
-  ta.style.height = Math.min(ta.scrollHeight, limit) + 'px';
+  // empty: as tall as its placeholder, so a long one isn't cut off in a narrow window
+  const need = !ta.value && ta.placeholder ? Math.max(ta.scrollHeight, placeholderHeight(ta)) : ta.scrollHeight;
+  ta.style.height = Math.min(need, limit) + 'px';
   ta.style.overflowY = ta.scrollHeight > limit ? 'auto' : 'hidden';
+}
+
+// a hidden copy measures the placeholder (setting the field's own value would lose its undo history)
+let mirror = null;
+function placeholderHeight(ta) {
+  if (!mirror) { mirror = document.createElement('textarea'); mirror.tabIndex = -1; mirror.setAttribute('aria-hidden', 'true'); }
+  const s = getComputedStyle(ta);
+  mirror.style.cssText = `position:fixed;left:-10000px;top:0;visibility:hidden;height:0;overflow:hidden;width:${ta.offsetWidth}px;box-sizing:${s.boxSizing};padding:${s.padding};border:${s.border};font:${s.font};line-height:${s.lineHeight};letter-spacing:${s.letterSpacing}`;
+  mirror.value = ta.placeholder;
+  document.body.appendChild(mirror);
+  const hgt = mirror.scrollHeight;
+  mirror.remove();
+  return hgt;
 }
 
 export function fileToBase64(file) {
@@ -342,10 +368,19 @@ export function fileToBase64(file) {
   });
 }
 
-export function lightbox(src) {
-  const el = h(`<div class="lightbox"><img src="${esc(src)}" alt=""></div>`);
-  el.addEventListener('click', () => el.remove());
+export function lightbox(src, alt = '') {
+  const el = h(`<div class="lightbox" role="dialog" aria-modal="true" aria-label="${esc(alt || t('img_view'))}" tabindex="-1"><img src="${esc(src)}" alt="${esc(alt)}"></div>`);
+  const opener = document.activeElement;
+  const close = () => {
+    el.remove();
+    document.removeEventListener('keydown', key, true);
+    if (opener && opener.isConnected) opener.focus({ preventScroll: true });
+  };
+  const key = (e) => { if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); close(); } };
+  el.addEventListener('click', close);
+  document.addEventListener('keydown', key, true);
   document.body.appendChild(el);
+  el.focus();
 }
 
 /** Replace children of `container` with `html`, keeping unchanged leading nodes. */

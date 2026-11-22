@@ -6,6 +6,8 @@ import { call, on } from '../api.js';
 import { h, esc, errorToast, humanSize, debounce, showMenu, toast, relTime, snapshot, sameSnapshot } from '../util.js';
 import { copyText } from '../parts.js';
 import { registerPane, context, refresh, show } from '../workspace.js';
+import { keyRows } from './rows.js';
+import { errorText } from '../neterr.js';
 
 const state = new Map(); // convId -> { open: Set<dir>, file: path|null, filter: '' }
 
@@ -40,9 +42,9 @@ async function drawTree(el, ctx) {
   el.innerHTML = '';
   const grep = s.mode === 'contents';
   const head = h(`<div class="pane-head fb-head">
-    <div class="fb-mode segmented"><button data-m="names" class="${grep ? '' : 'on'}" title="${esc(t('files_mode_names'))}">${icon('file', 13)}</button><button data-m="contents" class="${grep ? 'on' : ''}" title="${esc(t('files_mode_contents'))}">${icon('search', 13)}</button></div>
-    <input class="input sm fb-filter" placeholder="${esc(grep ? t('files_grep_ph') : t('files_filter'))}" spellcheck="false">
-    ${grep ? `<button class="icon-btn sm fb-opt ${s.case ? 'on' : ''}" data-o="case" title="${esc(t('files_case'))}">Aa</button><button class="icon-btn sm fb-opt ${s.regex ? 'on' : ''}" data-o="regex" title="${esc(t('files_regex'))}">.*</button>` : ''}
+    <div class="fb-mode segmented"><button data-m="names" class="${grep ? '' : 'on'}" aria-pressed="${!grep}" title="${esc(t('files_mode_names'))}">${icon('file', 13)}</button><button data-m="contents" class="${grep ? 'on' : ''}" aria-pressed="${grep}" title="${esc(t('files_mode_contents'))}">${icon('search', 13)}</button></div>
+    <input class="input sm fb-filter" placeholder="${esc(grep ? t('files_grep_ph') : t('files_filter'))}" aria-label="${esc(grep ? t('files_grep_ph') : t('files_filter'))}" spellcheck="false">
+    ${grep ? `<button class="icon-btn sm fb-opt ${s.case ? 'on' : ''}" data-o="case" aria-pressed="${!!s.case}" title="${esc(t('files_case'))}" aria-label="${esc(t('files_case'))}">Aa</button><button class="icon-btn sm fb-opt ${s.regex ? 'on' : ''}" data-o="regex" aria-pressed="${!!s.regex}" title="${esc(t('files_regex'))}" aria-label="${esc(t('files_regex'))}">.*</button>` : ''}
     <button class="icon-btn" data-a="refresh" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div>`);
   const list = h('<div class="fb-tree"></div>');
   el.append(head, list);
@@ -50,23 +52,29 @@ async function drawTree(el, ctx) {
   input.value = grep ? (s.grep || '') : s.filter;
   head.querySelector('[data-a=refresh]').onclick = () => drawTree(el, ctx);
   head.querySelectorAll('.fb-mode button').forEach((b) => { b.onclick = () => { if (s.mode !== b.dataset.m) { s.mode = b.dataset.m; s.scroll = 0; drawTree(el, ctx).then(() => el.querySelector('.fb-filter').focus()); } }; });
-  head.querySelectorAll('.fb-opt').forEach((b) => { b.onclick = () => { s[b.dataset.o] = !s[b.dataset.o]; b.classList.toggle('on', !!s[b.dataset.o]); fill(list, ctx); }; });
+  head.querySelectorAll('.fb-opt').forEach((b) => { b.onclick = () => { s[b.dataset.o] = !s[b.dataset.o]; b.classList.toggle('on', !!s[b.dataset.o]); b.setAttribute('aria-pressed', String(!!s[b.dataset.o])); fill(list, ctx); }; });
   const run = debounce(() => { if (grep) s.grep = input.value; else s.filter = input.value.trim(); fill(list, ctx); }, grep ? 300 : 150);
   input.addEventListener('input', run);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { const first = list.querySelector('.fb-row.file, .gr-hit'); if (first) first.click(); }
+    if (e.key === 'ArrowDown') { const first = list.querySelector(ROWS); if (first) { e.preventDefault(); first.focus(); } }
   });
   await fill(list, ctx);
   list.scrollTop = s.scroll;
   list.addEventListener('scroll', () => { s.scroll = list.scrollTop; });
 }
 
-function row(entry, depth, ctx, el) {
+const ROWS = '.fb-row, .gr-file, .gr-hit';
+
+/** `flat`: a search result, shown as its name and then its folder (no tree to open). */
+function row(entry, depth, ctx, el, flat = false) {
   const s = st(ctx.convId);
   const open = entry.dir && s.open.has(entry.path);
-  const r = h(`<div class="fb-row ${entry.dir ? 'dir' : 'file'}" style="padding-left:${8 + depth * 14}px" title="${esc(entry.path)}">
-    <span class="tw">${entry.dir ? icon(open ? 'chevDown' : 'chevRight', 12) : ''}</span>${icon(entry.dir ? 'folder' : 'file', 14)}<span class="nm ellipsis">${esc(entry.label || base(entry.path))}</span>
-    ${entry.dir ? '' : `<button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}">@</button>`}</div>`);
+  const name = base(entry.path);
+  const dir = entry.path.slice(0, entry.path.length - name.length);
+  const r = h(`<div class="fb-row ${entry.dir ? 'dir' : 'file'}" style="padding-left:${8 + depth * 14}px" title="${esc(entry.path)}" data-k="${esc(entry.path)}"${entry.dir && !flat ? ` aria-expanded="${open}"` : ''}>
+    <span class="tw">${entry.dir && !flat ? icon(open ? 'chevDown' : 'chevRight', 12) : ''}</span>${icon(entry.dir ? 'folder' : 'file', 14)}<span class="nm ellipsis">${flat ? `${esc(name)} <span class="muted">${esc(dir)}</span>` : esc(name)}</span>
+    ${entry.dir ? '' : `<button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}" aria-label="${esc(t('files_mention'))}: ${esc(name)}">@</button>`}</div>`);
   if (entry.dir) {
     r.onclick = () => {
       if (open) s.open.delete(entry.path); else s.open.add(entry.path);
@@ -84,7 +92,12 @@ function row(entry, depth, ctx, el) {
 }
 
 /** quiet: a refresh in the background (files changed): no spinner, and the scroll position is kept. */
-async function fill(list, ctx, { quiet = false } = {}) {
+async function fill(list, ctx, opts) {
+  await fillList(list, ctx, opts);
+  keyRows(list, ROWS);
+}
+
+async function fillList(list, ctx, { quiet = false } = {}) {
   const s = st(ctx.convId);
   const el = list.closest('.ws-pane');
   const seq = (s.seq = (s.seq || 0) + 1);
@@ -94,7 +107,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
     if (!q.trim()) { list.innerHTML = `<div class="pane-empty">${esc(t('files_grep_hint'))}</div>`; return; }
     if (!quiet) list.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>';
     let r;
-    try { r = await call('search_in_files', { conversationId: ctx.convId, query: q, regex: !!s.regex, caseSensitive: !!s.case }); } catch (e) { if (seq === s.seq) list.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+    try { r = await call('search_in_files', { conversationId: ctx.convId, query: q, regex: !!s.regex, caseSensitive: !!s.case }); } catch (e) { if (seq === s.seq) list.innerHTML = `<div class="pane-empty">${esc(errorText(e))}</div>`; return; }
     if (seq !== s.seq) return;
     list.innerHTML = '';
     if (!r.hits.length) { list.appendChild(h(`<div class="pane-empty">${esc(t('no_results'))}</div>`)); return; }
@@ -103,7 +116,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
     for (const hit of r.hits) {
       if (hit.path !== last) {
         last = hit.path;
-        const fr = h(`<div class="gr-file" title="${esc(hit.path)}">${icon('file', 13)}<span class="ellipsis">${esc(hit.path)}</span></div>`);
+        const fr = h(`<div class="gr-file" title="${esc(hit.path)}" data-k="${esc(hit.path)}">${icon('file', 13)}<span class="ellipsis">${esc(hit.path)}</span></div>`);
         fr.onclick = () => { s.file = hit.path; s.line = null; draw(el, ctx); };
         list.appendChild(fr);
       }
@@ -113,7 +126,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
       const pre = dec.decode(bytes.slice(0, hit.start));
       const mid = dec.decode(bytes.slice(hit.start, hit.end));
       const post = dec.decode(bytes.slice(hit.end));
-      const hr = h(`<div class="gr-hit"><span class="no">${hit.line}</span><span class="tx">${esc(pre.trimStart())}<mark>${esc(mid)}</mark>${esc(post)}</span><button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}">@</button></div>`);
+      const hr = h(`<div class="gr-hit" data-k="${esc(`${hit.path}:${hit.line}`)}"><span class="no">${hit.line}</span><span class="tx">${esc(pre.trimStart())}<mark>${esc(mid)}</mark>${esc(post)}</span><button class="icon-btn sm fb-at" title="${esc(t('files_mention'))}" aria-label="${esc(t('files_mention'))}: ${esc(`${base(hit.path)}:${hit.line}`)}">@</button></div>`);
       hr.onclick = (e) => {
         if (e.target.closest('.fb-at')) { mention(hit.path, hit.line); return; }
         s.file = hit.path;
@@ -131,7 +144,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
     list.innerHTML = '';
     if (!hits.length) { list.appendChild(h(`<div class="pane-empty">${esc(t('no_results'))}</div>`)); return; }
     for (const f of hits) {
-      const r = row({ path: f.path, dir: !!f.dir, label: f.path }, 0, ctx, el);
+      const r = row({ path: f.path, dir: !!f.dir }, 0, ctx, el, true);
       if (f.dir) r.onclick = () => { s.filter = ''; let p = ''; for (const part of f.path.split('/')) { p = p ? `${p}/${part}` : part; s.open.add(p); } drawTree(el, ctx); };
       list.appendChild(r);
     }
@@ -141,7 +154,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
   const seen = []; // what the rows are drawn from
   const walk = async (dir, depth) => {
     let items;
-    try { items = await call('project_dir', { conversationId: ctx.convId, dir }); } catch (e) { seen.push(['error', e.message || String(e)]); frag.appendChild(h(`<div class="pane-empty">${esc(e.message || String(e))}</div>`)); return; }
+    try { items = await call('project_dir', { conversationId: ctx.convId, dir }); } catch (e) { seen.push(['error', errorText(e)]); frag.appendChild(h(`<div class="pane-empty">${esc(errorText(e))}</div>`)); return; }
     for (const it of items) {
       seen.push([depth, it, !!(it.dir && s.open.has(it.path))]);
       frag.appendChild(row(it, depth, ctx, el));
@@ -162,6 +175,7 @@ async function fill(list, ctx, { quiet = false } = {}) {
 
 async function drawFile(el, ctx) {
   const s = st(ctx.convId);
+  const was = el.contains(document.activeElement) ? document.activeElement.dataset.a : null;
   el.innerHTML = `<div class="pane-empty"><span class="spinner"></span></div>`;
   let f;
   try { f = await call('project_file', { conversationId: ctx.convId, path: s.file }); } catch (e) { s.file = null; errorToast(e); drawTree(el, ctx); return; }
@@ -172,7 +186,7 @@ async function drawFile(el, ctx) {
     <span class="muted small">${f.lines != null ? `${f.lines} ${esc(t('files_lines'))} · ` : ''}${esc(humanSize(f.size))}</span>
     <button class="icon-btn ${s.blame ? 'on' : ''}" data-a="blame" title="${esc(t('fv_blame'))}">${icon('history', 14)}</button>
     <button class="icon-btn" data-a="ask" title="${esc(t('fv_ask'))}">${icon('sparkle', 14)}</button>
-    <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}">@</button>
+    <button class="icon-btn" data-a="at" title="${esc(t('files_mention'))}" aria-label="${esc(t('files_mention'))}">@</button>
     <button class="icon-btn" data-a="more" title="${esc(t('fv_more'))}">${icon('more', 14)}</button>
     <button class="icon-btn" data-a="edit" title="${esc(t('open_in_editor'))}">${icon('external', 14)}</button></div>`);
   const asMention = () => `@${/\s/.test(f.path) ? `"${f.path}"` : f.path}`;
@@ -208,6 +222,8 @@ async function drawFile(el, ctx) {
   head.querySelector('[data-a=at]').onclick = () => mention(f.path);
   head.querySelector('[data-a=edit]').onclick = () => call('open_in_editor', { path: f.abs, line: s.line || null }).catch(errorToast);
   el.appendChild(head);
+  // opened from the keyboard (its row is gone now), or the blame button redrew it: focus stays in the pane
+  if (document.activeElement === document.body) (head.querySelector(`[data-a="${was}"]`) || head.querySelector('[data-a=back]')).focus({ preventScroll: true });
   if (f.binary || f.too_large) {
     el.appendChild(h(`<div class="pane-empty">${icon('file', 22)}<div>${esc(f.binary ? t('files_binary') : t('files_too_large'))}</div></div>`));
     return;
@@ -240,7 +256,7 @@ async function addBlame(body, ctx, path, n) {
   const col = h(`<pre class="fv-blame"><span class="muted">…</span></pre>`);
   body.insertBefore(col, body.firstChild);
   let b;
-  try { b = await call('file_blame', { conversationId: ctx.convId, path }); } catch (e) { col.innerHTML = `<span class="fv-blame-err" title="${esc(e.message || String(e))}">${esc(e.message || String(e))}</span>`; return; }
+  try { b = await call('file_blame', { conversationId: ctx.convId, path }); } catch (e) { col.innerHTML = `<span class="fv-blame-err" title="${esc(errorText(e))}">${esc(errorText(e))}</span>`; return; }
   const zero = /^0+$/;
   let out = '';
   for (let i = 0; i < Math.min(n, b.lines.length); i++) {

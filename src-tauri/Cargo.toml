@@ -62,6 +62,11 @@ mime_guess = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # already in the tree through zip: inflates a PDF's object streams to count its pages
 flate2 = "1"
+# in the tree already (reqwest's rustls, the updater): .mcpb signatures (extension_sign.rs), the Node.js archive (node_runtime.rs)
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+rustls-native-certs = "0.8"
+tar = { version = "0.4", default-features = false }
 portable-pty = "0.9"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 

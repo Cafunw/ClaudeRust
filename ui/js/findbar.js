@@ -93,8 +93,9 @@ export function openFind() {
   if (!view) return;
   if (bar && !bar.isConnected) { bar = null; hits = []; idx = -1; }
   if (!bar) {
-    bar = h(`<div class="find-bar">${icon('search', 14)}<input placeholder="${esc(t('find_in_chat'))}"><span class="fb-count muted small"></span>
-      <button class="icon-btn sm" data-a="prev">${icon('chevUp', 14)}</button><button class="icon-btn sm" data-a="next">${icon('chevDown', 14)}</button><button class="icon-btn sm" data-a="close">${icon('x', 14)}</button></div>`);
+    const btn = (a, ic, label) => `<button class="icon-btn sm" data-a="${a}" title="${esc(label)}" aria-label="${esc(label)}">${icon(ic, 14)}</button>`;
+    bar = h(`<div class="find-bar" role="search">${icon('search', 14)}<input placeholder="${esc(t('find_in_chat'))}" aria-label="${esc(t('find_in_chat'))}"><span class="fb-count muted small" role="status"></span>
+      ${btn('prev', 'chevUp', t('find_prev'))}${btn('next', 'chevDown', t('find_next'))}${btn('close', 'x', t('close'))}</div>`);
     view.parentNode.insertBefore(bar, view);
     const input = bar.querySelector('input');
     let tm;

@@ -20,7 +20,7 @@ fn inside(p: &Path, root: &Path) -> bool {
 }
 
 fn refused(path: &str) -> AppError {
-    AppError::msg(format!("ClaudeRust only opens its own data and the folders of your sessions, not {path}."))
+    AppError::coded("path_refused", serde_json::json!({ "path": path }), format!("ClaudeRust only opens its own data and the folders of your sessions, not {path}."))
 }
 
 /// For the system's default app: the MCP config file and folders of the

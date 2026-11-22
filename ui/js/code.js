@@ -61,7 +61,7 @@ export async function renderCode(view, params = {}) {
     const issue = engineIssue();
     envRow.innerHTML = `<button class="env-btn" data-act="engine" title="${esc(issue)}">${icon(engine === 'claude-code' ? 'terminal' : 'key', 14)}<span>${esc(engine === 'claude-code' ? t('engine_cc') : t('engine_builtin'))}</span>${issue ? '<i class="warn-dot"></i>' : ''}${icon('chevDown', 11)}</button>
       <button class="env-btn" data-act="folder" title="${esc(folder)}">${icon('folder', 14)}<span class="ellipsis">${esc(folder ? base(folder) : t('folder_missing'))}</span>${icon('chevDown', 11)}</button>
-      <button class="env-btn" data-act="wt" title="${esc(t('worktree_help'))}"><span class="chk ${w}">${w === 'on' ? icon('check', 11) : w === 'auto' ? '–' : ''}</span><span>Worktree</span></button>`;
+      <button class="env-btn" data-act="wt" title="${esc(t('worktree_help'))}" aria-label="${esc(t(`code_wt_${w}_t`))}"><span class="chk ${w}" aria-hidden="true">${w === 'on' ? icon('check', 11) : w === 'auto' ? '–' : ''}</span><span>Worktree</span></button>`;
   };
   // the CLI's defaults (effort, ultracode) can differ per folder: the model button asks again
   const setFolder = (f) => { folder = f; saveLocal({ codeFolder: f }); drawEnv(); composer.refresh(); composer.focus(); };
@@ -93,12 +93,19 @@ export async function renderCode(view, params = {}) {
     else if (act === 'sessions') emit('navigate', { name: 'sessions' });
     else if (act === 'engine') engineMenu(b);
     else if (act === 'folder') folderMenu(b, b.closest('.env-row') ? 'top-start' : 'bottom-start');
-    else if (act === 'wt') { const order = ['auto', 'on', 'off']; saveLocal({ codeWorktree: order[(order.indexOf(wtState()) + 1) % 3] }); drawEnv(); }
+    else if (act === 'wt') {
+      const order = ['auto', 'on', 'off'];
+      const inRow = !!b.closest('.env-row');
+      saveLocal({ codeWorktree: order[(order.indexOf(wtState()) + 1) % 3] });
+      drawEnv();
+      // the row's button was drawn again: the keyboard stays on it
+      if (inRow) $('[data-act=wt]', envRow).focus();
+    }
   });
 
   const composer = createComposer({
     mode: 'code',
-    placeholder: t('code_placeholder'),
+    placeholder: t('code_ask_ph'),
     draftKey: 'code-new',
     initial: { model: newChatModel('code'), thinking: true, permission_mode: store.settings.code_permission_mode || 'default' },
     context: () => ({ cwd: folder, engine }),
@@ -122,7 +129,7 @@ export async function renderSessions(view) {
   const sessions = await call('list_conversations', { kind: 'code' }).catch(() => []);
   if (store.route !== route || route.name !== 'sessions') return;
   view.innerHTML = `<div class="page"><div class="page-inner">
-    <div class="page-head"><h1>${t('sessions')}</h1><div class="grow"></div>
+    <div class="page-head wrap"><h1>${t('sessions')}</h1><div class="grow"></div>
       <button class="btn" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button>
       <button class="btn" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button>
       <button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_session')}</button></div>
@@ -134,7 +141,7 @@ export async function renderSessions(view) {
   const statusOf = (id) => ([...store.permissions.values()].some((p) => p.conversation_id === id) ? 'waiting' : store.running.has(id) ? 'running' : '');
   if (!sessions.length) list.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_sessions')}</div>`;
   // with many sessions: a filter, and sessions grouped by folder
-  const filter = h(`<div class="search-box sess-filter ${sessions.length > 6 ? '' : 'hidden'}">${icon('search', 15)}<input class="input" placeholder="${esc(t('sess_filter'))}"></div>`);
+  const filter = h(`<div class="search-box sess-filter ${sessions.length > 6 ? '' : 'hidden'}">${icon('search', 15)}<input class="input" placeholder="${esc(t('sess_filter'))}" aria-label="${esc(t('sess_filter'))}"></div>`);
   list.before(filter);
   const drawSessions = (q) => {
     list.innerHTML = '';
@@ -152,11 +159,15 @@ export async function renderSessions(view) {
       if (grouped) list.appendChild(h(`<div class="sess-group" title="${esc(dir)}">${icon('folder', 13)} ${esc(dir.split(/[\\/]/).filter(Boolean).pop() || dir || '—')} <span class="muted">${items.length}</span></div>`));
       for (const s of items) {
         const status = statusOf(s.id);
-        const row = h(`<button class="list-item" data-id="${esc(s.id)}">${icon('terminal', 16)}<div class="grow"><div class="t">${esc(s.title || t('untitled'))}</div><div class="d mono">${grouped ? '' : `${esc(s.cwd || '')} · `}${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+        // the folder's name (the whole path in the tooltip): a long path no longer runs over the row
+        const row = h(`<button class="list-item" data-id="${esc(s.id)}" title="${esc(s.cwd || '')}">${icon('terminal', 16)}<div class="grow" style="min-width:0"><div class="t ellipsis">${esc(s.title || t('untitled'))}</div><div class="d mono ellipsis">${grouped || !s.cwd ? '' : `${esc(s.cwd.split(/[\\/]/).filter(Boolean).pop() || s.cwd)} · `}${relTime(s.updated_at)}${s.engine === 'claude-code' ? ' · Claude Code' : ''}</div></div><span class="sess-status ${status}">${status ? esc(t('sess_' + status)) : ''}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+        const menu = () => conversationMenu(row.querySelector('.more'), s, { onChange: () => renderSessions(view), onDelete: () => renderSessions(view) });
         row.addEventListener('click', (e) => {
-          if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), s, { onChange: () => renderSessions(view), onDelete: () => renderSessions(view) }); return; }
+          if (e.target.closest('.more')) { e.stopPropagation(); menu(); return; }
           emit('navigate', { name: 'chat', params: { id: s.id } });
         });
+        // right-click, the Menu key or Shift+F10: the row's menu (its ⋯ is no Tab stop of its own)
+        row.addEventListener('contextmenu', (e) => { e.preventDefault(); menu(); });
         list.appendChild(row);
       }
     }
@@ -184,8 +195,8 @@ export async function renderSessions(view) {
 
 export async function renderChats(view) {
   view.innerHTML = `<div class="page"><div class="page-inner">
-    <div class="page-head"><h1>${t('all_chats')}</h1><div class="grow"></div><button class="btn" data-act="select">${t('select')}</button><button class="btn danger hidden" data-act="delsel">${icon('trash', 15)} ${t('delete_selected')}</button><button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_chat')}</button></div>
-    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_chats')}"></div>
+    <div class="page-head wrap"><h1>${t('all_chats')}</h1><div class="grow"></div><button class="btn" data-act="select">${t('select')}</button><button class="btn danger hidden" data-act="delsel">${icon('trash', 15)} ${t('delete_selected')}</button><button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_chat')}</button></div>
+    <div class="search-box">${icon('search', 16)}<input class="input" placeholder="${t('search_chats')}" aria-label="${esc(t('search_chats'))}"></div>
     <div class="list"></div></div></div>`;
   $('[data-act=new]', view).onclick = () => emit('navigate', { name: 'new' });
   searchToggle(view);
@@ -238,6 +249,8 @@ export async function renderChats(view) {
         if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), c, { onChange: () => renderChats(view), onDelete: () => renderChats(view) }); return; }
         emit('navigate', { name: 'chat', params: { id: c.id } });
       });
+      // right-click, the Menu key or Shift+F10: the row's menu
+      row.addEventListener('contextmenu', (e) => { if (selecting) return; e.preventDefault(); conversationMenu(row.querySelector('.more'), c, { onChange: () => renderChats(view), onDelete: () => renderChats(view) }); });
       list.appendChild(row);
     }
   };

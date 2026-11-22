@@ -195,7 +195,7 @@ impl Watches {
                 }
             }
         })
-        .map_err(|e| AppError::msg(format!("Can't watch files: {e}")))?;
+        .map_err(|e| AppError::coded("watch_failed", json!({"path": root}), format!("Can't watch files: {e}")))?;
         // On Linux a recursive watch costs one inotify watch per folder,
         // including node_modules/target; watch only the project's own folders.
         #[cfg(target_os = "linux")]
@@ -215,13 +215,13 @@ impl Watches {
                 }
             }
             if n == 0 {
-                return Err(AppError::msg(format!("Can't watch {}", root.display())));
+                return Err(AppError::coded("watch_failed", json!({"path": root}), format!("Can't watch {}", root.display())));
             }
         }
         #[cfg(not(target_os = "linux"))]
         watcher
             .watch(root, RecursiveMode::Recursive)
-            .map_err(|e| AppError::msg(format!("Can't watch {}: {e}", root.display())))?;
+            .map_err(|e| AppError::coded("watch_failed", json!({"path": root}), format!("Can't watch {}: {e}", root.display())))?;
         *w._watcher.lock() = Some(watcher);
         self.install(conv_id, w.clone());
         let summary = w.summary(conv_id);

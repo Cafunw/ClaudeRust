@@ -27,6 +27,35 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + '
     tokio::task::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))?
 }
 
+// failures more than one command reports, coded for the UI (ui/js/errors.js)
+fn message_not_found() -> AppError {
+    AppError::coded("message_not_found", Value::Null, "Message not found in this conversation.")
+}
+
+fn message_empty() -> AppError {
+    AppError::coded("message_empty", Value::Null, "Message is empty.")
+}
+
+fn attachment_gone() -> AppError {
+    AppError::coded("attachment_gone", Value::Null, "An attachment is no longer available. Remove it and attach it again.")
+}
+
+fn no_project_folder(message: &'static str) -> AppError {
+    AppError::coded("no_project_folder", Value::Null, message)
+}
+
+fn not_git_repo() -> AppError {
+    AppError::coded("not_git_repo", Value::Null, "This folder is not a git repository.")
+}
+
+fn folder_not_found(path: &str) -> AppError {
+    AppError::coded("folder_not_found", json!({"path": path}), format!("Folder not found: {path}"))
+}
+
+fn cli_not_installed() -> AppError {
+    AppError::coded("cli_not_installed", Value::Null, "Claude Code isn't installed. Install it from claude.com/claude-code first.")
+}
+
 /// `blocking` for async work that is mostly CPU between its awaits
 /// (rendering a whole conversation): the future runs to completion on a
 /// thread of the blocking pool, its awaits still served by the runtime.
@@ -41,6 +70,9 @@ fn settings_json(st: &AppState) -> Value {
     let mut v = serde_json::to_value(&s).unwrap_or(json!({}));
     v["has_api_key"] = json!(key.is_some());
     v["api_key_masked"] = json!(key.as_deref().map(settings::mask_key));
+    if let (Some(o), Value::Object(oai)) = (v.as_object_mut(), s.oai_key_view(&st.db)) {
+        o.extend(oai);
+    }
     v
 }
 
@@ -103,9 +135,9 @@ pub async fn settings_import(app: AppHandle, state: St<'_>, path: String) -> App
     let st = state.inner().clone();
     let meta = std::fs::metadata(&path)?;
     if meta.len() > 2 * 1024 * 1024 {
-        return Err(AppError::msg("That file is too large to be a settings file."));
+        return Err(AppError::coded("settings_file_too_large", Value::Null, "That file is too large to be a settings file."));
     }
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|_| AppError::msg("That isn't a ClaudeRust settings file."))?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).map_err(|_| AppError::coded("settings_file_invalid", Value::Null, "That isn't a ClaudeRust settings file."))?;
     let (old, new) = {
         let mut g = st.settings.write();
         let new = g.imported(&v)?;
@@ -130,6 +162,9 @@ pub async fn save_settings(app: AppHandle, state: St<'_>, patch: Value) -> AppRe
     let (old, new) = {
         let mut g = st.settings.write();
         let new = g.patched(&patch)?;
+        if new.oai_api_key != g.oai_api_key {
+            settings::store_oai_key(&st.db, &new.oai_api_key)?;
+        }
         new.save(&st.db)?;
         (std::mem::replace(&mut *g, new.clone()), new)
     };
@@ -336,10 +371,10 @@ fn create_conversation_inner(st: &AppState, req: NewConversation) -> AppResult<c
             };
             options["engine"] = json!(engine);
         }
-        let mut cwd = req.cwd.clone().ok_or_else(|| AppError::msg("Choose a folder for the coding session."))?;
+        let mut cwd = req.cwd.clone().ok_or_else(|| AppError::coded("folder_required", Value::Null, "Choose a folder for the coding session."))?;
         let mut p = std::path::PathBuf::from(&cwd);
         if !p.is_dir() {
-            return Err(AppError::msg(format!("Folder not found: {cwd}")));
+            return Err(folder_not_found(&cwd));
         }
         // Isolated worktree: asked for explicitly, or by the setting
         // (always / only when another session in the repo is running).
@@ -481,11 +516,11 @@ fn say_to_running_cli<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: 
             let staged = st.staged.lock();
             req.attachment_ids
                 .iter()
-                .map(|id| staged.get(id).cloned().ok_or_else(|| AppError::msg("An attachment is no longer available. Remove it and attach it again.")))
+                .map(|id| staged.get(id).cloned().ok_or_else(attachment_gone))
                 .collect::<AppResult<_>>()?
         };
         if req.text.trim().is_empty() && atts.is_empty() {
-            return Err(AppError::msg("Message is empty."));
+            return Err(message_empty());
         }
         attachments::check_message(&atts, &conv.model)?;
         let mut content: Vec<Value> = atts.iter().map(attachments::to_block).collect();
@@ -533,11 +568,11 @@ async fn send_into<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &cr
         let staged = st.staged.lock();
         req.attachment_ids
             .iter()
-            .map(|id| staged.get(id).cloned().ok_or_else(|| AppError::msg("An attachment is no longer available. Remove it and attach it again.")))
+            .map(|id| staged.get(id).cloned().ok_or_else(attachment_gone))
             .collect::<AppResult<_>>()?
     };
     if req.text.trim().is_empty() && atts.is_empty() {
-        return Err(AppError::msg("Message is empty."));
+        return Err(message_empty());
     }
     attachments::check_message(&atts, &conv.model)?;
     let mut content: Vec<Value> = atts.iter().map(attachments::to_block).collect();
@@ -560,7 +595,7 @@ async fn send_into<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &cr
             }
             let o = crate::hooks::run(&hooks, "UserPromptSubmit", "", json!({"session_id": conv.id, "prompt": req.text}), &root).await;
             if let Some(reason) = o.block {
-                return Err(AppError::msg(format!("A UserPromptSubmit hook blocked this message: {reason}")));
+                return Err(AppError::coded("hook_blocked", json!({"reason": reason}), format!("A UserPromptSubmit hook blocked this message: {reason}")));
             }
             extra.extend(o.context);
             for c in extra {
@@ -664,10 +699,10 @@ pub async fn regenerate<R: Runtime>(app: AppHandle<R>, state: St<'_>, conversati
     let slot = engine::RunSlot::reserve(&st, &conversation_id, "Claude is still responding. Stop the response or wait for it to finish.")?;
     let msg = st.db.msg_get(&user_message_id)?;
     if msg.conversation_id != conversation_id {
-        return Err(AppError::msg("Message not found in this conversation."));
+        return Err(message_not_found());
     }
     if msg.role != "user" {
-        return Err(AppError::msg("Can only regenerate from a user message."));
+        return Err(AppError::coded("regenerate_not_user", Value::Null, "Can only regenerate from a user message."));
     }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         st.db.conv_set_model(&conversation_id, &m)?;
@@ -683,7 +718,7 @@ pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: S
     let _slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the response to finish before switching versions.")?;
     let nodes = st.db.tree_nodes(&conversation_id)?;
     if !nodes.iter().any(|n| n.id == message_id) {
-        return Err(AppError::msg("Message not found in this conversation."));
+        return Err(message_not_found());
     }
     // the UI then asks for the turns it shows (get_conversation): a long conversation isn't rendered whole here
     st.db.conv_set_leaf(&conversation_id, Some(&view::latest_leaf(&nodes, &message_id)))
@@ -809,12 +844,14 @@ pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> A
             };
             match r {
                 Ok(Some(note)) => {
-                    let _ = app.emit("notice", json!({"message": note}));
+                    let _ = app.emit("notice", note);
                 }
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("removing worktree {path} failed: {e}");
-                    let _ = app.emit("notice", json!({"message": format!("The session's worktree was kept at {path}: {e}"), "error": true}));
+                    let mut note = crate::error::coded_notice("worktree_kept", json!({"path": path}), format!("The session's worktree was kept at {path}: {e}"));
+                    note["error"] = json!(true);
+                    let _ = app.emit("notice", note);
                 }
             }
         }
@@ -989,7 +1026,7 @@ pub async fn respond_permission(state: St<'_>, request_id: String, decision: Str
             let _ = tx.send(PermissionReply { decision, message });
             Ok(())
         }
-        None => Err(AppError::msg("This request is no longer pending.")),
+        None => Err(AppError::coded("request_not_pending", Value::Null, "This request is no longer pending.")),
     }
 }
 
@@ -1018,7 +1055,7 @@ pub async fn create_project(state: St<'_>, name: String, description: String) ->
     let st = state.inner().clone();
     let name = name.trim();
     if name.is_empty() {
-        return Err(AppError::msg("Project name is required."));
+        return Err(AppError::coded("project_name_required", Value::Null, "Project name is required."));
     }
     Ok(serde_json::to_value(st.db.project_create(name, description.trim())?)?)
 }
@@ -1085,7 +1122,11 @@ pub async fn add_project_paths(state: St<'_>, project_id: String, paths: Vec<Str
         for p in paths {
             match attachments::from_path(std::path::Path::new(&p)).and_then(|a| add_file_to_project(&st, &project_id, a)) {
                 Ok(v) => added.push(v),
-                Err(e) => errors.push(e.to_string()),
+                // as stage_paths says them: the kind lets the UI word a refusal in its language
+                Err(e) => {
+                    let name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().to_string());
+                    errors.push(json!({"kind": e.kind(), "message": e.to_string(), "name": name}));
+                }
             }
         }
         Ok(json!({"added": added, "errors": errors}))
@@ -1237,9 +1278,9 @@ pub fn reload_mcp_in_background(app: &AppHandle, st: &Arc<AppState>) -> tauri::a
 #[tauri::command]
 pub async fn mcp_save_config(app: AppHandle, state: St<'_>, config: String) -> AppResult<Value> {
     let st = state.inner().clone();
-    let v: Value = serde_json::from_str(&config).map_err(|e| AppError::msg(format!("Invalid JSON: {e}")))?;
+    let v: Value = serde_json::from_str(&config).map_err(|e| AppError::coded("config_invalid_json", json!({"line": e.line(), "column": e.column()}), format!("Invalid JSON: {e}")))?;
     if !v["mcpServers"].is_object() {
-        return Err(AppError::msg("The config needs an \"mcpServers\" object."));
+        return Err(AppError::coded("config_no_servers", Value::Null, "The config needs an \"mcpServers\" object."));
     }
     mcp::write_config(&st.mcp.config_path, &v)?;
     mcp_reload(app, state).await
@@ -1279,7 +1320,7 @@ pub async fn claude_code_info(state: St<'_>, path: Option<String>) -> AppResult<
 pub async fn claude_code_login(state: St<'_>) -> AppResult<()> {
     let p = state.settings.read().claude_code_path.clone();
     let cli = crate::claudecode::find_cli(&p)
-        .ok_or_else(|| AppError::msg("Claude Code isn't installed. Install it from claude.com/claude-code first."))?;
+        .ok_or_else(cli_not_installed)?;
     crate::claudecode::open_login_terminal(&cli)
 }
 
@@ -1347,21 +1388,26 @@ pub async fn extension_install(app: AppHandle, state: St<'_>, path: String, valu
 
 // ---------------------------------------------------------------------- misc
 
+/// The system could not open a link or a file: its own words are the detail.
+fn open_failed(e: impl std::fmt::Display) -> AppError {
+    AppError::coded("open_failed", Value::Null, e.to_string())
+}
+
 #[tauri::command]
 pub async fn open_external(app: AppHandle, url: String) -> AppResult<()> {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) {
-        return Err(AppError::msg("Only web links can be opened."));
+        return Err(AppError::coded("link_not_web", Value::Null, "Only web links can be opened."));
     }
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_url(url, None::<&str>).map_err(|e| AppError::msg(e.to_string()))
+    app.opener().open_url(url, None::<&str>).map_err(open_failed)
 }
 
 #[tauri::command]
 pub async fn open_path(app: AppHandle, state: St<'_>, path: String) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
     crate::pathguard::openable(&path, &state.data_dir, &state.mcp.config_path)?;
-    app.opener().open_path(path, None::<&str>).map_err(|e| AppError::msg(e.to_string()))
+    app.opener().open_path(path, None::<&str>).map_err(open_failed)
 }
 
 #[tauri::command]
@@ -1376,13 +1422,13 @@ pub async fn reveal_path(app: AppHandle, state: St<'_>, path: String) -> AppResu
     })
     .await
     .map_err(|e| AppError::msg(e.to_string()))??;
-    app.opener().reveal_item_in_dir(path).map_err(|e| AppError::msg(e.to_string()))
+    app.opener().reveal_item_in_dir(path).map_err(open_failed)
 }
 
 #[tauri::command]
 pub async fn copy_text(app: AppHandle, text: String) -> AppResult<()> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard().write_text(text).map_err(|e| AppError::msg(e.to_string()))
+    app.clipboard().write_text(text).map_err(|e| AppError::coded("clipboard_failed", Value::Null, e.to_string()))
 }
 
 #[tauri::command]
@@ -1659,7 +1705,7 @@ pub async fn shells_list(state: St<'_>, conversation_id: Option<String>) -> AppR
 
 #[tauri::command]
 pub async fn shell_output(state: St<'_>, id: String) -> AppResult<Value> {
-    let sh = state.shells.get(&id).ok_or_else(|| AppError::msg("This background command is gone."))?;
+    let sh = state.shells.get(&id).ok_or_else(|| AppError::coded("shell_gone", Value::Null, "This background command is gone."))?;
     let mut v = sh.summary();
     v["output"] = json!(sh.tail(200_000));
     Ok(v)
@@ -1720,7 +1766,7 @@ pub async fn term_list(state: St<'_>, conversation_id: String) -> AppResult<Valu
 
 fn session_for(st: &AppState, conversation_id: &str) -> AppResult<Arc<crate::codetools::CodeSession>> {
     let conv = st.db.conv_get(conversation_id)?;
-    let cwd = conv.cwd.ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    let cwd = conv.cwd.ok_or_else(|| no_project_folder("This conversation has no project folder."))?;
     Ok(st.code_session(conversation_id, &cwd))
 }
 
@@ -1789,7 +1835,7 @@ pub async fn prompt_history(state: St<'_>, query: String) -> AppResult<Value> {
 pub async fn open_system_terminal(path: String) -> AppResult<()> {
     let dir = std::path::PathBuf::from(&path);
     if !dir.is_dir() {
-        return Err(AppError::msg(format!("Folder not found: {path}")));
+        return Err(folder_not_found(&path));
     }
     #[cfg(windows)]
     let shell = std::path::PathBuf::from("cmd");
@@ -1803,13 +1849,13 @@ pub async fn open_system_terminal(path: String) -> AppResult<()> {
 pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppResult<()> {
     let st = state.inner().clone();
     let conv = st.db.conv_get(&conversation_id)?;
-    let cwd = conv.cwd.clone().ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    let cwd = conv.cwd.clone().ok_or_else(|| no_project_folder("This conversation has no project folder."))?;
     let path = match &conv.current_leaf {
         Some(l) => st.db.path_to(l)?,
         None => vec![],
     };
-    let sid = crate::claudecode::latest_session(&path).ok_or_else(|| AppError::msg("This conversation has no Claude Code session yet: send a message first."))?;
-    let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::msg("Claude Code isn't installed."))?;
+    let sid = crate::claudecode::latest_session(&path).ok_or_else(|| AppError::coded("cli_no_session", Value::Null, "This conversation has no Claude Code session yet: send a message first."))?;
+    let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(cli_not_installed)?;
     // the session carries on as this window runs it: model, effort level, ultracode, fast mode and thinking
     let mut args = vec!["--resume".to_string(), sid];
     if !conv.model.trim().is_empty() && conv.model != "default" {
@@ -1864,7 +1910,7 @@ pub async fn project_scripts(state: St<'_>, conversation_id: String) -> AppResul
 /// TODO / FIXME / HACK / XXX / BUG comments in the session's project.
 #[tauri::command]
 pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Value> {
-    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(no_project_folder("This session has no folder.")) };
     let (items, truncated) = tokio::task::spawn_blocking(move || crate::todos::scan(&root))
         .await
         .map_err(|e| AppError::msg(e.to_string()))?;
@@ -1874,7 +1920,7 @@ pub async fn scan_todos(state: St<'_>, conversation_id: String) -> AppResult<Val
 /// Find in files (Files pane): text or regex through the project.
 #[tauri::command]
 pub async fn search_in_files(state: St<'_>, conversation_id: String, query: String, regex: bool, case_sensitive: bool) -> AppResult<Value> {
-    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(no_project_folder("This session has no folder.")) };
     let r = tokio::task::spawn_blocking(move || crate::grepsearch::search(&root, &query, regex, case_sensitive))
         .await
         .map_err(|e| AppError::msg(e.to_string()))??;
@@ -1884,15 +1930,15 @@ pub async fn search_in_files(state: St<'_>, conversation_id: String, query: Stri
 /// Who last changed each line of a project file (Files viewer → Blame).
 #[tauri::command]
 pub async fn file_blame(state: St<'_>, conversation_id: String, path: String) -> AppResult<Value> {
-    let Some(cwd) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
-    let abs = std::fs::canonicalize(cwd.join(path.trim_start_matches('/'))).map_err(|_| AppError::msg(format!("File not found: {path}")))?;
+    let Some(cwd) = root_of(&state, Some(&conversation_id), None) else { return Err(no_project_folder("This session has no folder.")) };
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
+    let abs = std::fs::canonicalize(cwd.join(path.trim_start_matches('/'))).map_err(|_| AppError::coded("file_not_found", json!({"path": path}), format!("File not found: {path}")))?;
     let root = std::fs::canonicalize(&root).unwrap_or(root);
-    let rel = abs.strip_prefix(&root).map_err(|_| AppError::msg("That file is outside the repository."))?;
+    let rel = abs.strip_prefix(&root).map_err(|_| AppError::coded("file_outside_repo", Value::Null, "That file is outside the repository."))?;
     let rel = rel.to_string_lossy().replace('\\', "/");
     let out = crate::gitops::git(&root, &["blame", "--porcelain", "--", &rel])
         .await
-        .map_err(|e| AppError::msg(if e.to_string().contains("no such path") { "This file isn't in git yet.".to_string() } else { e.to_string() }))?;
+        .map_err(|e| if e.to_string().contains("no such path") { AppError::coded("file_not_in_git", Value::Null, "This file isn't in git yet.") } else { e })?;
     Ok(crate::gitops::parse_blame(&out))
 }
 
@@ -1913,7 +1959,7 @@ pub async fn file_sessions(state: St<'_>, conversation_id: String, path: String)
 /// One level of the project's file tree (for the Files pane).
 #[tauri::command]
 pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<String>) -> AppResult<Value> {
-    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(no_project_folder("This session has no folder.")) };
     let dir = dir.unwrap_or_default();
     let r = tokio::task::spawn_blocking(move || crate::filesearch::children(&root, &dir))
         .await
@@ -1924,7 +1970,7 @@ pub async fn project_dir(state: St<'_>, conversation_id: String, dir: Option<Str
 /// A project file for the read-only viewer, highlighted.
 #[tauri::command]
 pub async fn project_file(state: St<'_>, conversation_id: String, path: String) -> AppResult<Value> {
-    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(AppError::msg("This session has no folder.")) };
+    let Some(root) = root_of(&state, Some(&conversation_id), None) else { return Err(no_project_folder("This session has no folder.")) };
     tokio::task::spawn_blocking(move || crate::filesearch::view_file(&root, &path))
         .await
         .map_err(|e| AppError::msg(e.to_string()))?
@@ -1957,7 +2003,7 @@ fn worktree_info(st: &AppState, conversation_id: &str) -> AppResult<Value> {
     let c = st.db.conv_get(conversation_id)?;
     let w = c.options["worktree"].clone();
     if !w.is_object() {
-        return Err(AppError::msg("This session doesn't use a separate worktree."));
+        return Err(AppError::coded("no_worktree", Value::Null, "This session doesn't use a separate worktree."));
     }
     Ok(w)
 }
@@ -1998,12 +2044,12 @@ pub async fn rewind(app: AppHandle, state: St<'_>, conversation_id: String, mess
     let conv = st.db.conv_get(&conversation_id)?;
     let msg = st.db.msg_get(&message_id)?;
     if msg.conversation_id != conversation_id || msg.role != "user" {
-        return Err(AppError::msg("Pick one of your messages to rewind to."));
+        return Err(AppError::coded("rewind_not_user", Value::Null, "Pick one of your messages to rewind to."));
     }
     let mut undo = Value::Null;
     if code {
-        let sha = msg.meta["checkpoint"].as_str().ok_or_else(|| AppError::msg("There is no checkpoint for this message."))?.to_string();
-        let cwd = conv.cwd.clone().ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+        let sha = msg.meta["checkpoint"].as_str().ok_or_else(|| AppError::coded("no_checkpoint", Value::Null, "There is no checkpoint for this message."))?.to_string();
+        let cwd = conv.cwd.clone().ok_or_else(|| no_project_folder("This conversation has no project folder."))?;
         let data = st.data_dir.clone();
         let before = tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).restore(&sha))
             .await
@@ -2037,7 +2083,7 @@ pub async fn rewind(app: AppHandle, state: St<'_>, conversation_id: String, mess
 #[tauri::command]
 pub async fn rewind_undo(app: AppHandle, state: St<'_>, conversation_id: String, undo: String) -> AppResult<()> {
     let conv = state.db.conv_get(&conversation_id)?;
-    let cwd = conv.cwd.ok_or_else(|| AppError::msg("This conversation has no project folder."))?;
+    let cwd = conv.cwd.ok_or_else(|| no_project_folder("This conversation has no project folder."))?;
     let data = state.data_dir.clone();
     tokio::task::spawn_blocking(move || crate::checkpoints::Shadow::new(&data, std::path::Path::new(&cwd)).restore(&undo))
         .await
@@ -2152,7 +2198,7 @@ mod plan_tests {
 
 fn conv_cwd(st: &AppState, conversation_id: &str) -> AppResult<std::path::PathBuf> {
     let c = st.db.conv_get(conversation_id)?;
-    c.cwd.map(std::path::PathBuf::from).ok_or_else(|| AppError::msg("This conversation has no project folder."))
+    c.cwd.map(std::path::PathBuf::from).ok_or_else(|| no_project_folder("This conversation has no project folder."))
 }
 
 #[tauri::command]
@@ -2183,9 +2229,9 @@ pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id
     let slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the current response to finish before compacting.")?;
     let conv = st.db.conv_get(&conversation_id)?;
     if conv.model.starts_with(crate::oai::PREFIX) {
-        return Err(AppError::msg("Compaction uses a Claude model; switch this conversation to a Claude model first."));
+        return Err(AppError::coded("compact_needs_claude", Value::Null, "Compaction uses a Claude model; switch this conversation to a Claude model first."));
     }
-    let leaf = conv.current_leaf.clone().ok_or_else(|| AppError::msg("There is nothing to compact yet."))?;
+    let leaf = conv.current_leaf.clone().ok_or_else(|| AppError::coded("compact_nothing", Value::Null, "There is nothing to compact yet."))?;
     let path = st.db.path_to(&leaf)?;
     let before = crate::compact::context_tokens(&path[crate::compact::start_index(&path).unwrap_or(0)..]);
     let _ = app.emit("compacting", json!({"conversation_id": conversation_id, "auto": false}));
@@ -2196,7 +2242,7 @@ pub async fn compact_conversation(app: AppHandle, state: St<'_>, conversation_id
     let summary = match summary {
         Ok(s) => s,
         Err(e) => {
-            let _ = app.emit("compacted", json!({"conversation_id": conversation_id, "error": e.to_string()}));
+            let _ = app.emit("compacted", json!({"conversation_id": conversation_id, "error": e.to_string(), "error_info": e}));
             return Err(e);
         }
     };
@@ -2236,7 +2282,7 @@ pub async fn hooks_trust(state: St<'_>, root: String, hash: Option<String>) -> A
             // only the configuration that is there now can be trusted
             let current = crate::hooks::project_hash(std::path::Path::new(&root)).map(|(h, _)| h);
             if current.as_deref() != Some(h.as_str()) {
-                return Err(AppError::msg("The project's hooks changed; review them again."));
+                return Err(AppError::coded("hooks_changed", Value::Null, "The project's hooks changed; review them again."));
             }
             s.trusted_hooks.insert(root, json!(h));
         }
@@ -2257,7 +2303,7 @@ pub async fn subagents_list(state: St<'_>, conversation_id: String) -> AppResult
 
 #[tauri::command]
 pub async fn subagent_output(state: St<'_>, id: String) -> AppResult<String> {
-    state.subagents.log(&id).ok_or_else(|| AppError::msg("This sub-agent is gone."))
+    state.subagents.log(&id).ok_or_else(|| AppError::coded("subagent_gone", Value::Null, "This sub-agent is gone."))
 }
 
 #[tauri::command]
@@ -2357,7 +2403,7 @@ pub async fn doctor(state: St<'_>, conversation_id: Option<String>) -> AppResult
                 let mut detail = format!("{n} active{}", if hooks.untrusted.is_some() { " · project hooks not trusted yet" } else { "" });
                 for p in &hooks.problems {
                     detail.push_str(" · ");
-                    detail.push_str(p);
+                    detail.push_str(p["message"].as_str().unwrap_or_default());
                 }
                 add("Hooks", status, detail);
                 add("Engine", "ok", conv.options["engine"].as_str().unwrap_or("builtin").to_string());
@@ -2495,7 +2541,7 @@ pub async fn routine_delete(state: St<'_>, id: String) -> AppResult<()> {
 #[tauri::command]
 pub async fn routine_run(app: AppHandle, state: St<'_>, id: String) -> AppResult<String> {
     let st = state.inner().clone();
-    let r = crate::routines::load(&st.db).into_iter().find(|r| r.id == id).ok_or_else(|| AppError::msg("Routine not found."))?;
+    let r = crate::routines::load(&st.db).into_iter().find(|r| r.id == id).ok_or_else(|| AppError::coded("routine_not_found", Value::Null, "Routine not found."))?;
     let res = run_routine(&app, &st, &r).await;
     match &res {
         Ok(c) => crate::routines::mark_run(&st.db, &id, Some(c.clone()), None),
@@ -2521,7 +2567,7 @@ pub async fn watch_start(app: AppHandle, state: St<'_>, conversation_id: String,
     let st = state.inner().clone();
     let cwd = conv_cwd(&st, &conversation_id)?;
     let command = command.filter(|c| !c.trim().is_empty()).or_else(|| crate::watch::detect(&cwd))
-        .ok_or_else(|| AppError::msg("No check command found for this project; enter one (for example: npm test)."))?;
+        .ok_or_else(|| AppError::coded("no_check_command", Value::Null, "No check command found for this project; enter one (for example: npm test)."))?;
     engine::update_conv_options(&st, &conversation_id, |o| {
         o["watch_command"] = json!(command);
         o["watch_auto_fix"] = json!(auto_fix.unwrap_or(false));
@@ -2608,10 +2654,10 @@ pub const COMMIT_PROMPT: &str = "Write a git commit message for the diff below. 
 pub async fn commit_message_suggest(state: St<'_>, conversation_id: String) -> AppResult<String> {
     let st = state.inner().clone();
     let cwd = conv_cwd(&st, &conversation_id)?;
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
     let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff", "--stat", "--patch"]).await.unwrap_or_default();
     if diff.trim().is_empty() {
-        return Err(AppError::msg("There are no changes to commit."));
+        return Err(AppError::coded("git_nothing_to_commit", Value::Null, "There are no changes to commit."));
     }
     let log = crate::gitops::git(&root, &["log", "--oneline", "-10"]).await.unwrap_or_default();
     let files = diff.lines().filter(|l| l.starts_with("diff --git")).count();
@@ -2672,7 +2718,7 @@ pub async fn changes_patch(state: St<'_>, conversation_id: String) -> AppResult<
     let root = session_repo(&state, &conversation_id).await?;
     let diff = crate::gitops::diff_including_new(&root, &["--no-color", "--no-ext-diff", "--binary"]).await?;
     if diff.trim().is_empty() {
-        return Err(AppError::msg("There are no changes."));
+        return Err(AppError::coded("git_no_changes", Value::Null, "There are no changes."));
     }
     Ok(diff)
 }
@@ -2709,9 +2755,9 @@ pub async fn git_switch(app: AppHandle, state: St<'_>, conversation_id: String, 
     let root = session_repo(&state, &conversation_id).await?;
     let name = name.trim().to_string();
     if name.is_empty() || name.starts_with('-') {
-        return Err(AppError::msg("Give a branch name."));
+        return Err(AppError::coded("branch_name_required", Value::Null, "Give a branch name."));
     }
-    crate::gitops::git(&root, &["check-ref-format", "--branch", &name]).await.map_err(|_| AppError::msg(format!("“{name}” isn't a valid branch name.")))?;
+    crate::gitops::git(&root, &["check-ref-format", "--branch", &name]).await.map_err(|_| AppError::coded("branch_name_invalid", json!({"name": name}), format!("“{name}” isn't a valid branch name.")))?;
     let r = if create {
         crate::gitops::git(&root, &["switch", "-c", &name]).await
     } else {
@@ -2737,9 +2783,9 @@ pub async fn secret_scan(state: St<'_>, conversation_id: String) -> AppResult<Va
 #[tauri::command]
 pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, message: String, push: bool) -> AppResult<String> {
     let cwd = conv_cwd(&state, &conversation_id)?;
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
     if message.trim().is_empty() {
-        return Err(AppError::msg("Write a commit message."));
+        return Err(AppError::coded("commit_message_required", Value::Null, "Write a commit message."));
     }
     crate::gitops::git(&root, &["add", "-A"]).await?;
     crate::gitops::git(&root, &["commit", "-q", "-m", message.trim()]).await?;
@@ -2766,7 +2812,7 @@ pub async fn git_commit(app: AppHandle, state: St<'_>, conversation_id: String, 
 
 async fn session_repo(st: &AppState, conversation_id: &str) -> AppResult<std::path::PathBuf> {
     let cwd = conv_cwd(st, conversation_id)?;
-    crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))
+    crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)
 }
 
 /// What a pull request from the session's branch would contain.
@@ -2798,7 +2844,7 @@ pub async fn pr_suggest(state: St<'_>, conversation_id: String, base: String) ->
     }
     let v = tokio::time::timeout(std::time::Duration::from_secs(60), client.create(&body, &[]))
         .await
-        .map_err(|_| AppError::msg("Drafting the description took too long."))??;
+        .map_err(|_| AppError::coded("timed_out", Value::Null, "Drafting the description took too long."))??;
     let text: String = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
     let (title, body) = crate::pullrequest::split_draft(&text);
     Ok(json!({"title": title, "body": body}))
@@ -2818,7 +2864,7 @@ async fn quick_complete(st: &AppState, system: &str, user: String, max_tokens: u
     }
     let v = tokio::time::timeout(std::time::Duration::from_secs(60), client.create(&body, &[]))
         .await
-        .map_err(|_| AppError::msg("That took too long."))??;
+        .map_err(|_| AppError::coded("timed_out", Value::Null, "That took too long."))??;
     let text = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<String>().trim().to_string();
     Ok((text, v["stop_reason"] == "max_tokens"))
 }
@@ -2829,7 +2875,7 @@ pub const IMPROVE_PROMPT: &str = "You rewrite a draft message that a user is abo
 #[tauri::command]
 pub async fn improve_prompt(state: St<'_>, text: String, code: bool) -> AppResult<String> {
     if text.trim().is_empty() {
-        return Err(AppError::msg("Write a message first."));
+        return Err(AppError::coded("draft_empty", Value::Null, "Write a message first."));
     }
     let ctx = if code { "It's for a coding agent working in the user's project." } else { "It's for a chat with Claude." };
     // room for a rewrite somewhat longer than the draft (~4 characters a token)
@@ -2837,11 +2883,11 @@ pub async fn improve_prompt(state: St<'_>, text: String, code: bool) -> AppResul
     let (out, cut) = quick_complete(&state, IMPROVE_PROMPT, format!("{ctx}\n\n<draft>\n{}\n</draft>", text.trim()), budget).await?;
     if cut {
         // a cut-off rewrite would silently drop the end of the draft
-        return Err(AppError::msg("This draft is too long to rewrite in one go."));
+        return Err(AppError::coded("draft_too_long", Value::Null, "This draft is too long to rewrite in one go."));
     }
     let out = out.trim().trim_start_matches("<draft>").trim_end_matches("</draft>").trim().to_string();
     if out.is_empty() {
-        return Err(AppError::msg("No rewrite came back."));
+        return Err(AppError::coded("draft_no_reply", Value::Null, "No rewrite came back."));
     }
     Ok(out)
 }
@@ -2852,8 +2898,8 @@ pub async fn pr_fetch(state: St<'_>, conversation_id: Option<String>, cwd: Optio
     // from a session, or from the Code page's folder before a session exists
     let root = match (conversation_id.filter(|c| !c.is_empty()), cwd.filter(|c| !c.is_empty())) {
         (Some(c), _) => session_repo(&state, &c).await?,
-        (None, Some(dir)) => crate::gitops::repo_root(std::path::Path::new(&dir)).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?,
-        (None, None) => return Err(AppError::msg("Choose a folder first.")),
+        (None, Some(dir)) => crate::gitops::repo_root(std::path::Path::new(&dir)).await.ok_or_else(not_git_repo)?,
+        (None, None) => return Err(AppError::coded("folder_required", Value::Null, "Choose a folder first.")),
     };
     crate::pullrequest::fetch(&root, &pr).await
 }
@@ -3197,7 +3243,7 @@ button {{ display:none; }} .code-block .lang {{ font-size:12px; color:var(--mute
 #[tauri::command]
 pub async fn git_log(state: St<'_>, conversation_id: String, limit: Option<u32>, query: Option<String>, mode: Option<String>) -> AppResult<Value> {
     let cwd = conv_cwd(&state, &conversation_id)?;
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
     let n = limit.unwrap_or(60).clamp(1, 500).to_string();
     let mut args: Vec<String> = vec!["log".into(), "-n".into(), n, "--date=unix".into(), "--pretty=format:%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e".into()];
     // search: the value is glued to its option, so it can't become an option itself
@@ -3233,10 +3279,10 @@ fn valid_sha(sha: &str) -> bool {
 #[tauri::command]
 pub async fn git_show(state: St<'_>, conversation_id: String, sha: String) -> AppResult<Value> {
     if !valid_sha(&sha) {
-        return Err(AppError::msg("Invalid commit id."));
+        return Err(AppError::coded("git_bad_commit", Value::Null, "Invalid commit id."));
     }
     let cwd = conv_cwd(&state, &conversation_id)?;
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
     let body = crate::gitops::git(&root, &["show", "-s", "--format=%B", &sha]).await.unwrap_or_default();
     let patch = crate::gitops::git(&root, &["show", "--format=", "--no-color", "--no-ext-diff", "--patch", &sha]).await?;
     let patch = crate::util::truncate_middle(&patch, 400_000);
@@ -3264,10 +3310,10 @@ pub async fn git_show(state: St<'_>, conversation_id: String, sha: String) -> Ap
 #[tauri::command]
 pub async fn git_revert(app: AppHandle, state: St<'_>, conversation_id: String, sha: String) -> AppResult<String> {
     if !valid_sha(&sha) {
-        return Err(AppError::msg("Invalid commit id."));
+        return Err(AppError::coded("git_bad_commit", Value::Null, "Invalid commit id."));
     }
     let cwd = conv_cwd(&state, &conversation_id)?;
-    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(|| AppError::msg("This folder is not a git repository."))?;
+    let root = crate::gitops::repo_root(&cwd).await.ok_or_else(not_git_repo)?;
     let r = crate::gitops::git(&root, &["revert", "--no-edit", &sha]).await;
     if r.is_err() {
         let _ = crate::gitops::git(&root, &["revert", "--abort"]).await;
@@ -3391,7 +3437,7 @@ pub async fn open_in_editor(app: AppHandle, state: St<'_>, path: String, line: O
         }
     }
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_path(&path, None::<&str>).map_err(|e| AppError::msg(e.to_string()))?;
+    app.opener().open_path(&path, None::<&str>).map_err(open_failed)?;
     Ok("system".into())
 }
 
@@ -3425,7 +3471,7 @@ fn fork_into_new(st: &AppState, conversation_id: &str, message_id: &str) -> AppR
     let conv = st.db.conv_get(conversation_id)?;
     let path = st.db.path_to(message_id)?;
     if path.is_empty() || path.last().map(|m| m.conversation_id != conversation_id).unwrap_or(true) {
-        return Err(AppError::msg("Message not found in this conversation."));
+        return Err(message_not_found());
     }
     let mut options = conv.options.clone();
     if let Some(m) = options.as_object_mut() {

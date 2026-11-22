@@ -5,6 +5,7 @@ import { call, on as onBackend } from './api.js';
 import { emit } from './store.js';
 import { h, esc, button, errorToast, relTime } from './util.js';
 import { refreshProjects } from './projects.js';
+import { errorText } from './neterr.js';
 
 function section(title, desc) {
   const s = h(`<div class="imp-section"><div class="imp-head"><div class="t">${esc(title)}</div>${desc ? `<div class="d">${esc(desc)}</div>` : ''}</div><div class="imp-body"></div></div>`);
@@ -102,7 +103,7 @@ export async function renderImport(body) {
   const scanning = h(`<div class="small muted" style="padding:12px 0">${esc(t('imp_scanning'))}</div>`);
   body.appendChild(scanning);
   let scan;
-  try { scan = await call('import_scan'); } catch (e) { scanning.textContent = e.message; return; }
+  try { scan = await call('import_scan'); } catch (e) { scanning.textContent = errorText(e); return; }
   scanning.remove();
   if (scan.export_url) exportUrl = scan.export_url;
 

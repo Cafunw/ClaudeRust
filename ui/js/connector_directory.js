@@ -68,7 +68,7 @@ export async function openDirectory(status, redraw) {
         <div style="font-weight:600">${esc(c.name)} <span class="cd-cat">${esc(c.categoryLabel)}</span></div>
         <div class="small">${esc(c.description)}</div>
         <div class="small muted"><b class="mono">${esc(c.domain)}</b> · ${esc(t('cd_auth_' + (c.auth || 'none')))}</div></div>
-        ${c.docs_url ? `<button class="btn sm ghost" data-a="docs">${esc(t('cd_docs'))}</button>` : ''}
+        ${c.docs_url ? `<button class="btn sm ghost" data-a="docs" aria-label="${esc(t('cd_docs'))}: ${esc(c.name)}">${esc(t('cd_docs'))}</button>` : ''}
         ${c.configured ? `<span class="st connected" title="${esc(c.configured)}">${esc(t('cd_added'))}</span>` : `<button class="btn sm primary" data-a="add" aria-label="${esc(t('cc_add'))}: ${esc(c.name)}">${esc(t('cc_add'))}</button>`}</div></div>`);
       const docs = card.querySelector('[data-a=docs]');
       if (docs) docs.onclick = () => call('open_external', { url: c.docs_url }).catch(errorToast);

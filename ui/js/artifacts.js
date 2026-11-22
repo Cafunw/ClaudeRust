@@ -5,11 +5,13 @@ import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
 import { $, esc, h, showMenu, errorToast, relTime, searchToggle, modal, button } from './util.js';
 import { openLink } from './artifact_link.js';
-import { copyText, decorate } from './parts.js';
+import { copyText, decorate, artifactKindText } from './parts.js';
 import { storageCall } from './artifact_storage.js';
 import { resolveVersions } from './artifact_update.js';
-import { createConsent, createComplete, fixMessage } from './artifact_bridge.js';
+import { createConsent, createComplete, fixMessage, errorText } from './artifact_bridge.js';
 import { shownArtifact } from './branch_panel.js';
+import { reopenId, wrapTab } from './artifact_sheet.js';
+import { errorText as failureText } from './neterr.js';
 
 let panel = null;
 let renderTimer = null;
@@ -41,6 +43,11 @@ function scheduleRender() {
   renderTimer = setTimeout(() => { renderTimer = null; render(); }, 120);
 }
 
+// as wide as app.css's narrow layout, where the panel is a sheet over the chat
+const sheet = window.matchMedia('(max-width: 900px)');
+// the artifact shown when the panel last closed: the topbar's toggle brings it back
+let lastShown = null;
+
 export function open(convId, map, identifier, version, { streaming = false } = {}) {
   const followLatest = !version || streaming;
   // errors: `${identifier}@${version}` -> the first error its page reported
@@ -49,30 +56,47 @@ export function open(convId, map, identifier, version, { streaming = false } = {
   const wasHidden = el.classList.contains('hidden');
   if (el.classList.contains('hidden')) window.dispatchEvent(new Event('artifact-opened'));
   el.classList.remove('hidden');
+  // only shown in narrow windows (CSS): a click on the dimmed chat goes back to it
+  let scrim = $('#artifact-scrim');
+  if (!scrim) { scrim = h('<div class="ap-scrim" id="artifact-scrim"></div>'); scrim.onclick = close; el.before(scrim); }
+  scrim.classList.remove('hidden');
   if (wasHidden && window.innerWidth < 1500 && !store.sidebarCollapsed) emit('collapse-sidebar');
   const w = loadLocal().artifactWidth;
   if (w) el.style.width = w + 'px';
   render();
   document.querySelectorAll('.artifact-card').forEach((c) => c.classList.toggle('open', c.dataset.identifier === identifier));
+  pressed(true);
+  // a sheet you opened takes the keyboard with it (not one that opens by itself while a reply streams)
+  if (wasHidden && sheet.matches && !streaming) { const b = el.querySelector('.ap-back'); if (b) b.focus(); }
 }
 
 export function togglePanel(convId, map) {
   if (panel && panel.convId === convId) { close(); return; }
-  const ids = [...map.keys()];
-  if (!ids.length) return;
-  const last = ids[ids.length - 1];
-  open(convId, map, last, null);
+  const id = reopenId([...map.keys()], convId, lastShown);
+  if (id) open(convId, map, id, null);
 }
 
 export function close() {
+  if (panel) lastShown = { convId: panel.convId, identifier: panel.identifier };
+  const back = panel && aside().contains(document.activeElement);
   panel = null;
   const el = aside();
   el.classList.add('hidden');
   el.innerHTML = '';
+  const scrim = $('#artifact-scrim');
+  if (scrim) scrim.classList.add('hidden');
   document.querySelectorAll('.artifact-card.open').forEach((c) => c.classList.remove('open'));
+  pressed(false);
+  // focus was in the panel: back to the toggle that reopens it, else the composer
+  if (back) { const to = $('.topbar .ap-toggle') || $('#view .composer textarea'); if (to) to.focus(); }
 }
 
 export function isOpen() { return !!panel; }
+
+/** The topbar's toggle shows whether the panel is open. */
+function pressed(on) {
+  document.querySelectorAll('.ap-toggle').forEach((b) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); });
+}
 
 /** An artifact's versions, each update applied to the version before it. */
 function versionsOf(identifier) { return resolveVersions(panel.map.get(identifier) || []); }
@@ -101,18 +125,23 @@ async function render() {
     bindResizer(el.querySelector('.resizer'));
   }
   const head = el.querySelector('.ap-head');
+  // the head is drawn anew on each render (every 120 ms while it streams): the focused control keeps the focus
+  const focusKey = head.contains(document.activeElement) ? document.activeElement.dataset.k : null;
   head.innerHTML = '';
-  const titleBtn = h(`<button class="ap-title">${icon(ARTIFACT_ICON[a.type] || 'file', 16)}<span class="ellipsis">${esc(a.title || a.identifier)}</span>${panel.map.size > 1 ? icon('chevDown', 14) : ''}</button>`);
+  const back = h(`<button class="ap-back" data-k="back" title="${esc(t('art_back'))}">${icon('arrowLeft', 16)}<span>${esc(t('art_back'))}</span></button>`);
+  back.onclick = close;
+  head.appendChild(back);
+  const titleBtn = h(`<button class="ap-title" data-k="title" title="${esc(a.title || a.identifier)}" ${panel.map.size > 1 ? 'aria-haspopup="menu"' : ''}>${icon(ARTIFACT_ICON[a.type] || 'file', 16)}<span class="ellipsis">${esc(a.title || a.identifier)}</span>${panel.map.size > 1 ? icon('chevDown', 14) : ''}</button>`);
   titleBtn.onclick = () => {
     if (panel.map.size < 2) return;
     showMenu(titleBtn, [...panel.map.keys()].map((id) => {
       const last = versionsOf(id).at(-1);
-      return { label: last.title || id, sub: last.label, icon: ARTIFACT_ICON[last.type] || 'file', checked: id === panel.identifier, onClick: () => { panel.identifier = id; panel.version = null; panel.followLatest = true; panel.view = null; render(); } };
+      return { label: last.title || id, sub: artifactKindText(last.label), icon: ARTIFACT_ICON[last.type] || 'file', checked: id === panel.identifier, onClick: () => { panel.identifier = id; panel.version = null; panel.followLatest = true; panel.view = null; render(); } };
     }), { width: 280 });
   };
   head.appendChild(titleBtn);
   if (list.length > 1) {
-    const vb = h(`<button class="ap-version">v${a.version}${a.version === list[list.length - 1].version ? '' : ''} ${icon('chevDown', 12)}</button>`);
+    const vb = h(`<button class="ap-version" data-k="version" aria-haspopup="menu" title="${esc(t('version'))}">v${a.version} ${icon('chevDown', 12)}</button>`);
     vb.onclick = () => showMenu(vb, list.slice().reverse().map((v) => ({
       label: `${t('version')} ${v.version}${v === list[list.length - 1] ? ` · ${t('latest')}` : ''}`,
       checked: v.version === a.version,
@@ -122,20 +151,21 @@ async function render() {
   }
   head.appendChild(h('<div class="grow"></div>'));
   if (previewable && a.complete) {
-    const seg = h(`<div class="segmented"><button data-v="preview" class="${view === 'preview' ? 'on' : ''}">${t('preview')}</button><button data-v="code" class="${view === 'code' ? 'on' : ''}">${t('code_view')}</button></div>`);
+    const seg = h(`<div class="segmented" role="group">${['preview', 'code'].map((v) => `<button data-v="${v}" data-k="${v}" class="${view === v ? 'on' : ''}" aria-pressed="${view === v}">${t(v === 'code' ? 'code_view' : 'preview')}</button>`).join('')}</div>`);
     seg.querySelectorAll('button').forEach((b) => b.onclick = () => { panel.view = b.dataset.v; render(); });
     head.appendChild(seg);
   }
-  const copyB = h(`<button class="icon-btn" title="${t('copy')}">${icon('copy', 16)}</button>`);
+  const copyB = h(`<button class="icon-btn" data-k="copy" title="${t('copy')}" aria-label="${t('copy')}">${icon('copy', 16)}</button>`);
   copyB.onclick = async () => { await copyText(a.content); copyB.innerHTML = icon('check', 16); setTimeout(() => (copyB.innerHTML = icon('copy', 16)), 1400); };
-  const dl = h(`<button class="icon-btn" title="${t('download')}">${icon('download', 16)}</button>`);
+  const dl = h(`<button class="icon-btn" data-k="download" title="${t('download')}" aria-label="${t('download')}">${icon('download', 16)}</button>`);
   dl.onclick = () => {
     const base = (a.title || a.identifier || 'artifact').replace(/[\\/:*?"<>|]+/g, '-');
     call('save_text_file', { name: `${base}.${a.ext || 'txt'}`, content: a.content }).catch(errorToast);
   };
-  const cl = h(`<button class="icon-btn" title="${t('close')}">${icon('x', 18)}</button>`);
+  const cl = h(`<button class="icon-btn ap-close" data-k="close" title="${t('close')}" aria-label="${t('close')}">${icon('x', 18)}</button>`);
   cl.onclick = close;
   head.append(copyB, dl, cl);
+  if (focusKey) { const f = head.querySelector(`[data-k="${focusKey}"]`); if (f) f.focus(); }
   drawAlert(a);
 
   const body = el.querySelector('.ap-body');
@@ -155,6 +185,7 @@ async function render() {
   const mine = { panel, id: myId };
   fetching = mine;
   try {
+    body.classList.remove('loading');
     if (view === 'preview' && a.type === 'text/markdown') {
       const html = await call('render_markdown', { text: a.content });
       if (stale()) return;
@@ -178,6 +209,10 @@ async function render() {
       panel.errors.delete(`${myId}@${a.version}`);
       frame.src = artifactUrl(token);
       if (a.type !== 'text/html') frame.classList.add('dark-ok');
+      frame.title = a.title || myId;
+      // a page whose libraries come from a CDN can take a while: a spinner until it's loaded, not a blank panel
+      body.classList.add('loading');
+      frame.addEventListener('load', () => body.classList.remove('loading'), { once: true });
       body.appendChild(frame);
     } else {
       const code = await call('highlight_code', { code: a.content, language: langFor(a) });
@@ -187,7 +222,7 @@ async function render() {
       if (!a.complete && atBottom) body.scrollTop = body.scrollHeight;
     }
   } catch (e) {
-    if (!stale()) body.innerHTML = `<div class="ap-empty">${esc(e.message)}</div>`;
+    if (!stale()) body.innerHTML = `<div class="ap-empty">${esc(failureText(e))}</div>`;
     panel && (panel.lastDocKey = null);
   } finally {
     if (fetching === mine) fetching = null;
@@ -212,7 +247,7 @@ function drawAlert(a) {
   slot.innerHTML = '';
   if (!shown) return;
   const what = t(err.kind === 'update' ? 'art_update_failed' : 'art_error');
-  const note = h(`<div class="notice error" style="margin:8px 10px 0">${icon('alert', 15)}<div class="grow small"><div>${esc(what)}</div><div class="err-raw"><div class="mono">${esc(err.message.slice(0, 300))}</div></div><div class="actions"></div></div></div>`);
+  const note = h(`<div class="notice error" role="alert" style="margin:8px 10px 0">${icon('alert', 15)}<div class="grow small"><div>${esc(what)}</div><div class="err-raw"><div class="${err.blocked ? '' : 'mono'}">${esc(errorText(err, t).slice(0, 300))}</div></div><div class="actions"></div></div></div>`);
   const convId = panel.convId;
   note.querySelector('.actions').appendChild(button(t('art_try_fix'), 'sm', () => {
     fixesSent.add(key);
@@ -227,7 +262,8 @@ function frameError(frame, d) {
   const key = `${frame.dataset.artifact}@${frame.dataset.version}`;
   // the first is usually the cause; a page that throws on every frame would redraw this all the time
   if (panel.errors.has(key)) return;
-  panel.errors.set(key, { kind: 'runtime', message: String(d.message || 'unknown').slice(0, 2000), stack: String(d.stack || '').slice(0, 2000) });
+  const blocked = d.blocked && typeof d.blocked === 'object' ? { uri: String(d.blocked.uri || '').slice(0, 300), directive: String(d.blocked.directive || '').slice(0, 40) } : null;
+  panel.errors.set(key, { kind: 'runtime', message: String(d.message || 'unknown').slice(0, 2000), stack: String(d.stack || '').slice(0, 2000), blocked });
   const a = currentArtifact();
   if (a && `${a.identifier}@${a.version}` === key) drawAlert(a);
 }
@@ -304,8 +340,8 @@ export async function renderGallery(view) {
     grid.innerHTML = '';
     for (const a of f) {
       const card = h(`<button class="card artifact-tile"><div class="preview"><pre>${esc(a.content.slice(0, 600))}</pre></div>
-        <div class="cap"><div class="row">${icon(ARTIFACT_ICON[a.kind] || 'file', 15)}<div class="t ellipsis grow">${esc(a.title || a.identifier)}</div></div>
-        <div class="f ellipsis">${esc(a.label)} · ${esc(a.conversation_title || t('untitled'))} · ${relTime(a.created_at)}</div></div></button>`);
+        <div class="cap"><div class="row">${icon(ARTIFACT_ICON[a.kind] || 'file', 15)}<div class="t ellipsis grow" title="${esc(a.title || a.identifier)}">${esc(a.title || a.identifier)}</div></div>
+        <div class="f ellipsis" title="${esc(a.conversation_title || t('untitled'))}">${esc(artifactKindText(a.label))} · ${esc(a.conversation_title || t('untitled'))} · ${relTime(a.created_at)}</div></div></button>`);
       card.onclick = () => emit('navigate', { name: 'chat', params: { id: a.conversation_id, artifact: a.identifier } });
       grid.appendChild(card);
     }
@@ -323,6 +359,34 @@ export { store };
 // one side panel at a time
 window.addEventListener('workspace-opened', () => { if (panel) close(); });
 
+// Esc closes the panel from inside it, and the sheet of a narrow window from
+// anywhere but a text field (before main.js would stop the turn under it);
+// an open menu or dialog closes first
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !panel || e.defaultPrevented || document.querySelector('.modal-scrim, .popover')) return;
+  const at = e.target;
+  const field = at && (at.isContentEditable || at.tagName === 'TEXTAREA' || (at.tagName === 'INPUT' && at.type !== 'checkbox'));
+  if (aside().contains(at) || (sheet.matches && !field)) { e.preventDefault(); close(); }
+}, true);
+
+// the sheet of a narrow window keeps Tab inside it, as a dialog does (the dimmed chat behind it isn't reachable)
+const sheetControls = () => [...aside().querySelectorAll('button:not(:disabled), a[href], input, select, textarea, iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => x.getClientRects().length);
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || !panel || !sheet.matches || !aside().contains(e.target)) return;
+  const all = sheetControls();
+  const to = wrapTab(all.length, all.indexOf(e.target), e.shiftKey);
+  if (to >= 0) { e.preventDefault(); all[to].focus(); }
+});
+// (Tab out of the preview's frame never reaches the keydown above: focus landing behind the sheet comes back to it)
+let focusInSheet = false;
+document.addEventListener('focusin', (e) => {
+  if (!panel || !sheet.matches) { focusInSheet = false; return; }
+  if (aside().contains(e.target)) { focusInSheet = true; return; }
+  // a menu or dialog the sheet opened is above it
+  if (e.target.closest && e.target.closest('.popover, .modal-scrim, .toast-root')) return;
+  if (focusInSheet) { const first = sheetControls()[0]; if (first) first.focus(); }
+});
+
 // what the previewed artifact asks of the app (only from our own frame):
 // window.storage and window.claude.complete calls, its errors and links
 window.addEventListener('message', (e) => {
@@ -330,7 +394,8 @@ window.addEventListener('message', (e) => {
   if (!d || (d.__artifact !== 'call' && d.__artifact !== 'error' && d.__artifact !== 'link')) return;
   const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
   if (!frame || !panel) return;
-  if (d.__artifact === 'error') { frameError(frame, d); return; }
+  // the banner above the frame shows it: the page draws no overlay of its own (artifact_hook.js)
+  if (d.__artifact === 'error') { e.source.postMessage({ __artifact: 'error-ack' }, '*'); frameError(frame, d); return; }
   if (d.__artifact === 'link') { openLink(d.url); return; }
   const reply = (r) => e.source.postMessage({ __artifact: 'reply', id: d.id, ...r }, '*');
   const fail = (err) => reply({ error: String((err && err.message) || err) });

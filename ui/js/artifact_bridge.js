@@ -36,6 +36,13 @@ export function createComplete({ check, allowed, run }) {
   };
 }
 
+/** What the banner says for `err`: a request the sandbox blocked in the
+ *  app's language (the page reports it in English, for Claude), else the
+ *  page's own message. */
+export function errorText(err, t) {
+  return err.blocked ? t('art_csp_blocked', { uri: err.blocked.uri, directive: err.blocked.directive }) : err.message;
+}
+
 const MAX_ERROR = 1500;
 
 /** The i18n key and values of the message that asks Claude to fix

@@ -90,7 +90,7 @@ fn load_stored(db: &crate::db::Db) -> AppResult<Vec<Stored>> {
             })
             .collect()),
         Ok(Value::Null) => Ok(vec![]),
-        _ => Err(AppError::msg("The saved routines can't be read, so they weren't changed.")),
+        _ => Err(AppError::coded("routines_unreadable", Value::Null, "The saved routines can't be read, so they weren't changed.")),
     }
 }
 
@@ -142,17 +142,17 @@ fn modify<T>(db: &crate::db::Db, f: impl FnOnce(&mut Vec<Routine>) -> AppResult<
 
 pub fn validate(r: &Routine) -> AppResult<()> {
     if r.name.trim().is_empty() || r.prompt.trim().is_empty() {
-        return Err(AppError::msg("A routine needs a name and a prompt."));
+        return Err(AppError::coded("routine_incomplete", Value::Null, "A routine needs a name and a prompt."));
     }
     if !std::path::Path::new(&r.cwd).is_dir() {
-        return Err(AppError::msg(format!("Folder not found: {}", r.cwd)));
+        return Err(AppError::coded("folder_not_found", json!({"path": r.cwd}), format!("Folder not found: {}", r.cwd)));
     }
     match &r.schedule {
-        Schedule::Interval { minutes } if *minutes < 5 => Err(AppError::msg("Run at most every 5 minutes.")),
+        Schedule::Interval { minutes } if *minutes < 5 => Err(AppError::coded("routine_too_often", json!({"n": 5}), "Run at most every 5 minutes.")),
         Schedule::Daily { time, weekdays } => {
-            NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| AppError::msg("Use a time like 09:30."))?;
+            NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| AppError::coded("routine_bad_time", Value::Null, "Use a time like 09:30."))?;
             if weekdays.iter().any(|d| !(1..=7).contains(d)) {
-                return Err(AppError::msg("Weekdays are 1 (Monday) to 7 (Sunday)."));
+                return Err(AppError::coded("routine_bad_weekday", Value::Null, "Weekdays are 1 (Monday) to 7 (Sunday)."));
             }
             Ok(())
         }
@@ -239,7 +239,7 @@ pub fn upsert(db: &crate::db::Db, mut r: Routine) -> AppResult<Routine> {
             }
             *x = r.clone();
         } else {
-            return Err(AppError::msg("Routine not found."));
+            return Err(AppError::coded("routine_not_found", Value::Null, "Routine not found."));
         }
         Ok(r)
     })

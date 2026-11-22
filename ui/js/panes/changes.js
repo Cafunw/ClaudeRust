@@ -5,6 +5,8 @@ import { icon } from '../icons.js';
 import { call, on } from '../api.js';
 import { h, esc, errorToast, confirmDialog, debounce, showMenu, promptDialog, toast, snapshot, sameSnapshot } from '../util.js';
 import { registerPane, refresh, context, updateTabs } from '../workspace.js';
+import { keyRows } from './rows.js';
+import { errorText } from '../neterr.js';
 
 const state = new Map(); // convId -> { data, selected, diff, collapsed }
 const lineHooks = [];    // (rowEl, info, ctx) => void — e.g. inline comments
@@ -25,6 +27,7 @@ export function parseUnified(text) {
     if (l.startsWith('diff --git') || l.startsWith('index ') || l.startsWith('+++') || l.startsWith('---') || l.startsWith('new file') || l.startsWith('deleted file') || l.startsWith('similarity') || l.startsWith('rename ') || l.startsWith('old mode') || l.startsWith('new mode')) continue;
     const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(l);
     if (m) { o = +m[1]; n = +m[2]; rows.push({ type: 'hunk', text: l }); continue; }
+    if (l.startsWith('Binary files ') || l === 'GIT binary patch') { rows.push({ type: 'binary', text: l }); continue; }
     if (l === '' || l.startsWith('\\')) continue;
     if (l.startsWith('+')) rows.push({ type: 'add', newNo: n++, text: l.slice(1) });
     else if (l.startsWith('-')) rows.push({ type: 'del', oldNo: o++, text: l.slice(1) });
@@ -42,7 +45,7 @@ const STATUS_LABEL = { M: 'M', A: 'A', D: 'D', R: 'R', '?': 'U' };
 
 async function load(el, ctx) {
   const s = stateFor(ctx.convId);
-  try { s.data = await call('changes_list', { conversationId: ctx.convId }); } catch (e) { s.data = { error: e.message || String(e), files: [] }; }
+  try { s.data = await call('changes_list', { conversationId: ctx.convId }); } catch (e) { s.data = { error: errorText(e), files: [] }; }
   if (s.selected && !s.data.files.some((f) => f.path === s.selected)) { s.selected = null; s.diff = null; }
   updateTabs();
   draw(el, ctx);
@@ -53,14 +56,14 @@ async function loadDiff(el, ctx, path, quiet) {
   const s = stateFor(ctx.convId);
   s.selected = path;
   if (!quiet) { s.diff = null; draw(el, ctx); }
-  try { s.diff = await call('change_diff', { conversationId: ctx.convId, path }); } catch (e) { s.diff = `error: ${e.message || e}`; }
+  try { s.diff = await call('change_diff', { conversationId: ctx.convId, path }); } catch (e) { s.diff = { error: errorText(e) }; }
   if (s.selected === path) draw(el, ctx);
 }
 
 /** Everything a draw shows: the same again means the same DOM. */
 function drawInputs(ctx, s) {
   const w = ctx.conv && ctx.conv.options && ctx.conv.options.worktree;
-  return snapshot([s.data, s.selected, s.diff, w || null, currentLanguage(), ...inputs.map((fn) => fn(ctx))]);
+  return snapshot([s.data, s.selected, s.diff, s.full || null, w || null, currentLanguage(), ...inputs.map((fn) => fn(ctx))]);
 }
 
 function draw(el, ctx) {
@@ -78,7 +81,7 @@ function draw(el, ctx) {
   const add = files.reduce((a, f) => a + (f.added || 0), 0);
   const del = files.reduce((a, f) => a + (f.removed || 0), 0);
   const head = h(`<div class="pane-head">
-    ${d.repo ? `<button class="branch branch-btn" title="${esc(t('branch_menu'))}">${icon('code', 13)} ${esc(d.branch || '')} ${icon('chevDown', 12)}</button>` : `<span class="muted">${t('changes_session')}</span>`}
+    ${d.repo ? `<button class="branch branch-btn" title="${esc(`${t('branch_menu')}: ${d.branch || ''}`)}">${icon('code', 13)} <span class="ellipsis">${esc(d.branch || '')}</span> ${icon('chevDown', 12)}</button>` : `<span class="muted">${t('changes_session')}</span>`}
     <span class="diff-stat"><span class="a">+${add}</span> <span class="d">-${del}</span></span>
     <div class="grow"></div>
     <span class="hooks"></span>
@@ -118,7 +121,7 @@ function draw(el, ctx) {
   for (const f of files) {
     const name = f.path.split('/').pop();
     const dir = f.path.slice(0, f.path.length - name.length);
-    const row = h(`<div class="change-row ${s.selected === f.path ? 'on' : ''}" title="${esc(f.path)}">
+    const row = h(`<div class="change-row ${s.selected === f.path ? 'on' : ''}" title="${esc(f.path)}" data-k="${esc(f.path)}" aria-expanded="${s.selected === f.path}">
       <span class="cst s-${STATUS_LABEL[f.status] || 'M'}">${STATUS_LABEL[f.status] || f.status}</span>
       <span class="cname ellipsis"><b>${esc(name)}</b> <span class="muted">${esc(dir)}</span></span>
       <span class="diff-stat"><span class="a">+${f.added || 0}</span> <span class="d">-${f.removed || 0}</span></span>
@@ -150,9 +153,16 @@ function draw(el, ctx) {
       load(el, ctx);
     };
     list.appendChild(row);
-    if (s.selected === f.path) list.appendChild(diffView(s.diff, f.path, ctx, d.repo && f.status !== '?' && f.status !== 'A' ? () => load(el, ctx) : null));
+    if (s.selected === f.path) {
+      const showAll = s.full === f.path ? null : () => { s.full = f.path; draw(el, ctx); };
+      list.appendChild(diffView(s.diff, f.path, ctx, d.repo && f.status !== '?' && f.status !== 'A' ? () => load(el, ctx) : null, showAll));
+    }
   }
   el.appendChild(list);
+  keyRows(list, '.change-row');
+  // the diff's lines: ↑ ↓ go along them, Enter comments on one
+  const tb = list.querySelector('table.dv tbody');
+  if (tb) keyRows(tb, 'tr.dv-add, tr.dv-del, tr.dv-ctx', { role: null, activate: (tr) => { const b = tr.querySelector('.rc-add'); if (b) b.click(); } });
 }
 
 async function applyPatch(el, ctx) {
@@ -192,12 +202,19 @@ async function branchMenu(anchor, el, ctx) {
   ], { placement: 'bottom-start', width: 300 });
 }
 
-/** `onHunkReverted`: per-hunk revert is offered (tracked files in git). */
-function diffView(text, path, ctx, onHunkReverted) {
+/** Rows drawn at first: a diff of thousands of lines is shown on request (each row costs DOM and a review hook). */
+export const DIFF_ROWS_SHOWN = 1500;
+
+/** `onHunkReverted`: per-hunk revert is offered (tracked files in git); `onShowAll`: only the
+ *  first DIFF_ROWS_SHOWN rows are drawn, with a button that calls it (null: every row). */
+function diffView(text, path, ctx, onHunkReverted, onShowAll) {
   const box = h('<div class="diff-view"></div>');
   if (text == null) { box.innerHTML = '<div class="pane-empty"><span class="spinner"></span></div>'; return box; }
-  const rows = parseUnified(text);
-  if (!rows.length) { box.innerHTML = `<div class="muted" style="padding:10px">${t('no_textual_changes')}</div>`; return box; }
+  if (text.error) { box.innerHTML = `<div class="muted" style="padding:10px">${esc(text.error)}</div>`; return box; }
+  const parsed = parseUnified(text);
+  if (parsed.some((r) => r.type === 'binary')) { box.innerHTML = `<div class="muted" style="padding:10px">${esc(t('files_binary'))}</div>`; return box; }
+  if (!parsed.length) { box.innerHTML = `<div class="muted" style="padding:10px">${t('no_textual_changes')}</div>`; return box; }
+  const rows = onShowAll ? parsed.slice(0, DIFF_ROWS_SHOWN) : parsed;
   const tbl = h('<table class="dv"><tbody></tbody></table>');
   const tb = tbl.querySelector('tbody');
   // all rows parsed at once (one row at a time costs a parse each, for
@@ -205,7 +222,7 @@ function diffView(text, path, ctx, onHunkReverted) {
   const revertBtn = onHunkReverted ? `<button class="btn sm ghost dv-hunk-revert" title="${esc(t('hunk_revert_tip'))}">${icon('retry', 12)} ${esc(t('revert'))}</button>` : '';
   tb.innerHTML = rows.map((r) => (r.type === 'hunk'
     ? `<tr class="dv-hunk"><td colspan="3"><span class="dv-hunk-text">${esc(r.text)}</span>${revertBtn}</td></tr>`
-    : `<tr class="dv-${r.type}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`)).join('');
+    : `<tr class="dv-${r.type}" data-k="${r.oldNo ?? ''}:${r.newNo ?? ''}"><td class="no">${r.oldNo ?? ''}</td><td class="no">${r.newNo ?? ''}</td><td class="code"><span class="sign">${r.type === 'add' ? '+' : r.type === 'del' ? '-' : ' '}</span>${esc(r.text)}</td></tr>`)).join('');
   const trs = tb.children;
   let hunk = -1;
   rows.forEach((r, i) => {
@@ -225,6 +242,11 @@ function diffView(text, path, ctx, onHunkReverted) {
     for (const fn of lineHooks) fn(tr, { path, ...r }, ctx);
   });
   box.appendChild(tbl);
+  if (rows.length < parsed.length) {
+    const more = h(`<button class="btn sm ghost dv-more">${esc(t('changes_show_all', { n: parsed.length - rows.length }))}</button>`);
+    more.onclick = onShowAll;
+    box.appendChild(more);
+  }
   return box;
 }
 

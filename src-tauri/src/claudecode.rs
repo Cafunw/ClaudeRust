@@ -124,7 +124,9 @@ pub fn open_login_terminal(cli: &std::path::Path) -> AppResult<()> {
     open_in_terminal(None, cli, &[])
 }
 
-const NOT_INSTALLED: &str = "Claude Code isn't installed. Install it from claude.com/claude-code first.";
+fn not_installed() -> AppError {
+    AppError::coded("cli_not_installed", Value::Null, "Claude Code isn't installed. Install it from claude.com/claude-code first.")
+}
 
 /// Run `claude <args>` to the end (stdin closed) and keep what it printed.
 async fn cli_output(cli: &std::path::Path, args: &[&str], secs: u64) -> Option<std::process::Output> {
@@ -155,7 +157,7 @@ static LOGIN: parking_lot::Mutex<Option<CancellationToken>> = parking_lot::Mutex
 /// does. Resolves with the new status, or `{"cancelled": true}`.
 pub async fn auth_login(override_path: &str) -> AppResult<Value> {
     crate::shellenv::ready().await;
-    let cli = find_cli(override_path).ok_or_else(|| AppError::msg(NOT_INSTALLED))?;
+    let cli = find_cli(override_path).ok_or_else(not_installed)?;
     let cancel = CancellationToken::new();
     if let Some(old) = LOGIN.lock().replace(cancel.clone()) {
         old.cancel();
@@ -166,13 +168,13 @@ pub async fn auth_login(override_path: &str) -> AppResult<Value> {
     for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
         cmd.env_remove(k);
     }
-    let mut child = cmd.spawn().map_err(|e| AppError::msg(format!("Could not start Claude Code ({}): {e}", cli.display())))?;
+    let mut child = cmd.spawn().map_err(|e| AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display())))?;
     let mut stderr = child.stderr.take();
     // shortcut: no way to paste the code the browser page shows (the CLI's fallback when it can't catch the redirect), so a sign-in that needs it times out; use the terminal sign-in then
     let end = tokio::select! {
-        s = child.wait() => s.map(Some),
+        s = child.wait() => s.map(Some).map_err(AppError::from),
         _ = cancel.cancelled() => Ok(None),
-        _ = tokio::time::sleep(Duration::from_secs(300)) => Err(std::io::Error::other("Sign-in didn't finish within 5 minutes.")),
+        _ = tokio::time::sleep(Duration::from_secs(300)) => Err(AppError::coded("cli_sign_in_timeout", json!({"n": 5}), "Sign-in didn't finish within 5 minutes.")),
     };
     if !cancel.is_cancelled() {
         LOGIN.lock().take();
@@ -184,7 +186,7 @@ pub async fn auth_login(override_path: &str) -> AppResult<Value> {
             if let Some(e) = stderr.as_mut() {
                 let _ = tokio::io::AsyncReadExt::read_to_string(e, &mut text).await;
             }
-            Err(AppError::msg(if text.trim().is_empty() { "Sign-in failed.".to_string() } else { truncate_chars(text.trim(), 500) }))
+            Err(AppError::coded("cli_sign_in_failed", Value::Null, if text.trim().is_empty() { "Sign-in failed.".to_string() } else { truncate_chars(text.trim(), 500) }))
         }
         Ok(None) => {
             let _ = child.kill().await;
@@ -192,7 +194,7 @@ pub async fn auth_login(override_path: &str) -> AppResult<Value> {
         }
         Err(e) => {
             let _ = child.kill().await;
-            Err(e.into())
+            Err(e)
         }
     }
 }
@@ -206,14 +208,14 @@ pub fn auth_login_cancel() {
 /// `claude auth logout`. It signs out the CLI itself, for Claude Code in a terminal too.
 pub async fn auth_logout(override_path: &str) -> AppResult<()> {
     crate::shellenv::ready().await;
-    let cli = find_cli(override_path).ok_or_else(|| AppError::msg(NOT_INSTALLED))?;
+    let cli = find_cli(override_path).ok_or_else(not_installed)?;
     match cli_output(&cli, &["auth", "logout"], 20).await {
         Some(o) if o.status.success() => Ok(()),
         Some(o) => {
             let text = String::from_utf8_lossy(if o.stderr.is_empty() { &o.stdout } else { &o.stderr }).trim().to_string();
-            Err(AppError::msg(if text.is_empty() { "Sign-out failed.".to_string() } else { truncate_chars(&text, 500) }))
+            Err(AppError::coded("cli_sign_out_failed", Value::Null, if text.is_empty() { "Sign-out failed.".to_string() } else { truncate_chars(&text, 500) }))
         }
-        None => Err(AppError::msg("Sign-out didn't finish.")),
+        None => Err(AppError::coded("cli_sign_out_failed", Value::Null, "Sign-out didn't finish.")),
     }
 }
 
@@ -446,7 +448,7 @@ pub fn open_in_terminal(cwd: Option<&std::path::Path>, program: &std::path::Path
             cmd.push(' ');
             cmd.push_str(a);
         }
-        Err(AppError::msg(format!(
+        Err(AppError::coded("no_terminal_app", json!({"cmd": cmd}), format!(
             "No terminal app found. Open a terminal{} and run: {cmd}",
             cwd.map(|d| format!(" in {}", d.display())).unwrap_or_default()
         )))
@@ -1044,26 +1046,26 @@ async fn run_once<R: Runtime>(
     let chat = conv.kind != "code";
     let cwd = if chat { chat_dir(st) } else { conv.cwd.clone().unwrap_or_default() };
 
-    let fail = |msg: String| -> AppResult<Outcome> {
+    let fail = |e: AppError| -> AppResult<Outcome> {
         let m = Message {
             id: new_id(),
             conversation_id: conv_id.to_string(),
             parent_id: Some(user_msg_id.clone()),
             role: "assistant".into(),
             content: json!([]),
-            meta: json!({"error": {"message": msg, "kind": "claude_code"}}),
+            meta: json!({"error": error_meta(&e)}),
             created_at: now_ms(),
         };
         st.db.msg_insert(&m)?;
         st.db.conv_set_leaf(conv_id, Some(&m.id))?;
-        Err(AppError::Api { status: 0, kind: "claude_code".into(), message: msg })
+        Err(e)
     };
 
     let Some(cli) = find_cli(&settings.claude_code_path) else {
-        return fail("Claude Code isn't installed (or wasn't found). Install it from claude.com/claude-code, sign in once by running `claude` in a terminal, then try again. You can also set its path in Settings → Code.".into());
+        return fail(AppError::coded("cli_not_installed", Value::Null, "Claude Code isn't installed (or wasn't found). Install it from claude.com/claude-code, sign in once by running `claude` in a terminal, then try again. You can also set its path in Settings → Code."));
     };
     if !std::path::Path::new(&cwd).is_dir() {
-        return fail(format!("The project folder no longer exists: {cwd}"));
+        return fail(AppError::coded("folder_not_found", json!({"path": cwd}), format!("The project folder no longer exists: {cwd}")));
     }
 
     // Resume the CLI session at the right point in our tree.
@@ -1103,7 +1105,7 @@ async fn run_once<R: Runtime>(
         let rc = crate::engine::build_request_context(st, &conv, &settings).await?;
         let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &rc.system) {
             Ok(f) => f,
-            Err(e) => return fail(format!("Could not write the chat prompt (in {cwd}): {e}")),
+            Err(e) => return fail(AppError::coded("prompt_write_failed", json!({"path": cwd}), format!("Could not write the chat prompt (in {cwd}): {e}"))),
         };
         project_files = rc.prefix_blocks;
         // past chats while searching them is on, first (of two tools that end up with one name the first stays), then
@@ -1202,7 +1204,7 @@ async fn run_once<R: Runtime>(
     cmd.process_group(0);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return fail(format!("Could not start Claude Code ({}): {e}", cli.display())),
+        Err(e) => return fail(AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display()))),
     };
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().unwrap();
@@ -1754,27 +1756,27 @@ async fn run_once<R: Runtime>(
         }
         None => {}
     }
-    if error.as_deref().is_some_and(|e| e.contains("Not logged in") || e.contains("/login")) {
-        error = Some("You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).".into());
-    }
+    let error = error.map(|e| turn_error(e, &st.usage_limits.lock()));
     if !fresh && ts.rows.len() == seeded && !interrupted && !delivered {
-        let text = format!("{} {}", error.clone().unwrap_or_default(), err_text);
+        let text = format!("{} {}", error.as_ref().map(|e| e.to_string()).unwrap_or_default(), err_text);
         if is_resume_lost(&text) {
             return Ok(Outcome::ResumeLost);
         }
     }
     // a workflow's wait is in no turn's own duration_ms: a turn that spanned one shows the wall time
     let wall_ms = result_at.filter(|_| ran_workflow && !delivered).map(|t| t.duration_since(run_start).as_millis() as u64);
-    let settled = settle_rows(st, conv_id, &mut ts, &result, wall_ms, stopped, error.as_deref(), budget_stop.as_ref())?;
+    let settled = settle_rows(st, conv_id, &mut ts, &result, wall_ms, stopped, error.as_ref(), budget_stop.as_ref())?;
     if !settled {
-        if let Some(e) = &error {
-            if !delivered {
-                return fail(e.clone());
-            }
+        match error {
+            Some(e) if !delivered => return fail(e),
             // the error belongs under the message of the turn that failed, not the run's first one
-            let _ = new_row!("assistant", json!([]), json!({"error": {"message": e, "kind": "claude_code"}, "engine": ENGINE}));
-        } else if stopped {
-            let _ = new_row!("assistant", json!([]), json!({"stopped": true, "engine": ENGINE}));
+            Some(ref e) => {
+                let _ = new_row!("assistant", json!([]), json!({"error": error_meta(e), "engine": ENGINE}));
+            }
+            None if stopped => {
+                let _ = new_row!("assistant", json!([]), json!({"stopped": true, "engine": ENGINE}));
+            }
+            None => {}
         }
     }
     // Remember where the CLI session ends so the next message resumes there.
@@ -1794,7 +1796,7 @@ async fn run_once<R: Runtime>(
         }
     }
     match error {
-        Some(e) => Err(AppError::Api { status: 0, kind: "claude_code".into(), message: e }),
+        Some(e) => Err(e),
         None => Ok(match orphan.filter(|_| !interrupted) {
             Some(id) => Outcome::Next(id),
             None => Outcome::Done,
@@ -1813,7 +1815,7 @@ fn settle_rows(
     result: &Option<Value>,
     wall_ms: Option<u64>,
     interrupted: bool,
-    error: Option<&str>,
+    error: Option<&AppError>,
     budget_stop: Option<&Value>,
 ) -> AppResult<bool> {
     // what streamed in of a message the CLI never finished (it exited, or a Stop) is kept
@@ -1844,7 +1846,11 @@ fn settle_rows(
         row.meta["stopped"] = json!(true);
     }
     if let Some(e) = error {
-        row.meta["error"] = json!({"message": e, "kind": "claude_code"});
+        row.meta["error"] = error_meta(e);
+        // the CLI's own words for the failure (a synthetic "Not logged in · Please run /login" reply): the error says it
+        if result.as_ref().is_some_and(|r| echoes_error(&row.content, r)) {
+            row.content = json!([]);
+        }
     }
     if let Some(b) = budget_stop {
         row.meta["budget_stop"] = b.clone();
@@ -1853,6 +1859,42 @@ fn settle_rows(
     let text = render::plain_text(&row.content);
     let _ = st.db.fts_index(conv_id, &row.id, &text);
     Ok(true)
+}
+
+/// A failed turn as the UI says it (ui/js/errors.js): coded by what the CLI said, the usage limit with when it resets.
+fn turn_error(message: String, limits: &Value) -> AppError {
+    let lower = message.to_lowercase();
+    if message.contains("Not logged in") || message.contains("/login") {
+        return AppError::coded("cli_not_signed_in", Value::Null, "You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).");
+    }
+    if lower.contains("usage limit") || lower.contains("hit your limit") {
+        let key = limits["limiting"].as_str();
+        let resets = limits["limits"].as_array().into_iter().flatten().find(|l| key.is_some() && l["key"].as_str() == key).map(|l| l["resets_at"].clone());
+        return AppError::coded("cli_usage_limit", resets.filter(|r| r.is_number()).map_or(Value::Null, |r| json!({"resets_at": r})), message);
+    }
+    if lower.contains("credit balance is too low") {
+        return AppError::coded("credit_low", Value::Null, message);
+    }
+    if is_resume_lost(&message) {
+        return AppError::coded("cli_session_lost", Value::Null, message);
+    }
+    AppError::coded("claude_code", Value::Null, message)
+}
+
+/// A failure as a row's meta keeps it: what the UI reads to say it (`error.rs` serializes the same fields).
+fn error_meta(e: &AppError) -> Value {
+    let mut v = json!({"message": e.to_string(), "kind": e.kind()});
+    let params = e.params();
+    if !params.is_null() {
+        v["params"] = params;
+    }
+    v
+}
+
+/// Whether a reply is only the text of the error its turn ended with.
+fn echoes_error(content: &Value, result: &Value) -> bool {
+    let said = result["result"].as_str().map(str::trim).unwrap_or("");
+    result["is_error"] == true && !said.is_empty() && render::plain_text(content).trim() == said
 }
 
 /// A turn's own cost, from a result whose `total_cost_usd` is the session's running total so far.
@@ -2046,6 +2088,43 @@ mod tests {
         let reasons: Vec<Value> = ts.rows.iter().map(|r| st.db.msg_get(&r.id).unwrap().meta["stop_reason"].clone()).collect();
         assert_eq!(reasons, vec![json!("tool_use"), Value::Null, json!("end_turn"), json!("max_tokens"), json!("end_turn")]);
         assert_eq!(st.db.mark_interrupted().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_turn_is_coded_by_what_the_cli_said() {
+        let limits = json!({"limiting": "five_hour", "limits": [{"key": "seven_day", "resets_at": 1}, {"key": "five_hour", "resets_at": 1_795_536_000_000i64}]});
+        let coded = |m: &str, l: &Value| serde_json::to_value(turn_error(m.into(), l)).unwrap();
+        let out = coded("Not logged in · Please run /login", &Value::Null);
+        assert_eq!(out["kind"], "cli_not_signed_in");
+        assert!(out["message"].as_str().unwrap().starts_with("You're not signed in"), "{out}");
+        assert_eq!(coded("Claude AI usage limit reached|1795536000", &limits)["params"], json!({"resets_at": 1_795_536_000_000i64}));
+        let unknown = coded("You've hit your limit · resets 5pm", &json!({"limiting": "opus"}));
+        assert_eq!((unknown["kind"].as_str(), unknown.get("params")), (Some("cli_usage_limit"), None));
+        assert_eq!(coded("Credit balance is too low", &Value::Null)["kind"], "credit_low");
+        assert_eq!(coded("No conversation found with session ID: x", &Value::Null)["kind"], "cli_session_lost");
+        let other = coded("API Error: 500", &Value::Null);
+        assert_eq!((other["kind"].as_str(), other["message"].as_str()), (Some("claude_code"), Some("API Error: 500")));
+        assert_eq!(error_meta(&turn_error("x".into(), &Value::Null)), json!({"message": "x", "kind": "claude_code"}));
+
+        let said = json!({"is_error": true, "result": "Not logged in · Please run /login"});
+        assert!(echoes_error(&json!([{"type": "text", "text": "Not logged in · Please run /login\n"}]), &said));
+        assert!(!echoes_error(&json!([{"type": "text", "text": "Here is the answer"}]), &said));
+        assert!(!echoes_error(&json!([{"type": "text", "text": "Done"}]), &json!({"is_error": false, "result": "Done"})));
+        assert!(!echoes_error(&json!([]), &json!({"is_error": true, "result": ""})));
+
+        // the reply that only repeats the error goes; the error stays under it
+        let dir = std::env::temp_dir().join(format!("cr-cc-echo-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let conv = st.db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let reply = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([{"type": "text", "text": "Not logged in · Please run /login"}]), meta: json!({"engine": ENGINE}), created_at: 1 };
+        st.db.msg_insert(&reply).unwrap();
+        let mut ts = TurnState { rows: vec![reply.clone()], current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
+        let e = turn_error("Not logged in · Please run /login".into(), &Value::Null);
+        assert!(settle_rows(&st, &conv.id, &mut ts, &Some(said), None, false, Some(&e), None).unwrap());
+        let stored = st.db.msg_get(&reply.id).unwrap();
+        assert_eq!((stored.content, stored.meta["error"]["kind"].as_str()), (json!([]), Some("cli_not_signed_in")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

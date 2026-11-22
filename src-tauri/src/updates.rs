@@ -46,7 +46,7 @@ fn updater(app: &AppHandle) -> AppResult<tauri_plugin_updater::Updater> {
         let url = url.parse().map_err(|e| AppError::msg(format!("CLAUDERUST_UPDATE_ENDPOINT: {e}")))?;
         b = b.endpoints(vec![url]).map_err(|e| AppError::msg(e.to_string()))?;
     }
-    b.build().map_err(|e| AppError::msg(format!("Updates aren't available in this build: {e}")))
+    b.build().map_err(|e| AppError::coded("update_unavailable", Value::Null, format!("Updates aren't available in this build: {e}")))
 }
 
 fn current_version(app: &AppHandle) -> String {
@@ -55,7 +55,7 @@ fn current_version(app: &AppHandle) -> String {
 
 /// The update on offer, if any: `{available, current, version?, notes?, date?, releases_url}`.
 pub async fn check(app: &AppHandle) -> AppResult<Value> {
-    let found = updater(app)?.check().await.map_err(|e| AppError::msg(format!("Couldn't check for updates: {e}")))?;
+    let found = updater(app)?.check().await.map_err(|e| AppError::coded("update_check_failed", Value::Null, format!("Couldn't check for updates: {e}")))?;
     Ok(describe(&current_version(app), found.as_ref().map(|u| (u.version.as_str(), u.body.as_deref(), u.date.map(|d| d.to_string())))))
 }
 
@@ -74,7 +74,7 @@ fn describe(current: &str, update: Option<(&str, Option<&str>, Option<String>)>)
 /// then restarts the app; elsewhere the caller restarts it.
 pub async fn install(app: &AppHandle) -> AppResult<()> {
     if INSTALLING.swap(true, Ordering::SeqCst) {
-        return Err(AppError::msg("An update is already being installed."));
+        return Err(AppError::coded("update_busy", Value::Null, "An update is already being installed."));
     }
     let r = install_inner(app).await;
     INSTALLING.store(false, Ordering::SeqCst);
@@ -85,8 +85,8 @@ async fn install_inner(app: &AppHandle) -> AppResult<()> {
     let mut update = updater(app)?
         .check()
         .await
-        .map_err(|e| AppError::msg(format!("Couldn't check for updates: {e}")))?
-        .ok_or_else(|| AppError::msg("ClaudeRust is up to date."))?;
+        .map_err(|e| AppError::coded("update_check_failed", Value::Null, format!("Couldn't check for updates: {e}")))?
+        .ok_or_else(|| AppError::coded("update_none", Value::Null, "ClaudeRust is up to date."))?;
     // The check's limit is for the check: as a total request timeout on the
     // download it would fail any installer that takes longer to arrive. (The
     // plugin documents the builder's timeout as covering downloads too;
@@ -108,7 +108,7 @@ async fn install_inner(app: &AppHandle) -> AppResult<()> {
             || {},
         )
         .await
-        .map_err(|e| AppError::msg(format!("Couldn't install the update: {e}")))
+        .map_err(|e| AppError::coded("update_install_failed", Value::Null, format!("Couldn't install the update: {e}")))
 }
 
 /// Check now and then while the app runs (when the setting is on), and tell

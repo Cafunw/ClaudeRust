@@ -6,6 +6,7 @@ import { icon } from '../icons.js';
 import { call } from '../api.js';
 import { h, esc } from '../util.js';
 import { registerPane } from '../workspace.js';
+import { errorText } from '../neterr.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const PALETTE = ['#c96442', '#4a7bd0', '#3a9a5b', '#b07a10', '#8e5cc2', '#c0453a', '#2f8a8a', '#7a6a4f', '#d0699a', '#5a6b8c'];
@@ -62,12 +63,12 @@ function el(tag, attrs) {
 }
 
 async function draw(pane, ctx) {
-  pane.innerHTML = `<div class="pv-bar"><input class="pv-url" placeholder="${esc(t('map_filter'))}"><button class="icon-btn sm" data-a="reload" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div><div class="map-body"><div class="pane-empty"><span class="spinner"></span></div></div><div class="map-info muted small"></div>`;
+  pane.innerHTML = `<div class="pv-bar"><input class="pv-url" placeholder="${esc(t('map_filter'))}" aria-label="${esc(t('map_filter'))}"><button class="icon-btn sm" data-a="reload" title="${t('refresh')}">${icon('refreshCw', 14)}</button></div><div class="map-body"><div class="pane-empty"><span class="spinner"></span></div></div><div class="map-info muted small"></div>`;
   const body = pane.querySelector('.map-body');
   const info = pane.querySelector('.map-info');
   pane.querySelector('[data-a=reload]').onclick = () => draw(pane, ctx);
   let g;
-  try { g = await call('arch_map', { conversationId: ctx.convId }); } catch (e) { body.innerHTML = `<div class="pane-empty">${esc(e.message || String(e))}</div>`; return; }
+  try { g = await call('arch_map', { conversationId: ctx.convId }); } catch (e) { body.innerHTML = `<div class="pane-empty">${esc(errorText(e))}</div>`; return; }
   if (!g.nodes.length) { body.innerHTML = `<div class="pane-empty">${icon('layers', 22)}<div>${esc(t('map_empty'))}</div></div>`; return; }
   const W = 1000, H = 800;
   const nodes = g.nodes.map((n) => ({ ...n }));
@@ -80,7 +81,7 @@ async function draw(pane, ctx) {
   const xs = fitNodes.map((n) => n.x).sort((a, b) => a - b), ys = fitNodes.map((n) => n.y).sort((a, b) => a - b);
   const q = (arr, f) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * f)))];
   const vb = { x: q(xs, 0.02) - 60, y: q(ys, 0.02) - 40, w: Math.max(200, q(xs, 0.98) - q(xs, 0.02) + 160), h: Math.max(160, q(ys, 0.98) - q(ys, 0.02) + 80) };
-  const svg = el('svg', { viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, class: 'map-svg', preserveAspectRatio: 'xMidYMid meet' });
+  const svg = el('svg', { viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, class: 'map-svg', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': t('ws_map') });
   const view = el('g');
   svg.appendChild(view);
   const lineEls = links.map(([i, j]) => {

@@ -42,7 +42,7 @@ onChangesInput((ctx) => load(ctx.convId));
 export function reviewPrompt(list) {
   const lines = [t('review_prompt_intro'), ''];
   list.forEach((c, i) => {
-    lines.push(`${i + 1}. \`${c.path}:${c.line}\`${c.side === 'old' ? ' (removed line)' : ''} — ${c.body.trim()}`);
+    lines.push(`${i + 1}. \`${c.path}:${c.line}\`${c.side === 'old' ? ` ${t('review_removed_line')}` : ''} — ${c.body.trim()}`);
     if (c.code && c.code.trim()) lines.push(`   > ${c.code.trim().slice(0, 200)}`);
   });
   lines.push('', t('review_prompt_outro'));
@@ -51,7 +51,7 @@ export function reviewPrompt(list) {
 
 function editorRow(initial, onSave, onCancel) {
   const tr = h(`<tr class="dv-comment-edit"><td colspan="3"><div class="rc-edit">
-    <textarea rows="2" placeholder="${esc(t('review_placeholder'))}">${esc(initial || '')}</textarea>
+    <textarea rows="2" placeholder="${esc(t('review_placeholder'))}" aria-label="${esc(t('review_placeholder'))}">${esc(initial || '')}</textarea>
     <div class="rc-actions"><button class="btn sm ghost" data-a="cancel">${t('cancel')}</button><button class="btn sm primary" data-a="save">${t('review_add')}</button></div>
   </div></td></tr>`);
   const ta = tr.querySelector('textarea');
@@ -85,7 +85,7 @@ onDiffLine((tr, info, ctx) => {
   const side = info.type === 'del' ? 'old' : 'new';
   const line = side === 'old' ? info.oldNo : info.newNo;
   const c0 = { path: info.path, side, line, code: info.text };
-  const btn = h(`<button class="rc-add" title="${esc(t('review_add_title'))}">${icon('plus', 11)}</button>`);
+  const btn = h(`<button class="rc-add" title="${esc(t('review_add_title'))}" aria-label="${esc(t('review_add_title'))}: ${esc(`${info.path}:${line}`)}">${icon('plus', 11)}</button>`);
   tr.querySelector('td.code').prepend(btn);
   btn.onclick = (e) => {
     e.stopPropagation();
@@ -95,7 +95,7 @@ onDiffLine((tr, info, ctx) => {
       list.push({ ...c0, body });
       save(ctx.convId, list);
       refresh('changes');
-    }, () => ed.remove());
+    }, () => { ed.remove(); tr.focus(); });
     tr.after(ed);
   };
   // existing comment on this line: show it after the row once it's attached
