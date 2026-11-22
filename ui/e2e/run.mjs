@@ -30,8 +30,8 @@ async function freePort(candidates) {
 }
 const PORT = process.env.CLAUDERUST_E2E_PORT ? Number(process.env.CLAUDERUST_E2E_PORT) : await freePort([9333, 9222, 9444, 19333, 29333]);
 const CDP = `http://127.0.0.1:${PORT}`;
-// a first build of the dev copy takes minutes; the CI job's own limit is 30
-const START_MS = 20 * 60_000;
+// a first build of the dev copy takes minutes; the CI job's own limit is 20
+const START_MS = 12 * 60_000;
 const logs = path.join(root, 'target', 'e2e');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -98,7 +98,9 @@ function processInfo() {
   if (process.platform !== 'win32') return '';
   const identifier = JSON.parse(fs.readFileSync(config, 'utf8')).identifier;
   const ps = [
-    "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'clauderust.exe','msedgewebview2.exe' } | ForEach-Object { $c = [string]$_.CommandLine; if ($c.Length -gt 300) { $c = $c.Substring(0, 300) }; '{0} {1} {2}' -f $_.ProcessId, $_.Name, $c }",
+    // the WebView2 browser process (the one without --type=) in full: does it carry the debugging port flag?
+    "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'clauderust.exe','msedgewebview2.exe' } | ForEach-Object { $c = [string]$_.CommandLine; $browser = ($_.Name -eq 'msedgewebview2.exe' -and $c -notmatch '--type='); if (-not $browser -and $c.Length -gt 120) { $c = $c.Substring(0, 120) }; '{0} {1} {2}' -f $_.ProcessId, $_.Name, $c; if ($browser) { $i = $c.IndexOf('--remote-debugging-port='); if ($i -ge 0) { 'browser process debugging flag: ' + $c.Substring($i, [Math]::Min(40, $c.Length - $i)) } else { 'browser process debugging flag: ABSENT' } } }",
+    "'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS in this shell: ' + $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
     "Get-Process clauderust -ErrorAction SilentlyContinue | ForEach-Object { 'clauderust responding: ' + $_.Responding + ', window: ' + $_.MainWindowHandle }",
     `netstat -ano | Select-String ':${PORT}'`,
     'netsh interface ipv4 show excludedportrange protocol=tcp',
