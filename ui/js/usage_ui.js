@@ -2,7 +2,7 @@
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { emit } from './store.js';
-import { h, esc, modal, fmtTokens, fmtUsd as money, errorToast } from './util.js';
+import { h, esc, modal, fmtTokens, fmtUsd as money, errorToast, convTitle } from './util.js';
 import { registerCommand } from './slash.js';
 
 function chart(byDay, days) {
@@ -42,8 +42,8 @@ export async function openUsage(days = 30) {
       </div>
       ${chart(u.by_day, d)}
       <div class="usage-cols">
-        <div><div class="section-title">${t('usage_by_model')}</div><table class="kv">${u.by_model.map((x) => `<tr><td>${esc(x.name || x.model)}<div class="muted small">${fmtTokens(x.input_tokens)} in · ${fmtTokens(x.output_tokens)} out · ${x.responses}×</div></td><td>${money(x.cost_usd)}</td></tr>`).join('') || `<tr><td class="muted">—</td><td></td></tr>`}</table></div>
-        <div><div class="section-title">${t('usage_top_convs')}</div><table class="kv">${u.top_conversations.map((x) => `<tr class="link" data-id="${esc(x.id)}"><td>${esc(x.title || t('untitled'))}<div class="muted small">${esc(x.kind)}</div></td><td>${money(x.cost_usd)}</td></tr>`).join('') || `<tr><td class="muted">—</td><td></td></tr>`}</table></div>
+        <div><div class="section-title">${t('usage_by_model')}</div><table class="kv">${u.by_model.map((x) => `<tr><td>${esc(x.name || x.model)}<div class="muted small">${esc(t('usage_in_out', { i: fmtTokens(x.input_tokens), o: fmtTokens(x.output_tokens) }))} · ${x.responses}×</div></td><td>${money(x.cost_usd)}</td></tr>`).join('') || `<tr><td class="muted">—</td><td></td></tr>`}</table></div>
+        <div><div class="section-title">${t('usage_top_convs')}</div><table class="kv">${u.top_conversations.map((x) => `<tr class="link" data-id="${esc(x.id)}"><td>${esc(convTitle(x))}<div class="muted small">${esc(x.kind)}</div></td><td>${money(x.cost_usd)}</td></tr>`).join('') || `<tr><td class="muted">—</td><td></td></tr>`}</table></div>
       </div>
       <p class="muted small">${esc(t('usage_note'))}</p></div>`);
     body.querySelectorAll('[data-d]').forEach((b) => (b.onclick = () => draw(+b.dataset.d)));

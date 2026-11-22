@@ -114,6 +114,15 @@ pub fn prepare() {
     let remote = is_remote_session();
     let software = mode == "off" || (mode == "auto" && remote);
 
+    // a test copy's window sits outside every monitor (lib.rs), which Chromium would count as hidden and stop painting
+    #[cfg(windows)]
+    if automation() {
+        let args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        if !args.contains("CalculateNativeWinOcclusion") {
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", format!("{args} --disable-features=CalculateNativeWinOcclusion"));
+        }
+    }
+
     #[cfg(windows)]
     if software {
         let user_set = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok();
@@ -157,11 +166,25 @@ pub fn info() -> Value {
     INFO.get().cloned().unwrap_or_else(|| json!({"mode": "auto", "remote": false, "software": false}))
 }
 
+/// Is a test harness driving this copy? Its window then stays out of the way:
+/// off-screen, never focused, and `ensure_on_screen` leaves it there. A
+/// development build knows it from the WebView's debugging port; a release
+/// build only from CLAUDERUST_OFFSCREEN=1, because WebView2 reads the port
+/// variable for every app of the user, and someone who set it for another app
+/// would get an invisible window.
+pub fn automation() -> bool {
+    std::env::var("CLAUDERUST_OFFSCREEN").is_ok_and(|v| v == "1")
+        || (cfg!(debug_assertions) && std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_ok_and(|a| a.contains("--remote-debugging-port")))
+}
+
 /// After the saved window position is restored, make sure the window is
 /// reachable: if no monitor shows its title bar (a monitor was unplugged, the
 /// Remote Desktop resolution is smaller...) center it, and shrink it if it is
 /// larger than the screen.
 pub fn ensure_on_screen(w: &tauri::WebviewWindow) {
+    if automation() {
+        return;
+    }
     // The OS places maximized and fullscreen windows itself (and on Windows a
     // maximized window's outer size includes borders larger than the screen).
     if w.is_maximized().unwrap_or(false) || w.is_fullscreen().unwrap_or(false) {

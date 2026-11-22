@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, newChatModel } from './store.js';
-import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle } from './util.js';
+import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -101,7 +101,7 @@ export async function renderProject(view, id) {
   const convs = await call('list_conversations', { kind: 'chat', projectId: id });
   if (!convs.length) chatsEl.innerHTML = `<div class="muted small" style="padding:10px 2px">${t('no_chats')}</div>`;
   for (const c of convs) {
-    const row = h(`<button class="list-item"><div class="grow"><div class="t">${esc(c.title || t('untitled'))}</div><div class="d">${t('last_message')} ${relTime(c.updated_at)}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+    const row = h(`<button class="list-item"><div class="grow"><div class="t">${esc(convTitle(c))}</div><div class="d">${t('last_message')} ${relTime(c.updated_at)}</div></div><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
     row.addEventListener('click', (e) => {
       if (e.target.closest('.more')) { e.stopPropagation(); conversationMenu(e.target.closest('.more'), c, { onChange: () => renderProject(view, id), onDelete: () => renderProject(view, id) }); return; }
       emit('navigate', { name: 'chat', params: { id: c.id } });

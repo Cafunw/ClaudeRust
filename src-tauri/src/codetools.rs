@@ -1176,7 +1176,8 @@ pub(crate) fn kill_process_tree(pid: u32) {
     let _ = std::process::Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .creation_flags(0x0800_0000)
-        .status();
+        // its "process not found" for a tree that already exited goes nowhere
+        .output();
 }
 
 /// The platform shell running `command` in `cwd`: bash/sh on Unix (in its

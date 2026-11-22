@@ -83,6 +83,30 @@ export function relTime(ms) {
   return d.toLocaleDateString(loc, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
 
+/** A conversation's name; an untitled chat is "New chat" everywhere, as in the sidebar. */
+export function convTitle(c) {
+  return c.title || (c.kind === 'code' ? t('untitled') : t('new_chat'));
+}
+
+/** One line of a message without its Markdown: code fences, table pipes and
+ *  rules, heading, quote and bullet marks, bold, code ticks, link targets. */
+function plainLine(line) {
+  if (/^\s*(```|~~~)/.test(line) || /^[\s|:…-]*-{3,}[\s|:…-]*$/.test(line)) return '';
+  // a table row (the snippet may cut it at either end, after "…")
+  if (/^[\s…]*\||\|[\s…]*$/.test(line)) line = line.replace(/\s*\|\s*/g, ' ');
+  return line
+    .replace(/^([\s…]*)(?:#{1,6}|>+|[-*+])\s+/, '$1')
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+    .replace(/\*\*|__|~~|`/g, '');
+}
+
+/** A search snippet as HTML: plain text, with the backend's match markers
+ *  (\u0001…\u0002) as <mark>. */
+export function snippetHtml(s) {
+  const plain = String(s || '').split('\n').map(plainLine).join(' ').replace(/\s+/g, ' ').trim();
+  return esc(plain).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>');
+}
+
 /** Size line for an attachment chip; notes when a large file was digested. */
 export function attachmentSub(a) {
   const size = humanSize(a.size || 0);

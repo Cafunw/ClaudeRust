@@ -9,6 +9,7 @@ import { copyText, decorate } from './parts.js';
 import { storageCall } from './artifact_storage.js';
 import { resolveVersions } from './artifact_update.js';
 import { createConsent, createComplete, fixMessage } from './artifact_bridge.js';
+import { shownArtifact } from './branch_panel.js';
 
 let panel = null;
 let renderTimer = null;
@@ -86,6 +87,9 @@ function currentArtifact() {
 async function render() {
   if (!panel) return;
   const el = aside();
+  // a branch without the artifact shown, but with others: its latest
+  const shown = shownArtifact([...panel.map.keys()], panel.identifier);
+  if (shown && shown !== panel.identifier) Object.assign(panel, { identifier: shown, version: null, followLatest: true, view: null });
   const a = currentArtifact();
   if (!a) { el.innerHTML = `<div class="ap-empty">${t('no_artifacts')}</div>`; return; }
   const list = versionsOf(panel.identifier);

@@ -4,7 +4,7 @@ import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac } from './api.js';
 import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
-import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot, promptDialog, confirmDialog, modal, relTime } from './util.js';
+import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot, promptDialog, confirmDialog, modal, relTime, convTitle } from './util.js';
 import { conversationMenu } from './chat.js';
 import { pendingUpdate, showUpdates } from './updates.js';
 import { tight, roomStep } from './sidebar_room.js';
@@ -243,7 +243,7 @@ function chatLink(c) {
   const folder = c.kind === 'code' && c.cwd ? c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd : '';
   const unread = !!c.unread && !running && !waiting;
   const a = h(`<button class="chat-link ${folder ? 'two' : ''} ${unread ? 'unread' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
-    <span class="txt"><span class="title">${esc(c.title || (c.kind === 'code' ? t('untitled') : t('new_chat')))}</span>${folder ? `<span class="sub">${esc(folder)}</span>` : ''}</span>
+    <span class="txt"><span class="title">${esc(convTitle(c))}</span>${folder ? `<span class="sub">${esc(folder)}</span>` : ''}</span>
     ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : unread ? `<span class="dot unread" title="${esc(t('org_unread'))}"></span><span class="sr-only">${esc(t('org_unread'))}</span>` : ''}
     <span class="icon-btn sm more" aria-hidden="true">${icon('more', 16)}</span></button>`);
   // the menu: the ⋯ on hover, a right click, or the keyboard's menu key / Shift+F10
@@ -369,7 +369,7 @@ async function showArchived(kind) {
   const draw = () => {
     body.innerHTML = list.length ? '' : `<p class="muted small">${esc(t('org_archived_none'))}</p>`;
     for (const c of list) {
-      const row = h(`<div class="archived-row"><button class="archived-open ellipsis">${esc(c.title || t('untitled'))}<span class="muted small"> · ${esc(relTime(c.archived_at || c.updated_at))}</span></button><button class="btn sm">${esc(t('org_unarchive'))}</button></div>`);
+      const row = h(`<div class="archived-row"><button class="archived-open ellipsis">${esc(convTitle(c))}<span class="muted small"> · ${esc(relTime(c.archived_at || c.updated_at))}</span></button><button class="btn sm">${esc(t('org_unarchive'))}</button></div>`);
       row.querySelector('.archived-open').onclick = () => { m.close(); emit('navigate', { name: 'chat', params: { id: c.id } }); };
       row.querySelector('.btn').onclick = async () => {
         try { await setArchived(c.id, false); } catch (e) { errorToast(e); return; }

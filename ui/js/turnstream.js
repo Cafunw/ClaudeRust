@@ -9,13 +9,13 @@ import { element, PROTOCOL } from './turnstream_delta.js';
 
 const ELIDED = ['parts', 'artifacts'];
 const last = new Map(); // conversation id -> { seq, turn } of the previous event
+const resyncing = new Set(); // conversations whose full turn was asked for
 const handlers = new Set();
 let listening = false;
 
 /** The full payload of event `p`, or null for a delta that can't be
- *  expanded (this page missed the event it was made from; the next full
- *  turn comes within a second). `state` keeps the previous event of each
- *  conversation. */
+ *  expanded (this page missed the event it was made from: see `receive`).
+ *  `state` keeps the previous event of each conversation. */
 export function expand(p, state = last) {
   if (!p || typeof p !== 'object') return null;
   const conv = p.conversation_id;
@@ -49,6 +49,20 @@ export function expand(p, state = last) {
   return { conversation_id: conv, turn };
 }
 
+/** `expand(p)`; when it can't be expanded, the backend is asked once
+ *  (`ask(conv)`) for a full turn of that conversation, which it otherwise
+ *  sends only when the turn starts or ends. */
+export function receive(p, ask, state = last, waiting = resyncing) {
+  const full = expand(p, state);
+  const conv = p && p.conversation_id;
+  if (full) waiting.delete(conv);
+  else if (conv && !waiting.has(conv)) {
+    waiting.add(conv);
+    ask(conv);
+  }
+  return full;
+}
+
 /** Forget the stream of `conv` (its turn ended). */
 export function forget(conv, state = last) {
   state.delete(conv);
@@ -61,7 +75,7 @@ export function onTurn(fn) {
     listening = true;
     call('turn_stream_protocol', { version: PROTOCOL }).catch(() => {});
     on('turn', (p) => {
-      const full = expand(p);
+      const full = receive(p, (conv) => call('turn_stream_resync', { conversationId: conv }).catch(() => {}));
       if (!full) return;
       // each listener on its own, as when they listened separately
       for (const h of [...handlers]) {

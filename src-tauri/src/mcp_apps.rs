@@ -79,7 +79,8 @@ fn sources(list: &Value, connect: bool) -> String {
 
 /// The page's Content Security Policy for its resource's `_meta.ui.csp`:
 /// inline code and the declared, checked sources; no nested frames, no
-/// plugins, no base URL. It narrows the artifact policy the protocol sends.
+/// plugins, no base URL. It narrows the policy the protocol sends with an
+/// app page (artifacts::protocol_csp).
 pub fn csp(declared: &Value) -> String {
     let res = sources(&declared["resourceDomains"], false);
     let connect = sources(&declared["connectDomains"], true);
@@ -169,7 +170,11 @@ pub async fn mcp_app_open(state: St<'_>, server: String, uri: String) -> AppResu
     }
     let ui = &c["_meta"]["ui"];
     let page = crate::artifacts::insert_at_start(&html, &format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">", csp(&ui["csp"])));
-    let token = crate::commands::serve_artifact(state, crate::artifacts::MCP_APP_KIND.into(), page, false).await?;
+    let token = crate::commands::serve_artifact(state.clone(), crate::artifacts::MCP_APP_KIND.into(), page, false).await?;
+    // under its own policy: the artifacts' would block every source its server declared
+    if let Some(doc) = state.served.lock().get_mut(&token) {
+        doc.0 = crate::artifacts::MCP_APP_SERVED.into();
+    }
     Ok(json!({"token": token, "prefers_border": ui["prefersBorder"]}))
 }
 

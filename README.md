@@ -63,7 +63,7 @@ Resmî Claude Desktop bir Electron uygulamasıdır (yüzlerce MB disk, ayrı bir
   - **Kod** sekmesi, resmî Claude Code CLI'ı üzerinden **Claude üyeliğinizle (Pro/Max/Team)** çalışır: giriş Claude Code'un kendi `/login` akışıyla yapılır, ClaudeRust kimlik bilgilerini hiç görmez.
   - **Sohbet** kısmı için **Anthropic API anahtarı** gerekir ([console.anthropic.com](https://console.anthropic.com/settings/keys)); bu kullanım API kredisinden düşer. Anthropic, üçüncü taraf uygulamaların claude.ai hesabıyla giriş sunmasına izin vermez. Bunu yapmanın tek yolu gizli uç noktaları kullanmak ya da oturum belirteçlerini kopyalamak olurdu. Bu güvenli olmaz ve hesabınızı riske atar. Özel bir proxy/ağ geçidi için temel URL değiştirilebilir.
 - claude.ai hesabına bağlı özellikler yoktur: sohbetlerin bulut senkronu, paylaşım bağlantıları, claude.ai "Connectors" dizini, sesli mod, Research modu, Chrome entegrasyonu. Sohbetler yalnızca bu bilgisayarda (SQLite) tutulur. Eski sohbetler claude.ai dışa aktarımıyla **içe aktarılabilir** (aşağıya bakın).
-- React/Mermaid artifact'leri kütüphaneleri herkese açık CDN'lerden yükler (internet gerekir).
+- React/Mermaid artifact'leri kütüphaneleri herkese açık CDN'lerden yükler (internet gerekir). Bunun dışında artifact'ler ağa çıkamaz: başka sitelere istek, görsel, medya ya da yazı tipi yüklenemez (Google Fonts hariç), Claude Desktop'taki gibi.
 - Sistem istemleri bu proje için yazılmıştır; claude.ai'nin istemlerinin kopyası değildir.
 
 ## Kurulum
@@ -92,11 +92,13 @@ Gereksinimler: Rust (stable), Node.js 18+ (yalnızca Tauri CLI için), Linux'ta 
 ```bash
 npm install          # Tauri CLI
 npx tauri dev        # geliştirme modunda çalıştır
-npx tauri build --config src-tauri/tauri.no-updater.conf.json   # kurulum paketi üret (target/release/bundle)
+npm run build:unsigned   # kurulum paketi üret (target/release/bundle); imzalama anahtarı gerekmez
 cargo test -p clauderust --lib   # birim testleri
 cargo clippy -p clauderust --lib -- -D warnings
 npm run lint         # arayüz için ESLint
 ```
+
+`npm run build` (ya da düz `npx tauri build`) uygulama içi güncelleyicinin indirdiği imzalı güncelleme dosyalarını da üretir; bu yüzden `TAURI_SIGNING_PRIVATE_KEY` (ve parolası) ister. Bu anahtar yalnızca Release iş akışında vardır; geliştirme için `npm run build:unsigned` yeterlidir.
 
 Arayüz dosyaları (`ui/`) ikili dosyaya gömülür: arayüzde değişiklik yaptıktan sonra `cargo build` gerekir (`src-tauri/build.rs` dosyasına `touch` yeterli). Hata ayıklama derlemelerinde `CLAUDERUST_EVAL_DIR` ile uygulama içinde betik çalıştırılabilir; uçtan uca testler bu kancayla, Xvfb altında ve sahte bir API sunucusuyla yapılır.
 
@@ -203,9 +205,9 @@ ClaudeRust is an unofficial client that offers a Claude Desktop–style experien
 
 **Testing:** `cargo test -p clauderust --lib`, `cargo clippy -p clauderust --lib -- -D warnings` and `npm run lint` (ESLint). The UI is embedded in the binary, so UI changes need a `cargo build`. Debug builds can run scripts inside the window (`CLAUDERUST_EVAL_DIR`); the end-to-end checks drive the app that way under Xvfb against a mock API.
 
-**Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs.
+**Other differences:** no cloud sync, chat sharing, voice mode, Research mode or claude.ai connector directory; React/Mermaid artifacts load their libraries from public CDNs, and otherwise reach no network (no requests, images, media or fonts from other sites but Google Fonts), as in Claude Desktop. Settings → Developer → *Browse connectors* lists 48 vendor-hosted remote MCP servers in 11 categories, each checked against its vendor's documentation.
 
-**Install:** download the installer for your platform from the **[latest release](https://github.com/Cafunw/ClaudeRust/releases/latest)**; after that the app finds and installs new versions itself (Settings → About → Updates). Development builds are in the *Build installers* workflow runs (Actions → Artifacts, sign-in required). macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npx tauri build --config src-tauri/tauri.no-updater.conf.json` (without that file, the build also makes signed update files and needs the signing key).
+**Install:** download the installer for your platform from the **[latest release](https://github.com/Cafunw/ClaudeRust/releases/latest)**; after that the app finds and installs new versions itself (Settings → About → Updates). Development builds are in the *Build installers* workflow runs (Actions → Artifacts, sign-in required). macOS builds are unsigned (right-click → Open, or `xattr -cr`). **Build from source:** `npm install && npm run build:unsigned` (installers only, no signing key needed). A plain `npm run build` or `npx tauri build` also makes the signed update files the in-app updater downloads, so it needs `TAURI_SIGNING_PRIVATE_KEY` (and its password); only the Release workflow has them.
 
 ### Architecture
 

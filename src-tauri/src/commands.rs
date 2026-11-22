@@ -58,6 +58,7 @@ pub async fn bootstrap(app: AppHandle, state: St<'_>) -> AppResult<Value> {
         "home": dirs::home_dir().map(|h| h.display().to_string()),
         "window": app.get_webview_window("main").map(|_| "main"),
         "render": crate::display::info(),
+        "features": {"continue_reply": true},
     }))
 }
 
@@ -417,10 +418,19 @@ pub struct SendReq {
     /// Research mode for this message (research.rs; chats on the API engine).
     #[serde(default)]
     pub research: bool,
+    /// Go on with the conversation's last reply, cut off by a Stop, a dropped connection or the CLI going
+    /// away (`engine::continue_reply`): no new message.
+    #[serde(default)]
+    pub continue_reply: bool,
 }
 
 #[tauri::command]
 pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppResult<Value> {
+    if req.continue_reply {
+        let conv_id = req.conversation_id.unwrap_or_default();
+        let id = engine::continue_reply(&app, state.inner(), &conv_id).await?;
+        return Ok(json!({"conversation_id": conv_id, "message_id": id}));
+    }
     send_message_inner(&app, state.inner().clone(), req).await
 }
 
@@ -1464,6 +1474,16 @@ pub async fn reset_onboarding(state: St<'_>) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continue_reply_comes_with_the_send_request() {
+        // what the window sends to continue: the flag with the request's own fields
+        let req: SendReq = serde_json::from_value(json!({"conversation_id": "c", "text": "", "continue_reply": true})).unwrap();
+        assert!(req.continue_reply && req.conversation_id.as_deref() == Some("c") && req.attachment_ids.is_empty());
+        let req: SendReq = serde_json::from_value(json!({"conversation_id": "c", "text": "hi", "research": true})).unwrap();
+        assert!(!req.continue_reply && req.text == "hi" && req.research);
+    }
+
     #[test]
     fn project_id_null_vs_missing() {
         let a: ConvUpdate = serde_json::from_value(json!({"id": "x"})).unwrap();
@@ -2423,6 +2443,7 @@ pub async fn run_routine(app: &AppHandle, st: &Arc<AppState>, r: &crate::routine
         parent_id: None,
         edit: false,
         research: false,
+        continue_reply: false,
     };
     let v = send_message_inner(app, st.clone(), req).await?;
     let id = v["conversation_id"].as_str().unwrap_or_default().to_string();
@@ -2527,7 +2548,7 @@ pub async fn watch_start(app: AppHandle, state: St<'_>, conversation_id: String,
         let text = watch_fix_prompt(&summary);
         let (st2, app2, conv2) = (st_fix.clone(), app_fix.clone(), conv_fix.clone());
         tauri::async_runtime::spawn(async move {
-            let req = SendReq { conversation_id: Some(conv2), new_conversation: None, text, attachment_ids: vec![], parent_id: None, edit: false, research: false };
+            let req = SendReq { conversation_id: Some(conv2), new_conversation: None, text, attachment_ids: vec![], parent_id: None, edit: false, research: false, continue_reply: false };
             let _ = send_message_inner(&app2, st2, req).await;
         });
     });

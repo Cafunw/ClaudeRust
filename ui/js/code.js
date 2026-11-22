@@ -5,7 +5,7 @@ import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, on, saveLocal, loadLocal, newChatModel } from './store.js';
-import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog } from './util.js';
+import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog, convTitle, snippetHtml } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -224,8 +224,8 @@ export async function renderChats(view) {
     }
     list.innerHTML = items.length ? '' : `<div class="empty-state"><div class="big">${q ? t('no_results') : t('no_chats')}</div></div>`;
     for (const c of items) {
-      const snip = c.snippet ? `<div class="d">${esc(c.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>')}</div>` : '';
-      const row = h(`<button class="list-item"><input type="checkbox" class="${selecting ? '' : 'hidden'}" ${selected.has(c.id) ? 'checked' : ''}><div class="grow"><div class="t ellipsis">${esc(c.title || t('untitled'))}</div>${snip}</div><span class="when">${relTime(c.updated_at)}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
+      const snip = c.snippet ? `<div class="d">${snippetHtml(c.snippet)}</div>` : '';
+      const row = h(`<button class="list-item"><input type="checkbox" class="${selecting ? '' : 'hidden'}" ${selected.has(c.id) ? 'checked' : ''}><div class="grow"><div class="t ellipsis">${esc(convTitle(c))}</div>${snip}</div><span class="when">${relTime(c.updated_at)}</span><span class="icon-btn sm more">${icon('more', 16)}</span></button>`);
       row.addEventListener('click', (e) => {
         if (selecting) {
           e.preventDefault();

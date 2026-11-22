@@ -746,6 +746,13 @@ const en = {
   errk_section_name_empty: 'Give the section a name.', errk_section_name_long: 'Section names are at most 80 characters.',
   errk_incognito_no_export: 'An incognito chat isn’t saved, so it can’t be exported or printed.',
   fast_unavailable: 'Fast mode isn’t available on this account right now, so this reply runs at standard speed.',
+  // front end (round 6): pasted text, token counts, the MCP config example, continuing a cut-short reply
+  pasted_line_one: 'Pasted (1 line)', pasted_lines: 'Pasted ({n} lines)',
+  usage_in_out: '{i} in · {o} out', usage_cache_rw: 'cache: {r} read · {w} write', example: 'Example',
+  resume_reply_t: 'Go on from where this reply stopped',
+  // connector directory categories (round 6)
+  cd_cat_cloud: 'Cloud and hosting', cd_cat_search: 'Web search and data', cd_cat_crm: 'Sales and marketing', cd_cat_analytics: 'Analytics and monitoring',
+  cd_all: 'All', cd_categories: 'Categories',
 };
 
 const tr = {
@@ -1494,6 +1501,13 @@ const tr = {
   errk_section_name_empty: 'Bölüme bir ad verin.', errk_section_name_long: 'Bölüm adları en fazla 80 karakter olabilir.',
   errk_incognito_no_export: 'Gizli sohbet kaydedilmez, bu yüzden dışa aktarılamaz ya da yazdırılamaz.',
   fast_unavailable: 'Hızlı mod şu anda bu hesapta kullanılamıyor; bu yanıt standart hızda çalışıyor.',
+  // ön yüz (tur 6): yapıştırılan metin, token sayıları, MCP yapılandırma örneği, yarım kalan yanıtı sürdürme
+  pasted_line_one: 'Yapıştırıldı (1 satır)', pasted_lines: 'Yapıştırıldı ({n} satır)',
+  usage_in_out: '{i} girdi · {o} çıktı', usage_cache_rw: 'önbellek: {r} okuma · {w} yazma', example: 'Örnek',
+  resume_reply_t: 'Bu yanıtı kaldığı yerden sürdür',
+  // bağlayıcı dizini kategorileri (tur 6)
+  cd_cat_cloud: 'Bulut ve barındırma', cd_cat_search: 'Web araması ve veri', cd_cat_crm: 'Satış ve pazarlama', cd_cat_analytics: 'Analitik ve izleme',
+  cd_all: 'Tümü', cd_categories: 'Kategoriler',
 };
 
 const dicts = { en, tr };

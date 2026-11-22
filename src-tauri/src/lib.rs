@@ -68,6 +68,7 @@ pub mod usage;
 pub mod util;
 pub mod view;
 pub mod watch;
+pub mod window_theme;
 pub mod worktree;
 
 use state::AppState;
@@ -204,8 +205,8 @@ fn artifact_protocol(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> ta
     match found {
         Some((mime, body)) => tauri::http::Response::builder()
             .status(200)
+            .header("Content-Security-Policy", artifacts::protocol_csp(&mime))
             .header("Content-Type", mime)
-            .header("Content-Security-Policy", artifacts::ARTIFACT_CSP)
             .header("Cache-Control", "no-store")
             .header("X-Content-Type-Options", "nosniff")
             .body(body)
@@ -379,9 +380,17 @@ pub fn run() {
                     let _ = w.set_zoom(s.zoom);
                 }
                 display::ensure_on_screen(&w);
-                let _ = w.show();
-                let _ = w.set_focus();
-                display::ensure_on_screen_soon(&w);
+                let system_dark = w.theme().is_ok_and(|t| t == tauri::Theme::Dark);
+                let _ = w.set_background_color(Some(window_theme::page_background(&s.theme, system_dark)));
+                if display::automation() {
+                    // a test copy must not appear on the person's screen or take focus; a window outside every monitor still renders
+                    let _ = w.set_position(tauri::PhysicalPosition::new(-12000, -12000));
+                    let _ = w.show();
+                } else {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                    display::ensure_on_screen_soon(&w);
+                }
             }
             Ok(())
         })
@@ -608,6 +617,7 @@ pub fn run() {
             commands::quick_entry_hide,
             commands::code_info,
             turnstream::turn_stream_protocol,
+            turnstream::turn_stream_resync,
             deeplink::deep_link_take,
             commands::usage_stats,
             commands::reset_onboarding,

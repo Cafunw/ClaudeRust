@@ -4,7 +4,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit } from './store.js';
-import { $, esc, h, relTime } from './util.js';
+import { $, esc, h, relTime, convTitle, snippetHtml } from './util.js';
 import * as workspace from './workspace.js';
 import { allCommands, handle as runSlash } from './slash.js';
 import { incognitoSupported, newIncognitoChat } from './home.js';
@@ -72,8 +72,8 @@ export function openSearch() {
     // archived chats are out of the sidebar, not out of reach
     const hits = await call('search_conversations', { query: q, includeArchived: true }).catch(() => []);
     items = hits.map((x) => ({
-      title: x.title || t('untitled'),
-      snippet: x.snippet ? esc(x.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') : '',
+      title: convTitle(x),
+      snippet: snippetHtml(x.snippet),
       meta: relTime(x.updated_at),
       icon: x.kind === 'code' ? 'terminal' : 'chat',
       cat: x.kind === 'code' ? 'code' : 'chat',
@@ -149,7 +149,7 @@ async function actionItems(ctx) {
     { title: t('artifacts'), icon: 'layers', run: () => emit('navigate', { name: 'artifacts' }) },
     { title: t('settings'), icon: 'settings', meta: 'Ctrl+,', run: () => emit('open-settings') },
     { title: `${t('settings')}: ${t('pal_appearance')}`, icon: 'sun', run: () => emit('open-settings', 'appearance') },
-    { title: `${t('settings')}: Developer / MCP`, icon: 'plug', run: () => emit('open-settings', 'developer') },
+    { title: `${t('settings')}: ${t('s_developer')} / MCP`, icon: 'plug', run: () => emit('open-settings', 'developer') },
     { title: t('pal_import'), icon: 'download', run: () => emit('open-settings', 'import') },
     { title: t('pal_routines'), icon: 'clock', run: async () => (await import('./routines.js')).openRoutines() },
     { title: t('pal_usage'), icon: 'zap', run: async () => (await import('./usage_ui.js')).openUsage() },

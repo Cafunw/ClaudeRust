@@ -583,7 +583,7 @@ function editConfig(status, redraw) {
 }`;
   const body = h('<div></div>');
   if (status.config_problem) body.appendChild(h(`<div class="notice error" style="margin:0 0 10px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
-  body.append(ta, h(`<details class="help"><summary>Example</summary><pre class="mono" style="white-space:pre-wrap">${esc(example)}</pre></details>`));
+  body.append(ta, h(`<details class="help"><summary>${esc(t('example'))}</summary><pre class="mono" style="white-space:pre-wrap">${esc(example)}</pre></details>`));
   const saveB = button(t('save_restart'), 'primary', async () => {
     try { const r = await call('mcp_save_config', { config: ta.value }); toast(t('config_saved')); m.close(); redraw(r); } catch (e) { errorToast(e); }
   });

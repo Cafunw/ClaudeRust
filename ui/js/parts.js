@@ -397,7 +397,7 @@ function renderNotice(el, p, ctx) {
       html = `${icon('info', 16)}<div class="grow"><div>${esc(t('max_tokens'))}</div><div class="actions"></div></div>`;
       break;
     case 'stopped':
-      html = `${icon('stop', 14)}<div class="grow muted">${esc(t('stopped'))}</div>`;
+      html = `${icon('stop', 14)}<div class="grow muted">${esc(t('stopped'))}</div><div class="actions"></div>`;
       el.style.background = 'transparent';
       el.style.padding = '2px 0';
       break;
@@ -432,12 +432,25 @@ function renderNotice(el, p, ctx) {
         actions.appendChild(b);
       }
     }
+    // an answer cut short goes on from where it stopped (Retry starts it over)
+    if ((p.code === 'error' || p.code === 'stopped') && ctx.onResume) {
+      const b = h(`<button class="btn sm resume" title="${esc(t('resume_reply_t'))}">${icon('play', 14)} ${esc(t('continue'))}</button>`);
+      b.onclick = async () => { b.disabled = true; await ctx.onResume(); b.disabled = false; };
+      actions.appendChild(b);
+    }
     if ((p.code === 'max_tokens' || p.code === 'budget') && ctx.onContinue) {
       const b = h(`<button class="btn sm">${t('continue')}</button>`);
       b.onclick = () => ctx.onContinue();
       actions.appendChild(b);
     }
   }
+}
+
+/** Whether an answer was cut short (stopped, or an error) in its text: not in
+ *  a tool call, whose result would be missing (the backend refuses those). */
+export function resumable(parts) {
+  const body = parts.filter((p) => p.kind !== 'notice');
+  return body.length > 0 && body[body.length - 1].kind === 'text' && parts.some((p) => p.kind === 'notice' && (p.code === 'error' || p.code === 'stopped'));
 }
 
 const OUT_ERRORS = new Set(['bad_id', 'bad_name', 'too_large', 'too_many', 'not_downloadable', 'failed']);

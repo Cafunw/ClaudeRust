@@ -341,6 +341,7 @@ impl Chat {
             parent_id: edit_parent.map(Into::into),
             edit: edit_parent.is_some(),
             research,
+            continue_reply: false,
         };
         let r = commands::send_message_inner(self.app.handle(), self.st.clone(), req).await.map_err(|e| e.to_string())?;
         until("the turn to end", || (self.ended.load(Ordering::SeqCst) > before && !self.st.runs.lock().contains_key(&self.conv)).then_some(())).await;

@@ -1,6 +1,7 @@
 {
   "name": "clauderust",
   "private": true,
+  "type": "module",
   "version": "0.1.5",
   "description": "Tooling for building ClaudeRust (the app itself is Rust + static UI; no JS build step).",
   "license": "MIT",
@@ -8,6 +9,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:unsigned": "tauri build --config src-tauri/tauri.no-updater.conf.json",
     "lint": "eslint ui/js",
     "test:ui": "node --test ui/test/*.test.mjs",
     "test:e2e": "node --test --test-concurrency=1 ui/e2e/*.test.mjs",

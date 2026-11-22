@@ -178,5 +178,401 @@
       "en": "Questions about public GitHub repositories, answered from their generated wikis.",
       "tr": "Herkese açık GitHub depoları hakkındaki sorular, oluşturulmuş vikilerinden yanıtlanır."
     }
+  },
+  {
+    "name": "GitLab",
+    "url": "https://gitlab.com/api/v4/mcp",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "gitlab.com",
+    "docs_url": "https://docs.gitlab.com/user/gitlab_duo/model_context_protocol/mcp_server/",
+    "description": {
+      "en": "Projects, issues, merge requests and pipelines on GitLab.com. Signs in with GitLab, or takes a fine-grained access token.",
+      "tr": "GitLab.com'daki projeler, issue'lar, merge request'ler ve pipeline'lar. GitLab ile oturum açar ya da ayrıntılı erişim jetonu alır."
+    }
+  },
+  {
+    "name": "Buildkite",
+    "url": "https://mcp.buildkite.com/mcp",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.buildkite.com",
+    "docs_url": "https://buildkite.com/docs/apis/mcp-server/remote/configuring-ai-tools",
+    "description": {
+      "en": "Pipelines, builds, jobs and their logs in your Buildkite organization.",
+      "tr": "Buildkite kuruluşunuzdaki pipeline'lar, derlemeler, işler ve günlükleri."
+    }
+  },
+  {
+    "name": "Postman",
+    "url": "https://mcp.postman.com/minimal",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.postman.com",
+    "docs_url": "https://learning.postman.com/docs/reference/postman-api/postman-mcp-server/postman-mcp-remote-server/",
+    "description": {
+      "en": "Workspaces, collections, environments and APIs in Postman (US-hosted; the minimal tool set).",
+      "tr": "Postman'daki çalışma alanları, koleksiyonlar, ortamlar ve API'ler (ABD'de barındırılır; en küçük araç takımı)."
+    }
+  },
+  {
+    "name": "Jam",
+    "url": "https://mcp.jam.dev/mcp",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.jam.dev",
+    "docs_url": "https://jam.dev/docs/debug-a-jam/mcp",
+    "description": {
+      "en": "Bug reports recorded with Jam: console logs, network requests and the steps to reproduce.",
+      "tr": "Jam ile kaydedilen hata raporları: konsol günlükleri, ağ istekleri ve yeniden üretme adımları."
+    }
+  },
+  {
+    "name": "Hugging Face",
+    "url": "https://huggingface.co/mcp",
+    "auth": "none",
+    "category": "dev",
+    "domain": "huggingface.co",
+    "docs_url": "https://huggingface.co/docs/hub/hf-mcp-server",
+    "description": {
+      "en": "Search models, datasets, Spaces, papers and the Hugging Face docs. Works without sign-in for public data; a token adds your own.",
+      "tr": "Modelleri, veri kümelerini, Space'leri, makaleleri ve Hugging Face belgelerini arar. Herkese açık veriler için oturum gerekmez; jeton sizinkileri de ekler."
+    }
+  },
+  {
+    "name": "Vercel",
+    "url": "https://mcp.vercel.com",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.vercel.com",
+    "docs_url": "https://vercel.com/docs/agent-resources/vercel-mcp",
+    "description": {
+      "en": "Projects, deployments and their logs, Web Analytics and the Vercel docs. Can deploy code.",
+      "tr": "Projeler, dağıtımlar ve günlükleri, Web Analytics ve Vercel belgeleri. Kod dağıtabilir."
+    }
+  },
+  {
+    "name": "Netlify",
+    "url": "https://mcp.netlify.com/mcp",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.netlify.com",
+    "docs_url": "https://docs.netlify.com/build/build-with-ai/netlify-mcp-server/",
+    "description": {
+      "en": "Create, configure and deploy Netlify sites, with their forms and environment variables.",
+      "tr": "Netlify sitelerini, formları ve ortam değişkenleriyle birlikte oluşturur, yapılandırır ve dağıtır."
+    }
+  },
+  {
+    "name": "Cloudflare",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.cloudflare.com",
+    "docs_url": "https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/",
+    "description": {
+      "en": "The Cloudflare API for your account: Workers, DNS, storage and more. Can change your configuration.",
+      "tr": "Hesabınız için Cloudflare API'si: Workers, DNS, depolama ve daha fazlası. Yapılandırmanızı değiştirebilir."
+    }
+  },
+  {
+    "name": "Render",
+    "url": "https://mcp.render.com/mcp",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.render.com",
+    "docs_url": "https://render.com/docs/mcp-server",
+    "description": {
+      "en": "Services, deploys, logs, metrics and Postgres databases on Render.",
+      "tr": "Render'daki hizmetler, dağıtımlar, günlükler, ölçümler ve Postgres veritabanları."
+    }
+  },
+  {
+    "name": "monday.com",
+    "url": "https://mcp.monday.com/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.monday.com",
+    "docs_url": "https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp",
+    "description": {
+      "en": "Boards, items and updates in monday.com. Signs in with monday.com, or takes a personal API token.",
+      "tr": "monday.com'daki panolar, öğeler ve güncellemeler. monday.com ile oturum açar ya da kişisel API jetonu alır."
+    }
+  },
+  {
+    "name": "ClickUp",
+    "url": "https://mcp.clickup.com/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.clickup.com",
+    "docs_url": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server",
+    "description": {
+      "en": "Tasks, lists, docs and time tracking in your ClickUp workspace.",
+      "tr": "ClickUp çalışma alanınızdaki görevler, listeler, belgeler ve zaman takibi."
+    }
+  },
+  {
+    "name": "Todoist",
+    "url": "https://ai.todoist.net/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "ai.todoist.net",
+    "docs_url": "https://developer.todoist.com/",
+    "description": {
+      "en": "Your Todoist tasks, projects and labels: find, add and complete tasks.",
+      "tr": "Todoist görevleriniz, projeleriniz ve etiketleriniz: görev bulur, ekler ve tamamlar."
+    }
+  },
+  {
+    "name": "Microsoft Learn",
+    "url": "https://learn.microsoft.com/api/mcp",
+    "auth": "none",
+    "category": "docs",
+    "domain": "learn.microsoft.com",
+    "docs_url": "https://learn.microsoft.com/en-us/training/support/mcp",
+    "description": {
+      "en": "Search Microsoft's official documentation and code samples (Azure, .NET, Windows, Microsoft 365).",
+      "tr": "Microsoft'un resmi belgelerinde ve kod örneklerinde arar (Azure, .NET, Windows, Microsoft 365)."
+    }
+  },
+  {
+    "name": "AWS Knowledge",
+    "url": "https://knowledge-mcp.global.api.aws",
+    "auth": "none",
+    "category": "docs",
+    "domain": "knowledge-mcp.global.api.aws",
+    "docs_url": "https://awslabs.github.io/mcp/servers/aws-knowledge-mcp-server",
+    "description": {
+      "en": "AWS documentation, API references, What's New posts and regional availability. Rate limited.",
+      "tr": "AWS belgeleri, API başvuruları, What's New duyuruları ve bölgesel kullanılabilirlik. İstek sınırı vardır."
+    }
+  },
+  {
+    "name": "Fireflies",
+    "url": "https://api.fireflies.ai/mcp",
+    "auth": "oauth",
+    "category": "docs",
+    "domain": "api.fireflies.ai",
+    "docs_url": "https://docs.fireflies.ai/getting-started/mcp-configuration",
+    "description": {
+      "en": "Meeting transcripts, summaries and action items recorded by Fireflies.ai.",
+      "tr": "Fireflies.ai'nin kaydettiği toplantı dökümleri, özetler ve yapılacaklar."
+    }
+  },
+  {
+    "name": "Mercado Pago",
+    "url": "https://mcp.mercadopago.com/mcp",
+    "auth": "oauth",
+    "category": "payments",
+    "domain": "mcp.mercadopago.com",
+    "docs_url": "https://www.mercadopago.com.ar/developers/en/docs/mcp-server/mcp-server-connection",
+    "description": {
+      "en": "Mercado Pago's developer docs and your integration's settings and quality checks.",
+      "tr": "Mercado Pago geliştirici belgeleri ile entegrasyonunuzun ayarları ve kalite denetimleri."
+    }
+  },
+  {
+    "name": "Attio",
+    "url": "https://mcp.attio.com/mcp",
+    "auth": "oauth",
+    "category": "crm",
+    "domain": "mcp.attio.com",
+    "docs_url": "https://docs.attio.com/mcp/overview",
+    "description": {
+      "en": "Companies, people, deals, notes and tasks in your Attio CRM.",
+      "tr": "Attio CRM'inizdeki şirketler, kişiler, fırsatlar, notlar ve görevler."
+    }
+  },
+  {
+    "name": "Close",
+    "url": "https://mcp.close.com/mcp",
+    "auth": "oauth",
+    "category": "crm",
+    "domain": "mcp.close.com",
+    "docs_url": "https://help.close.com/docs/mcp-server",
+    "description": {
+      "en": "Leads, contacts, opportunities and activities in Close CRM. Can change your data.",
+      "tr": "Close CRM'deki potansiyel müşteriler, kişiler, fırsatlar ve etkinlikler. Verilerinizi değiştirebilir."
+    }
+  },
+  {
+    "name": "Klaviyo",
+    "url": "https://mcp.klaviyo.com/mcp",
+    "auth": "oauth",
+    "category": "crm",
+    "domain": "mcp.klaviyo.com",
+    "docs_url": "https://developers.klaviyo.com/en/docs/connect_to_the_klaviyo_mcp_server",
+    "description": {
+      "en": "Profiles, lists, campaigns, flows and their performance in Klaviyo.",
+      "tr": "Klaviyo'daki profiller, listeler, kampanyalar, akışlar ve performansları."
+    }
+  },
+  {
+    "name": "Miro",
+    "url": "https://mcp.miro.com/",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.miro.com",
+    "docs_url": "https://developers.miro.com/docs/mcp-intro",
+    "description": {
+      "en": "Read and create content on Miro boards: diagrams, sticky notes, documents and tables.",
+      "tr": "Miro panolarında içerik okur ve oluşturur: diyagramlar, yapışkan notlar, belgeler ve tablolar."
+    }
+  },
+  {
+    "name": "Webflow",
+    "url": "https://mcp.webflow.com/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.webflow.com",
+    "docs_url": "https://developers.webflow.com/mcp/reference/getting-started",
+    "description": {
+      "en": "Webflow sites, pages, CMS collections and the Designer, one workspace per sign-in (EU workspaces use their own server).",
+      "tr": "Webflow siteleri, sayfaları, CMS koleksiyonları ve Designer; her oturum açma tek çalışma alanı içindir (AB çalışma alanlarının kendi sunucusu vardır)."
+    }
+  },
+  {
+    "name": "Wix",
+    "url": "https://mcp.wix.com/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.wix.com",
+    "docs_url": "https://dev.wix.com/docs/sdk/articles/use-the-wix-mcp/about-the-wix-mcp",
+    "description": {
+      "en": "Build and manage Wix sites and their business data (stores, bookings, CMS), and search the Wix docs.",
+      "tr": "Wix sitelerini ve iş verilerini (mağaza, rezervasyon, CMS) oluşturur ve yönetir, Wix belgelerinde arar."
+    }
+  },
+  {
+    "name": "Airtable",
+    "url": "https://mcp.airtable.com/mcp",
+    "auth": "oauth",
+    "category": "data",
+    "domain": "mcp.airtable.com",
+    "docs_url": "https://support.airtable.com/docs/using-the-airtable-mcp-server",
+    "description": {
+      "en": "Bases, tables and records in Airtable: search, create and update.",
+      "tr": "Airtable'daki tabanlar, tablolar ve kayıtlar: arar, oluşturur ve günceller."
+    }
+  },
+  {
+    "name": "Prisma",
+    "url": "https://mcp.prisma.io/mcp",
+    "auth": "oauth",
+    "category": "data",
+    "domain": "mcp.prisma.io",
+    "docs_url": "https://www.prisma.io/docs/postgres/integrations/mcp-server",
+    "description": {
+      "en": "Prisma Postgres databases, backups and connection strings in your Prisma workspace.",
+      "tr": "Prisma çalışma alanınızdaki Prisma Postgres veritabanları, yedekler ve bağlantı dizeleri."
+    }
+  },
+  {
+    "name": "PlanetScale",
+    "url": "https://mcp.pscale.dev/mcp/planetscale",
+    "auth": "oauth",
+    "category": "data",
+    "domain": "mcp.pscale.dev",
+    "docs_url": "https://planetscale.com/docs/connect/mcp",
+    "description": {
+      "en": "PlanetScale databases, branches, schema and query insights. Can run SQL.",
+      "tr": "PlanetScale veritabanları, dalları, şeması ve sorgu içgörüleri. SQL çalıştırabilir."
+    }
+  },
+  {
+    "name": "PostHog",
+    "url": "https://mcp.posthog.com/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.posthog.com",
+    "docs_url": "https://posthog.com/docs/model-context-protocol",
+    "description": {
+      "en": "Product analytics, insights, feature flags, experiments and error tracking in PostHog (US or EU, by your account).",
+      "tr": "PostHog'daki ürün analitiği, içgörüler, özellik bayrakları, deneyler ve hata takibi (hesabınıza göre ABD ya da AB)."
+    }
+  },
+  {
+    "name": "Amplitude",
+    "url": "https://mcp.amplitude.com/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.amplitude.com",
+    "docs_url": "https://amplitude.com/docs/analytics/amplitude-mcp",
+    "description": {
+      "en": "Charts, dashboards, cohorts and experiments in Amplitude (US data center; EU has its own server).",
+      "tr": "Amplitude'daki grafikler, panolar, kohortlar ve deneyler (ABD veri merkezi; AB'nin kendi sunucusu vardır)."
+    }
+  },
+  {
+    "name": "Mixpanel",
+    "url": "https://mcp.mixpanel.com/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.mixpanel.com",
+    "docs_url": "https://docs.mixpanel.com/docs/mcp",
+    "description": {
+      "en": "Events, reports and funnels in Mixpanel (US residency; EU and India have their own servers).",
+      "tr": "Mixpanel'deki olaylar, raporlar ve dönüşüm hunileri (ABD yerleşimi; AB ve Hindistan'ın kendi sunucuları vardır)."
+    }
+  },
+  {
+    "name": "Datadog",
+    "url": "https://mcp.datadoghq.com/v1/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.datadoghq.com",
+    "docs_url": "https://docs.datadoghq.com/mcp_server/setup/",
+    "description": {
+      "en": "Logs, metrics, traces, monitors and incidents in Datadog (the US1 site), within your own permissions.",
+      "tr": "Datadog'daki günlükler, ölçümler, izler, monitörler ve olaylar (US1 sitesi), kendi izinleriniz dahilinde."
+    }
+  },
+  {
+    "name": "Honeycomb",
+    "url": "https://mcp.honeycomb.io/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.honeycomb.io",
+    "docs_url": "https://docs.honeycomb.io/integrations/mcp/configuration-guide",
+    "description": {
+      "en": "Query traces and events, boards and SLOs in Honeycomb (US; EU teams use their own server).",
+      "tr": "Honeycomb'da izleri ve olayları, panoları ve SLO'ları sorgular (ABD; AB ekipleri kendi sunucusunu kullanır)."
+    }
+  },
+  {
+    "name": "PagerDuty",
+    "url": "https://mcp.pagerduty.com/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.pagerduty.com",
+    "docs_url": "https://docs.pagerduty.com/developer/mcp-tooling-remote-server",
+    "description": {
+      "en": "Incidents, services, schedules and on-call in PagerDuty. Signs in, or takes a REST API token.",
+      "tr": "PagerDuty'deki olaylar, hizmetler, nöbet çizelgeleri ve nöbetçiler. Oturum açar ya da REST API jetonu alır."
+    }
+  },
+  {
+    "name": "Exa",
+    "url": "https://mcp.exa.ai/mcp",
+    "auth": "none",
+    "category": "search",
+    "domain": "mcp.exa.ai",
+    "docs_url": "https://docs.exa.ai/reference/exa-mcp",
+    "description": {
+      "en": "Web search and page fetching for current information. Free at a low rate limit; an API key (a header) raises it.",
+      "tr": "Güncel bilgi için web araması ve sayfa getirme. Düşük istek sınırıyla ücretsiz; API anahtarı (başlıkta) sınırı yükseltir."
+    }
+  },
+  {
+    "name": "Apify",
+    "url": "https://mcp.apify.com",
+    "auth": "oauth",
+    "category": "search",
+    "domain": "mcp.apify.com",
+    "docs_url": "https://docs.apify.com/platform/integrations/mcp",
+    "description": {
+      "en": "Run Apify Actors to scrape websites and collect web data. Runs can cost credits in your Apify account.",
+      "tr": "Web sitelerini kazımak ve web verisi toplamak için Apify Actor'larını çalıştırır. Çalıştırmalar Apify hesabınızda kredi harcayabilir."
+    }
   }
 ]

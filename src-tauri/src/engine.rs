@@ -30,6 +30,11 @@ const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// `Db::mark_interrupted`).
 const SAVE_EVERY: Duration = Duration::from_secs(2);
 
+/// How often at most a reply that is streaming in is rendered and sent to
+/// the UI: about what the eye follows, and each event costs the page a parse
+/// of the reply's HTML.
+pub const EMIT_EVERY: Duration = Duration::from_millis(100);
+
 /// Is it time to save the streaming reply again: `SAVE_EVERY` since the
 /// last save, or a block finished (the next one started) since. `last` is
 /// the time of that save and the number of blocks then.
@@ -636,7 +641,7 @@ struct TurnRenderer {
     mcp_names: HashMap<String, (String, String)>,
     math: bool,
     /// `prefix` rendered once: the turn is rendered again on every update of
-    /// the reply (every 45 ms while it streams) and only the reply changes.
+    /// the reply (every `EMIT_EVERY` while it streams) and only the reply changes.
     done: parking_lot::Mutex<Option<render::TurnPrefix>>,
 }
 
@@ -693,9 +698,11 @@ impl TurnRenderer {
 }
 
 /// One update of the reply streaming in `cur`: its content so far goes to
-/// `st.live` (for a view opened meanwhile) and the turn to `emit`.
-fn live_tick(st: &AppState, conv_id: &str, renderer: &TurnRenderer, cur: &mut Message, base: &[Value], acc: &Accumulator, emit: impl FnOnce(&Value)) {
-    let (c, streaming) = live_content(base, acc);
+/// `st.live` (for a view opened meanwhile) and the turn to `emit`. `cont`:
+/// `acc` continues `base`, a reply that was cut off (`join_blocks`).
+#[allow(clippy::too_many_arguments)]
+fn live_tick(st: &AppState, conv_id: &str, renderer: &TurnRenderer, cur: &mut Message, base: &[Value], acc: &Accumulator, cont: bool, emit: impl FnOnce(&Value)) {
+    let (c, streaming) = live_content(base, acc, cont);
     cur.content = c;
     let live_tools = st.live.lock().get(conv_id).map(|l| l.live_tools.clone()).unwrap_or_default();
     let t = renderer.render(cur, &live_tools, &streaming);
@@ -713,8 +720,8 @@ fn live_tick(st: &AppState, conv_id: &str, renderer: &TurnRenderer, cur: &mut Me
     renderer.give_back(t);
 }
 
-fn live_content(base: &[Value], acc: &Accumulator) -> (Value, HashSet<String>) {
-    let mut blocks: Vec<Value> = base.to_vec();
+fn live_content(base: &[Value], acc: &Accumulator, cont: bool) -> (Value, HashSet<String>) {
+    let mut blocks: Vec<Value> = vec![];
     let mut streaming = HashSet::new();
     for (idx, b) in acc.blocks.iter().enumerate() {
         if b.is_null() {
@@ -729,7 +736,108 @@ fn live_content(base: &[Value], acc: &Accumulator) -> (Value, HashSet<String>) {
         }
         blocks.push(b);
     }
-    (Value::Array(blocks), streaming)
+    (Value::Array(join_blocks(base, blocks, cont, true)), streaming)
+}
+
+// ------------------------------------------------------- continuing a reply
+
+/// The user turn that asks for the rest of a reply that was cut off. It
+/// quotes nothing: the reply is the assistant turn before it (the newest
+/// models refuse an assistant turn to go on from, a prefill).
+pub const CONTINUE_PROMPT: &str = "Your previous reply was cut off before it was finished. Continue it from exactly where it stopped, starting with the characters that come next, as if nothing had interrupted you. Don't repeat what is already written, don't start over and don't mention the interruption.";
+
+/// Whether the reply `m` can be continued: it was cut off (stopped, broken
+/// off by an error, at the output limit) with some text.
+pub fn continuable(m: &Message) -> bool {
+    let cut = m.meta["stopped"] == true || !m.meta["error"].is_null() || m.meta["stop_reason"] == "max_tokens";
+    let blocks = m.content.as_array().map(Vec::as_slice).unwrap_or_default();
+    m.role == "assistant" && cut && blocks.iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|t| !t.trim().is_empty()))
+}
+
+/// Whether the API engine can go on with the reply `m`: not after a tool call
+/// (its result would be missing), not with a research report (its findings
+/// were only in its request).
+fn api_continues(m: &Message) -> bool {
+    m.meta["research"].is_null() && !m.content.as_array().into_iter().flatten().any(|b| b["type"] == "tool_use")
+}
+
+/// How much of the end of a reply a continuation is compared with.
+const REPEAT_WINDOW: usize = 300;
+
+/// `new` without what it repeats of the end of `old` (a continuation that
+/// starts again a word or a few back), or None while it may still turn out
+/// to be such a repeat: `more` of it is coming and all of it so far is in the
+/// end of `old`. A repeat is at least 2 bytes and starts a word.
+fn after_repeat<'a>(old: &str, new: &'a str, more: bool) -> Option<&'a str> {
+    let mut start = old.len().saturating_sub(REPEAT_WINDOW);
+    while !old.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &old[start..];
+    let word_at = |i: usize| tail[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+    if more && new.len() < tail.len() && tail.match_indices(new).any(|(i, _)| word_at(i)) {
+        return None;
+    }
+    let repeat = (2..=new.len().min(tail.len()))
+        .rev()
+        .find(|&k| new.is_char_boundary(k) && tail.ends_with(&new[..k]) && word_at(tail.len() - k));
+    Some(repeat.map_or(new, |k| &new[k..]))
+}
+
+/// A reply's blocks: `base`, then `new`, what streamed after it. When `new`
+/// continues `base`, a reply that was cut off (`cont`), its thinking is left
+/// out and its text goes on in `base`'s last text block, less what it
+/// repeats; while it streams (`more`), text that may still turn out to be a
+/// repeat waits. Text with citations stays a block of its own (its citations
+/// follow its whole text).
+fn join_blocks(base: &[Value], new: Vec<Value>, cont: bool, more: bool) -> Vec<Value> {
+    let mut out = base.to_vec();
+    if !cont {
+        out.extend(new);
+        return out;
+    }
+    let mut new: Vec<Value> = new.into_iter().filter(|b| !is_thinking(b)).collect();
+    let waits = more && new.len() == 1;
+    let last = out.last_mut().filter(|b| b["type"] == "text");
+    if let (Some(last), Some(first)) = (last, new.first_mut().filter(|b| b["type"] == "text")) {
+        let old = last["text"].as_str().unwrap_or("");
+        match after_repeat(old, first["text"].as_str().unwrap_or(""), waits) {
+            None => {
+                new.remove(0);
+            }
+            Some(rest) if last.get("citations").is_none() && first.get("citations").is_none() => {
+                last["text"] = Value::String(format!("{old}{rest}"));
+                new.remove(0);
+            }
+            Some(rest) => first["text"] = Value::String(rest.to_string()),
+        }
+    }
+    out.extend(new);
+    out
+}
+
+/// Continue the conversation's reply that was cut off (`continuable`, the
+/// branch's last message): the model is asked to go on from where it stopped
+/// and what it writes is added to the same message. Returns its id.
+pub async fn continue_reply<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str) -> AppResult<String> {
+    let slot = RunSlot::reserve(st, conv_id, "Claude is still responding. Stop the response or wait for it to finish.")?;
+    let conv = st.db.conv_get(conv_id)?;
+    let reply = conv.current_leaf.as_deref().map(|id| st.db.msg_get(id)).transpose()?;
+    let Some(reply) = reply.filter(continuable) else {
+        return Err(AppError::msg("Only a reply that was cut off can be continued."));
+    };
+    let id = reply.id.clone();
+    // the account engine goes on with a turn started from the reply itself (claudecode::run)
+    if crate::claudecode::uses_cli(st, &conv).await {
+        spawn_run(app, slot, id.clone(), None);
+        return Ok(id);
+    }
+    let parent = reply.parent_id.clone().filter(|_| api_continues(&reply) && !conv.model.starts_with(crate::oai::PREFIX));
+    let Some(parent) = parent else {
+        return Err(AppError::msg("This reply can't be continued. Use Retry to write it again."));
+    };
+    spawn_run(app, slot, parent, Some(reply));
+    Ok(id)
 }
 
 // ------------------------------------------------------------ the engine
@@ -778,7 +886,12 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
 }
 
 /// Start the turn for a conversation reserved with `RunSlot::reserve`.
-pub fn start_reserved<R: Runtime>(app: &AppHandle<R>, mut slot: RunSlot, parent_id: &str) {
+pub fn start_reserved<R: Runtime>(app: &AppHandle<R>, slot: RunSlot, parent_id: &str) {
+    spawn_run(app, slot, parent_id.to_string(), None);
+}
+
+/// Run the turn after `parent_id`, or go on with `resume`, a reply of it that was cut off.
+fn spawn_run<R: Runtime>(app: &AppHandle<R>, mut slot: RunSlot, parent_id: String, resume: Option<Message>) {
     // the running turn owns the reservation from here (its task removes it)
     slot.held = false;
     let st = slot.st.clone();
@@ -787,10 +900,9 @@ pub fn start_reserved<R: Runtime>(app: &AppHandle<R>, mut slot: RunSlot, parent_
     drop(slot);
     emit_state(app, &conv_id, true, None);
     let app = app.clone();
-    let parent_id = parent_id.to_string();
     tauri::async_runtime::spawn(async move {
         use futures_util::FutureExt;
-        let res = std::panic::AssertUnwindSafe(run(&app, &st, &conv_id, parent_id, &cancel))
+        let res = std::panic::AssertUnwindSafe(run(&app, &st, &conv_id, parent_id, resume, &cancel))
             .catch_unwind()
             .await
             .unwrap_or_else(|_| Err(AppError::msg("Something went wrong while generating this response.")));
@@ -1021,7 +1133,9 @@ pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
     if b.is_finite() && b > 0.0 { b } else { 0.0 }
 }
 
-async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
+/// The turn after `parent`; with `resume`, its reply that was cut off goes on
+/// (`continue_reply`) and the turn from there.
+async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, mut parent: String, mut resume: Option<Message>, cancel: &CancellationToken) -> AppResult<()> {
     // every engine's turn, to its end (an error, a panic or Stop included): the guard is dropped then
     let _awake = crate::keepawake::acquire();
     checkpoint_turn(st, conv_id, &parent, cancel).await;
@@ -1049,29 +1163,61 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
     let mut turn_model: Option<String> = None;
     loop {
         steps += 1;
+        // the reply that was cut off: it goes on with the model that wrote it
+        let resumed = resume.take();
+        if let Some(m) = resumed.as_ref().and_then(|m| m.meta["model"].as_str()) {
+            turn_model = Some(m.to_string());
+        }
         let mut conv = st.db.conv_get(conv_id)?;
         if let Some(m) = &turn_model {
             conv.model = m.clone();
         }
         let max_steps = if conv.kind == "code" { 400 } else { 60 };
         let settings = st.settings.read().clone();
-        let path = st.db.path_to(&parent)?;
+        let mut path = st.db.path_to(&parent)?;
         let rc = build_request_context(st, &conv, &settings).await?;
-        let messages = build_messages(&path, &rc);
-        let (mut body, mut betas) = base_body(&rc, &settings, &conv, messages);
-
-        // The assistant message we are about to stream into.
-        let am_id = new_id();
-        let mut am = Message {
-            id: am_id.clone(),
-            conversation_id: conv_id.to_string(),
-            parent_id: Some(parent.clone()),
-            role: "assistant".into(),
-            content: json!([]),
-            meta: json!({"model": rc.model_id, "fingerprint": rc.fingerprint}),
-            created_at: now_ms(),
+        let (mut body, mut betas) = match &resumed {
+            Some(m) => {
+                path.push(m.clone());
+                let mut messages = build_messages(&path, &rc);
+                path.pop();
+                messages.push(api_message("user", vec![json!({"type": "text", "text": CONTINUE_PROMPT})]));
+                // the rest of the text, not more thought about it (and its thinking would split the reply)
+                let mut c = conv.clone();
+                c.options["thinking"] = json!(false);
+                base_body(&rc, &settings, &c, messages)
+            }
+            None => base_body(&rc, &settings, &conv, build_messages(&path, &rc)),
         };
-        st.db.msg_insert(&am)?;
+
+        // The assistant message we are about to stream into: a new one, or
+        // the one that was cut off, no longer marked so
+        let continuing = resumed.is_some();
+        let mut am = match resumed {
+            Some(mut m) => {
+                if let Some(meta) = m.meta.as_object_mut() {
+                    for k in ["stopped", "error", "stop_reason", "stop_details"] {
+                        meta.remove(k);
+                    }
+                }
+                st.db.msg_update(&m.id, &m.content, &m.meta)?;
+                m
+            }
+            None => {
+                let m = Message {
+                    id: new_id(),
+                    conversation_id: conv_id.to_string(),
+                    parent_id: Some(parent.clone()),
+                    role: "assistant".into(),
+                    content: json!([]),
+                    meta: json!({"model": rc.model_id, "fingerprint": rc.fingerprint}),
+                    created_at: now_ms(),
+                };
+                st.db.msg_insert(&m)?;
+                m
+            }
+        };
+        let am_id = am.id.clone();
         st.db.conv_set_leaf(conv_id, Some(&am_id))?;
 
         // Messages already in this assistant turn (previous tool rounds).
@@ -1087,7 +1233,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
         let renderer = TurnRenderer::new(first_id.clone(), siblings, prefix, view::tracker_for(&path[..turn_start]), rc.mcp_names.clone(), settings.latex_enabled);
         let mut live = LiveRun {
             msg_id: am_id.clone(),
-            content: json!([]),
+            content: am.content.clone(),
             ..Default::default()
         };
         st.live.lock().insert(conv_id.to_string(), live.clone());
@@ -1120,7 +1266,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
 
         // Research: the agents' findings go into the request for the answer, which can't call tools
         let mut research: Option<String> = None;
-        if steps == 1 && crate::research::asked(&conv, &path) {
+        if steps == 1 && !continuing && crate::research::asked(&conv, &path) {
             let question = render::plain_text(&path[path.len() - 1].content);
             match crate::research::gather(app, st, &client, &conv, &rc, &settings, &question, cancel).await {
                 Ok(f) => {
@@ -1147,10 +1293,15 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
 
         // ---- stream (with pause_turn continuations)
         let started = Instant::now();
-        let mut content: Vec<Value> = vec![];
+        // a reply that goes on keeps what it had, and adds to its usage and time
+        let mut content: Vec<Value> = am.content.as_array().cloned().unwrap_or_default();
+        let mut cont = continuing;
+        // what this request's rounds streamed, for a paused turn to send back
+        let mut sent: Vec<Value> = vec![];
         let mut stop_reason: Option<String> = None;
         let mut stop_details = Value::Null;
-        let mut usage = serde_json::Map::new();
+        let mut usage = am.meta["usage"].as_object().cloned().unwrap_or_default();
+        let cost_before = crate::commands::usage_cost(am.meta["model"].as_str().unwrap_or(&conv.model), &am.meta["usage"]);
         let mut model_used: Option<String> = None;
         let mut invalid_json: HashMap<String, String> = HashMap::new();
         let mut error: Option<AppError> = None;
@@ -1159,6 +1310,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
         let saves = PartialSaves::of(st.db.clone(), am_id.clone());
         loop {
             let base = content.clone();
+            let joins = cont;
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             let st2 = st.clone();
             let app2 = app.clone();
@@ -1176,16 +1328,14 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                 }
                 if unsaved && save_due(&mut saved, Instant::now(), acc.blocks.len()) {
                     unsaved = false;
-                    let mut c = base.clone();
-                    c.extend(acc.content());
-                    saves.save(Value::Array(c), cur.meta.clone());
+                    saves.save(Value::Array(join_blocks(&base, acc.content(), joins, true)), cur.meta.clone());
                 }
-                if !unshown || last_emit.elapsed() < Duration::from_millis(45) {
+                if !unshown || last_emit.elapsed() < EMIT_EVERY {
                     return;
                 }
                 unshown = false;
                 last_emit = Instant::now();
-                live_tick(&st2, conv_id, &renderer, &mut cur, &base, acc, |t| emit_turn(&app2, conv_id, t));
+                live_tick(&st2, conv_id, &renderer, &mut cur, &base, acc, joins, |t| emit_turn(&app2, conv_id, t));
             };
             let res = stream_with_recovery(st, &client, &mut body, &mut betas, cancel, &mut on_event).await;
             match res {
@@ -1226,7 +1376,10 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                             }
                         }
                     }
-                    content.extend(acc.content());
+                    let new = acc.content();
+                    sent.extend(new.iter().cloned());
+                    content = join_blocks(&content, new, cont, false);
+                    cont = false;
                     if let Some(m) = acc.model() {
                         model_used = Some(m);
                     }
@@ -1256,7 +1409,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                     if stop_reason.as_deref() == Some("pause_turn") && continuations < 5 && !cancel.is_cancelled() {
                         continuations += 1;
                         let msgs = body["messages"].as_array_mut().unwrap();
-                        let send = sanitize_assistant(&Value::Array(content.clone()), &HashSet::new());
+                        let send = sanitize_assistant(&Value::Array(sent.clone()), &HashSet::new());
                         // replace a previously appended paused turn
                         if continuations > 1 {
                             msgs.pop();
@@ -1286,12 +1439,12 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
             am.meta["model"] = json!(m);
         }
         am.meta["usage"] = Value::Object(usage);
-        turn_cost += crate::commands::usage_cost(am.meta["model"].as_str().unwrap_or(&conv.model), &am.meta["usage"]);
+        turn_cost += crate::commands::usage_cost(am.meta["model"].as_str().unwrap_or(&conv.model), &am.meta["usage"]) - cost_before;
         am.meta["stop_reason"] = json!(stop_reason);
         if !stop_details.is_null() {
             am.meta["stop_details"] = stop_details;
         }
-        am.meta["duration_ms"] = json!(started.elapsed().as_millis() as u64);
+        am.meta["duration_ms"] = json!(am.meta["duration_ms"].as_u64().unwrap_or(0) + started.elapsed().as_millis() as u64);
         let cancelled = matches!(error, Some(AppError::Cancelled)) || cancel.is_cancelled();
         if cancelled {
             am.meta["stopped"] = json!(true);
@@ -1503,7 +1656,7 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
         if save_due(&mut saved, Instant::now(), 1) {
             saves.save(json!([{"type": "text", "text": text}]), am.meta.clone());
         }
-        if last.elapsed() < Duration::from_millis(45) {
+        if last.elapsed() < EMIT_EVERY {
             return;
         }
         last = Instant::now();
@@ -1915,13 +2068,14 @@ pub async fn generate_title<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, 
     let Some(leaf) = conv.current_leaf.clone() else { return };
     let Ok(path) = st.db.path_to(&leaf) else { return };
     let (user_text, assistant_text) = first_exchange(&path);
-    let fallback = {
-        let first = user_text.lines().find(|l| !l.trim().is_empty()).unwrap_or("New chat").trim();
-        crate::util::truncate_chars(first, 60)
-    };
+    // no text to name it by (only an image or a file): it stays untitled, which the UI names in its language
+    let fallback = user_text.lines().find(|l| !l.trim().is_empty()).map(|l| crate::util::truncate_chars(l.trim(), 60));
     let title = match title_via_api(st, &user_text, &assistant_text).await {
         Some(t) => t,
-        None => crate::claudecode::title(st, &conv, &user_text, &assistant_text).await.unwrap_or(fallback),
+        None => match crate::claudecode::title(st, &conv, &user_text, &assistant_text).await.or(fallback) {
+            Some(t) => t,
+            None => return,
+        },
     };
     // Only set if still untitled (user may have renamed meanwhile)
     if st.db.conv_get(conv_id).map(|c| c.title.is_empty()).unwrap_or(false) {
@@ -2367,6 +2521,62 @@ mod tests {
         assert_eq!(turn_budget(&c, &s), 2.0);
     }
 
+    #[test]
+    fn only_a_reply_that_was_cut_off_can_be_continued() {
+        let text = json!([{"type": "text", "text": "Partial"}]);
+        let reply = |content: &Value, meta: Value| continuable(&m("a", "assistant", content.clone(), meta));
+        assert!(reply(&text, json!({"stopped": true})));
+        assert!(reply(&text, json!({"error": {"message": "connection cut"}})));
+        assert!(reply(&text, json!({"stop_reason": "max_tokens"})));
+        assert!(!reply(&text, json!({"stop_reason": "end_turn"})), "a finished reply");
+        assert!(!reply(&json!([{"type": "text", "text": "  "}]), json!({"stopped": true})), "no text yet");
+        assert!(!continuable(&m("u", "user", text.clone(), json!({"stopped": true}))));
+        // what the API engine can't go on with
+        let with_tool = json!([{"type": "text", "text": "Let me"}, {"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]);
+        assert!(api_continues(&m("a", "assistant", text.clone(), json!({"stopped": true}))));
+        assert!(!api_continues(&m("a", "assistant", with_tool, json!({"stopped": true}))), "a tool call");
+        assert!(!api_continues(&m("a", "assistant", text.clone(), json!({"research": {"questions": []}}))), "a research report");
+    }
+
+    #[test]
+    fn a_continuation_leaves_out_what_it_repeats() {
+        let go_on = |old: &str, new: &str| after_repeat(old, new, false).unwrap().to_string();
+        assert_eq!(go_on("Hello wor", "ld!"), "ld!");
+        assert_eq!(go_on("Hello wor", "world!"), "ld!");
+        assert_eq!(go_on("It is in the sec", "the second step."), "ond step.");
+        assert_eq!(go_on("The answer is", "is 42."), " 42.");
+        assert_eq!(go_on("let x = 1", "1 + 2;"), "1 + 2;", "one character is no repeat");
+        assert_eq!(go_on("a cat", "atom"), "atom", "a repeat starts a word");
+        assert_eq!(go_on("Bitti.", "Bitti."), "", "all of it again");
+        assert_eq!(go_on("çok güzel bir gü", "güneş"), "neş");
+        // while it streams, text that may still be a repeat waits
+        assert_eq!(after_repeat("It is in the sec", "the s", true), None);
+        assert_eq!(after_repeat("It is in the sec", "the sec", true), None);
+        assert_eq!(after_repeat("It is in the sec", "the seco", true), Some("o"));
+        assert_eq!(after_repeat("It is in the sec", "ond", true), Some("ond"));
+        // only the end of a long reply is looked at
+        let long = format!("the start {}", "x ".repeat(400));
+        assert_eq!(go_on(&long, "the start"), "the start");
+    }
+
+    #[test]
+    fn a_continuation_goes_on_in_the_replys_last_text() {
+        let old = vec![json!({"type": "thinking", "thinking": "t", "signature": "s"}), json!({"type": "text", "text": "Here is the sec"})];
+        let new = vec![json!({"type": "thinking", "thinking": "again", "signature": "s2"}), json!({"type": "text", "text": "the second part."})];
+        let joined = join_blocks(&old, new.clone(), true, false);
+        assert_eq!(joined, vec![old[0].clone(), json!({"type": "text", "text": "Here is the second part."})]);
+        // as it streams: a possible repeat waits, then joins
+        assert_eq!(join_blocks(&old, vec![json!({"type": "text", "text": "the s"})], true, true), old);
+        // a block after the first finishes it
+        let tool = json!({"type": "server_tool_use", "id": "s", "name": "web_search", "input": {}});
+        assert_eq!(join_blocks(&old, vec![json!({"type": "text", "text": "the sec"}), tool.clone()], true, true), vec![old[0].clone(), old[1].clone(), tool]);
+        // cited text stays a block of its own
+        let cited = json!({"type": "text", "text": "the second", "citations": [{"url": "https://e.com"}]});
+        assert_eq!(join_blocks(&old, vec![cited], true, false)[2], json!({"type": "text", "text": "ond", "citations": [{"url": "https://e.com"}]}));
+        // not continuing: the blocks follow each other
+        assert_eq!(join_blocks(&old, new.clone(), false, false), [old.clone(), new].concat());
+    }
+
     /// `build_messages` and `sanitize_assistant` as they were (verbatim),
     /// before they stopped copying the conversation three times over.
     mod before {
@@ -2599,7 +2809,7 @@ mod tests {
                 }
                 // before: the content cloned into a copy of the message and
                 // into `st.live`, and all of the turn rendered
-                let (c, streaming) = live_content(&base, &acc);
+                let (c, streaming) = live_content(&base, &acc, false);
                 let mut old = am.clone();
                 old.content = c.clone();
                 let lr = LiveRun { msg_id: "am".into(), content: c, live_tools: HashMap::new(), streaming_tools: streaming };
@@ -2611,7 +2821,7 @@ mod tests {
                 t["siblings"] = siblings.clone();
                 let want = serde_json::to_string(&json!({"conversation_id": conv_id, "turn": t})).unwrap();
                 let mut got = String::new();
-                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, |t| got = serde_json::to_string(&json!({"conversation_id": conv_id, "turn": t})).unwrap());
+                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, false, |t| got = serde_json::to_string(&json!({"conversation_id": conv_id, "turn": t})).unwrap());
                 assert_eq!(got, want, "after {ev}");
                 let lives = st.live.lock();
                 let l = &lives[conv_id];
@@ -2663,7 +2873,7 @@ mod tests {
         let mut warm = Accumulator::default();
         for ev in fixture::reply_events(40, 1) {
             warm.apply(&ev).unwrap();
-            live_tick(&st, conv_id, &renderer, &mut cur, &base, &warm, |_| {});
+            live_tick(&st, conv_id, &renderer, &mut cur, &base, &warm, false, |_| {});
         }
         let events = fixture::reply_events(40, 0);
         let mut acc = Accumulator::default();
@@ -2678,7 +2888,7 @@ mod tests {
                 let phase = acc.blocks.len().clamp(1, 3) - 1;
                 let (mut emit_ns, mut len) = (0u128, 0usize);
                 let t0 = Instant::now();
-                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, |turn| {
+                live_tick(&st, conv_id, &renderer, &mut cur, &base, &acc, false, |turn| {
                     if no_emit {
                         return;
                     }

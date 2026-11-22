@@ -15,12 +15,13 @@ export function localize(c, lang) {
   return { ...c, description, categoryLabel: t('cd_cat_' + c.category) };
 }
 
-/** Entries whose name, description, category or domain hold every word of `q`. */
-export function filterDirectory(list, q) {
+/** Entries whose name, description, category or domain hold every word of `q`,
+ *  in `category` when one is picked. */
+export function filterDirectory(list, q, category = '') {
   const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
   return list.filter((c) => {
     const hay = [c.name, c.description, c.categoryLabel, c.domain].join(' ').toLowerCase();
-    return words.every((w) => hay.includes(w));
+    return (!category || c.category === category) && words.every((w) => hay.includes(w));
   });
 }
 
@@ -41,14 +42,26 @@ export async function openDirectory(status, redraw) {
   const body = h(`<div class="cd">
     <p class="small muted" style="margin:0 0 12px">${esc(t('cd_trust'))}</p>
     <div class="search-box">${icon('search', 15)}<input class="input" type="search" placeholder="${esc(t('cd_search'))}" aria-label="${esc(t('cd_search'))}"></div>
+    <div class="cd-cats" role="group" aria-label="${esc(t('cd_categories'))}"></div>
     <div class="cd-list" role="list"></div></div>`);
   const input = body.querySelector('input');
   const out = body.querySelector('.cd-list');
+  const cats = body.querySelector('.cd-cats');
+  let category = '';
+  for (const c of list ? ['', ...new Set(list.map((e) => e.category))] : []) {
+    const b = h(`<button class="chip" aria-pressed="${!c}">${esc(c ? t('cd_cat_' + c) : t('cd_all'))}</button>`);
+    b.onclick = () => {
+      category = c;
+      cats.querySelectorAll('.chip').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      draw();
+    };
+    cats.appendChild(b);
+  }
   const m = modal({ title: t('cd_title'), body, wide: true, cls: 'tall' });
   const draw = () => {
     out.replaceChildren();
     if (!list) { out.appendChild(h(`<div class="empty-state" style="padding:30px">${esc(t('cd_unavailable'))}</div>`)); return; }
-    const shown = filterDirectory(list, input.value);
+    const shown = filterDirectory(list, input.value, category);
     if (!shown.length) out.appendChild(h(`<div class="empty-state" style="padding:30px">${esc(t('cd_none'))}</div>`));
     for (const c of shown) {
       const card = h(`<div class="server" role="listitem"><div class="head">${icon('plug', 16)}<div class="grow" style="min-width:0">

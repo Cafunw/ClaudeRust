@@ -823,7 +823,7 @@ struct Lent {
 
 /// A turn's finished messages rendered once, to render the turn again with
 /// a different last message: while a reply streams, the turn is rendered
-/// every 45 ms and only the reply changes, so the rest of the turn (tool
+/// every `engine::EMIT_EVERY` and only the reply changes, so the rest of the turn (tool
 /// calls with their outputs, text with code blocks) isn't rendered again on
 /// every update. The result is the same as `assistant_turn` over all the
 /// messages; whatever the cached part depends on is checked by `fits`.
@@ -1296,7 +1296,7 @@ mod tests {
 }
 
 /// A long agentic turn and a streamed reply, to measure (and check) the
-/// live rendering that runs every 45 ms while a reply streams.
+/// live rendering that runs every `engine::EMIT_EVERY` while a reply streams.
 #[cfg(test)]
 pub(crate) mod fixture {
     use crate::db::Message;

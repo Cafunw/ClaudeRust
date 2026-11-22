@@ -11,11 +11,25 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const config = path.resolve(process.argv[2] || path.join(root, 'dev', 'e2e.conf.json'));
-const CDP = 'http://127.0.0.1:9333';
+/** The first of these ports this machine lets us listen on (a Windows runner reserves some ranges, and then the WebView's debugging port never opens). */
+async function freePort(candidates) {
+  for (const port of candidates) {
+    const ok = await new Promise((resolve) => {
+      const s = net.createServer();
+      s.once('error', () => resolve(false));
+      s.listen(port, '127.0.0.1', () => s.close(() => resolve(true)));
+    });
+    if (ok) return port;
+  }
+  throw new Error('no free port for the WebView debugging endpoint');
+}
+const PORT = process.env.CLAUDERUST_E2E_PORT ? Number(process.env.CLAUDERUST_E2E_PORT) : await freePort([9333, 9222, 9444, 19333, 29333]);
+const CDP = `http://127.0.0.1:${PORT}`;
 // a first build of the dev copy takes minutes; the CI job's own limit is 30
 const START_MS = 20 * 60_000;
 const logs = path.join(root, 'target', 'e2e');
@@ -42,7 +56,7 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'clauderust-e2e-config-'));
 const env = {
   ...process.env,
   CLAUDERUST_API_KEY: 'sk-ant-test',
-  WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9333',
+  WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
   CLAUDE_CONFIG_DIR: home,
 };
 const tauri = path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
@@ -86,7 +100,8 @@ function processInfo() {
   const ps = [
     "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'clauderust.exe','msedgewebview2.exe' } | ForEach-Object { $c = [string]$_.CommandLine; if ($c.Length -gt 300) { $c = $c.Substring(0, 300) }; '{0} {1} {2}' -f $_.ProcessId, $_.Name, $c }",
     "Get-Process clauderust -ErrorAction SilentlyContinue | ForEach-Object { 'clauderust responding: ' + $_.Responding + ', window: ' + $_.MainWindowHandle }",
-    "netstat -ano | Select-String ':9333'",
+    `netstat -ano | Select-String ':${PORT}'`,
+    'netsh interface ipv4 show excludedportrange protocol=tcp',
     `foreach ($d in "$env:APPDATA\\${identifier}", "$env:LOCALAPPDATA\\${identifier}") { 'folder ' + $d; Get-ChildItem -Recurse -Depth 3 $d -ErrorAction SilentlyContinue | Select-Object -First 25 | ForEach-Object { '  ' + $_.FullName + ' ' + $_.Length } }`,
     `Get-ChildItem -Recurse "$env:LOCALAPPDATA\\${identifier}" -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { 'DevToolsActivePort: ' + (Get-Content $_.FullName -Raw) }`,
   ].join('; ');
@@ -99,7 +114,7 @@ async function portState() {
   const webviews = process.platform === 'win32'
     ? (spawnSync('tasklist', ['/FI', 'IMAGENAME eq msedgewebview2.exe', '/NH'], { encoding: 'utf8' }).stdout.match(/msedgewebview2\.exe/g) || []).length
     : 0;
-  return `port 9333: ${t === null ? 'closed' : JSON.stringify(t.map((x) => `${x.type} ${String(x.url).slice(0, 60)}`))}; WebView2 processes: ${webviews}`;
+  return `port ${PORT}: ${t === null ? 'closed' : JSON.stringify(t.map((x) => `${x.type} ${String(x.url).slice(0, 60)}`))}; WebView2 processes: ${webviews}`;
 }
 
 let code = 1;
@@ -127,7 +142,7 @@ try {
   console.log(`The dev copy is up after ${Math.round((Date.now() - t0) / 1000)} s; running the tests.`);
   const files = fs.readdirSync(path.join(root, 'ui', 'e2e')).filter((f) => f.endsWith('.test.mjs')).map((f) => path.join('ui', 'e2e', f));
   // CLAUDERUST_E2E_REQUIRED: a test that would skip fails instead
-  code = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit', env: { ...process.env, CLAUDERUST_E2E_REQUIRED: '1' } }).status ?? 1;
+  code = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit', env: { ...process.env, CLAUDERUST_E2E_REQUIRED: '1', CLAUDERUST_E2E_PORT: String(PORT) } }).status ?? 1;
 } catch (e) {
   console.error(e.message);
   console.error(`--- the dev copy's output, last lines ---\n${tail(3000)}`);

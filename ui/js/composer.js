@@ -577,7 +577,8 @@ export function createComposer(opts) {
       attachments.push(ph);
       renderAttachments();
       call('stage_text', { name: 'Pasted text.txt', text }).then((a) => {
-        a.name = `${t('pasted')} (${text.split('\n').length} lines)`;
+        const n = text.split('\n').length;
+        a.name = t(n === 1 ? 'pasted_line_one' : 'pasted_lines', { n });
         attachments[attachments.indexOf(ph)] = a;
         renderAttachments();
       }).catch((err) => { attachments = attachments.filter((x) => x !== ph); renderAttachments(); errorToast(err); });

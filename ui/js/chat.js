@@ -8,15 +8,16 @@ import { icon, spark } from './icons.js';
 import { t, tOr, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
 import { store, emit, on as onUi, modelInfo, displayName, saveLocal } from './store.js';
-import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot, scrollBehavior } from './util.js';
+import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot, scrollBehavior, convTitle } from './util.js';
 import { createComposer, researchOffered } from './composer.js';
-import { renderParts, turnPlainText, copyText, unifiedDiffHtml, errorMessage } from './parts.js';
+import { renderParts, turnPlainText, copyText, unifiedDiffHtml, errorMessage, resumable } from './parts.js';
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
 import { forgetConversation } from './artifact_storage.js';
 import { PAGE_TURNS, pageStart, parked } from './turnwindow.js';
 import { retryLabel } from './retry_ui.js';
+import { panelStep } from './branch_panel.js';
 import { announce, streamAnnouncer } from './a11y.js';
 import { speechText, readAloud, readingKey, stopReading, readAloudAvailable, onVoicesReady } from './readaloud.js';
 import { limitBanner } from './usage_limits.js';
@@ -160,6 +161,8 @@ export async function openConversation(id, { focus = true } = {}) {
   for (const turn of data.turns.slice(cur.shown)) upsertTurn(turn, false);
   drawEarlierButton();
   markLast();
+  // first, so the panel rebuildArtifacts sees open is this conversation's
+  artifacts.onConversationOpened(id, cur.artifacts);
   rebuildArtifacts();
   for (const p of data.pending_permissions || []) showPermission(p);
   scroll.addEventListener('scroll', onScroll);
@@ -170,7 +173,6 @@ export async function openConversation(id, { focus = true } = {}) {
   state.ro = new ResizeObserver(() => { if (cur === state && cur.stick !== false) scrollToBottom(false); });
   state.ro.observe(state.colEl);
   if (focus) composer.focus();
-  artifacts.onConversationOpened(id, cur.artifacts);
   showQueue(id);
   workspace.setConversation(conv);
   document.title = conv.title || 'ClaudeRust';
@@ -199,7 +201,7 @@ function renderTopbar() {
     if (c.options && c.options.engine === 'claude-code') cur.topEl.append(h(`<span class="active-tool eng" title="${esc(t('engine_cc'))}">${icon('terminal', 12)}<span class="lbl"> Claude Code</span></span>`));
     if (c.options && c.options.worktree && c.options.worktree.branch) cur.topEl.append(h(`<span class="active-tool wt" title="${esc(t('worktree_topbar', { path: c.options.worktree.path }))}">${icon('code', 12)} ${esc(c.options.worktree.branch)}</span>`));
   }
-  const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(c.title || t('new_chat'))}</span>${icon('chevDown', 14)}</button>`);
+  const tb = h(`<button class="title-btn">${c.starred ? `<span style="color:var(--accent)">${icon('starFill', 14)}</span>` : ''}<span class="t">${esc(convTitle(c))}</span>${icon('chevDown', 14)}</button>`);
   tb.onclick = () => conversationMenu(tb, c, { onChange: () => refreshConversationMeta() });
   cur.topEl.append(tb, h('<div class="spacer"></div>'));
   if (c.kind === 'code') cur.topEl.append(watchBadge(c));
@@ -223,8 +225,8 @@ async function showUsage(anchor) {
     const u = await call('usage_stats', { conversationId: cur.id });
     showMenu(anchor, [
       { header: `${t('usage')} · ${modelInfo(cur.conv.model).name}` },
-      { label: `${fmtTokens(u.input_tokens)} in · ${fmtTokens(u.output_tokens)} out`, icon: 'zap', disabled: true },
-      { label: `cache: ${fmtTokens(u.cache_read_input_tokens)} read · ${fmtTokens(u.cache_creation_input_tokens)} write`, icon: 'history', disabled: true },
+      { label: t('usage_in_out', { i: fmtTokens(u.input_tokens), o: fmtTokens(u.output_tokens) }), icon: 'zap', disabled: true },
+      { label: t('usage_cache_rw', { r: fmtTokens(u.cache_read_input_tokens), w: fmtTokens(u.cache_creation_input_tokens) }), icon: 'history', disabled: true },
       { label: `${t('cost')}: ${fmtUsd(u.cost_usd)}`, icon: 'info', disabled: true },
     ], { placement: 'bottom-end', width: 260 });
   } catch (e) { errorToast(e); }
@@ -961,6 +963,8 @@ function renderAssistantTurn(el, turn) {
     openSettings: (tab) => emit('open-settings', tab),
     onRetry: () => retry(turn),
     onContinue: () => cur && cur.composer && sendInConversation(t('continue'), []).catch(errorToast),
+    // only a backend that knows continue_reply (bootstrap's features) gets the button
+    onResume: store.features && store.features.continue_reply && resumable(turn.parts || []) ? resumeReply : null,
   };
   const drawn = renderParts(partsEl, turn.parts || [], ctx);
   // artifact card clicks (cards only appear in parts just drawn)
@@ -1029,6 +1033,16 @@ function renderAssistantTurn(el, turn) {
   markLast();
 }
 
+/** Go on with the last answer from where it was cut short, as the same answer. */
+async function resumeReply() {
+  if (!cur) return;
+  try {
+    await call('send_message', { req: { conversation_id: cur.id, text: '', continue_reply: true } });
+    emit('conversations-changed');
+  } catch (e) { errorToast(e); }
+  await reload();
+}
+
 async function retry(turn, model) {
   if (!cur) return;
   if (!turn.parent_id) return;
@@ -1054,6 +1068,10 @@ function rebuildArtifacts() {
   cur.artifacts = map;
   if (hadNone && map.size) renderTopbar();
   artifacts.update(cur.id, map);
+  const step = panelStep(map.size > 0, artifacts.isOpen(), !!cur.panelParked);
+  if (step === 'close') artifacts.close();
+  else if (step === 'reopen') artifacts.togglePanel(cur.id, map);
+  if (step) cur.panelParked = step === 'close';
 }
 
 // ------------------------------------------------------------- live events

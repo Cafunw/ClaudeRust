@@ -1433,3 +1433,15 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 /* ---- MCP Apps: a tool's own page under its card (ui/js/mcp_apps.js) ---- */
 .tool > iframe.mcp-app { display: block; width: 100%; margin: 6px 0 2px; border: 0; border-radius: var(--radius, 8px); background: transparent; }
 .tool > iframe.mcp-app.bordered { border: 1px solid var(--border); background: var(--surface); }
+
+/* ---- front end, round 6 ---- */
+/* a table after a code block (or a paragraph) gets the same gap as other blocks */
+.md .table-wrap { margin-top: 0.75em; }
+/* Continue on a stopped answer sits on the notice's line; only the last answer can go on */
+.notice > .actions { margin-top: 0; }
+.turn:not(.last) .notice .resume { display: none; }
+
+/* ---- connector directory: category filter (ui/js/connector_directory.js) ---- */
+.cd-cats { display: flex; flex-wrap: wrap; gap: 6px; margin: -8px 0 14px; }
+.cd-cats .chip { height: 26px; padding: 0 10px; font-size: 12px; cursor: pointer; }
+.cd-cats .chip[aria-pressed="true"] { background: var(--bg-2); color: var(--text-0); border-color: var(--text-3); }

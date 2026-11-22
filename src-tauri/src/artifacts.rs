@@ -284,8 +284,24 @@ const BASE_STYLE: &str = r#"<style>:root{color-scheme:light dark}html,body{margi
 const FRAGMENT_STYLE: &str = "<style>:root{color-scheme:light}body{background:#ffffff;color:#141413}</style>";
 
 /// Content Security Policy for artifact documents: they may load common
-/// libraries from public CDNs but run in an opaque, sandboxed origin.
-pub const ARTIFACT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh https://cdn.tailwindcss.com; style-src 'unsafe-inline' https:; img-src * data: blob:; font-src * data:; connect-src https: data: blob:; media-src * data: blob:; frame-src 'none'; worker-src blob:";
+/// libraries from public CDNs (and Google Fonts) but reach no other host, as
+/// in Claude Desktop, so a page can't send what it holds or window.storage
+/// anywhere. They run in an opaque, sandboxed origin.
+pub const ARTIFACT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh https://cdn.tailwindcss.com; style-src 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com; img-src data: blob:; font-src data: blob: https://fonts.gstatic.com https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com; connect-src data: blob: https://fonts.googleapis.com https://fonts.gstatic.com; media-src data: blob:; frame-src 'none'; worker-src blob:; form-action 'none'; webrtc 'block'";
+
+/// What an MCP App page is served as: its own policy (a meta tag mcp_apps.rs
+/// writes first) narrows MCP_APP_CSP to the sources its server declared.
+pub const MCP_APP_SERVED: &str = "text/html; charset=utf-8; profile=mcp-app";
+const MCP_APP_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; media-src data: blob: https:; connect-src https: wss:; frame-src 'none'; form-action 'none'";
+
+/// The policy the `artifact://` protocol sends with a document served as `mime`.
+pub fn protocol_csp(mime: &str) -> &'static str {
+    if mime == MCP_APP_SERVED {
+        MCP_APP_CSP
+    } else {
+        ARTIFACT_CSP
+    }
+}
 
 /// The error overlay, and the APIs Claude's artifacts expect. The sandbox can
 /// reach nothing but the app's page, so these ask it over postMessage (see
@@ -671,5 +687,36 @@ mod tests {
         assert!(ARTIFACT_CSP.starts_with("default-src 'none';"));
         assert!(ARTIFACT_CSP.contains("frame-src 'none'"));
         assert!(!ARTIFACT_CSP.contains("'self'"));
+    }
+
+    fn sources<'a>(csp: &'a str, directive: &str) -> Vec<&'a str> {
+        let d = csp.split(';').map(str::trim).find(|d| d.split(' ').next() == Some(directive));
+        d.unwrap_or_else(|| panic!("no {directive} in {csp}")).split(' ').skip(1).collect()
+    }
+
+    #[test]
+    fn artifacts_reach_no_host_but_the_libraries_and_mcp_apps_what_they_declare() {
+        let cdns = sources(ARTIFACT_CSP, "script-src");
+        let fonts = ["https://fonts.googleapis.com", "https://fonts.gstatic.com"];
+        for d in ["connect-src", "img-src", "media-src", "font-src", "style-src"] {
+            for s in sources(ARTIFACT_CSP, d) {
+                assert!(matches!(s, "'unsafe-inline'" | "data:" | "blob:") || cdns.contains(&s) || fonts.contains(&s), "{d}: {s}");
+            }
+        }
+        assert_eq!(sources(ARTIFACT_CSP, "connect-src"), ["data:", "blob:", "https://fonts.googleapis.com", "https://fonts.gstatic.com"]);
+        assert_eq!(sources(ARTIFACT_CSP, "form-action"), ["'none'"]);
+        assert_eq!(sources(ARTIFACT_CSP, "webrtc"), ["'block'"]);
+        // what React and Mermaid documents import still loads
+        for host in ["https://esm.sh", "https://unpkg.com", "https://cdn.jsdelivr.net", "https://cdn.tailwindcss.com"] {
+            assert!(sources(ARTIFACT_CSP, "script-src").contains(&host), "{host}");
+        }
+        assert_eq!(protocol_csp("text/html; charset=utf-8"), ARTIFACT_CSP);
+        // an MCP App's page narrows the protocol's policy with its own, so this one has room for every source it may declare
+        let app = protocol_csp(MCP_APP_SERVED);
+        for d in ["script-src", "style-src", "img-src", "font-src", "media-src", "connect-src"] {
+            assert!(sources(app, d).contains(&"https:"), "{d}");
+        }
+        assert!(sources(app, "connect-src").contains(&"wss:"));
+        assert!(app.starts_with("default-src 'none';") && app.contains("frame-src 'none'") && app.contains("form-action 'none'"));
     }
 }

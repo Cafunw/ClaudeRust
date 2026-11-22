@@ -34,6 +34,10 @@ test('the directory search matches every word in name, description, category or 
   assert.deepEqual(filterDirectory(dir, 'linear.app').map((c) => c.name), ['Linear']);
   assert.deepEqual(filterDirectory(dir, 'nothing-like-it'), []);
   assert.deepEqual(filterDirectory([{ name: 'Bare', url: 'https://x' }], 'bare').length, 1);
+  // a picked category, with or without words
+  assert.deepEqual(filterDirectory(dir, '', 'dev').map((c) => c.name), ['Sentry', 'Context7']);
+  assert.deepEqual(filterDirectory(dir, 'docs', 'dev').map((c) => c.name), ['Context7']);
+  assert.deepEqual(filterDirectory(dir, 'linear', 'dev'), []);
 });
 
 test('an added entry gets a name no configured server has', () => {

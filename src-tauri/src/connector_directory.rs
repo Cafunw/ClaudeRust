@@ -12,7 +12,7 @@ use std::sync::Arc;
 const LIST: &str = include_str!("connector_directory.json");
 
 pub const AUTHS: [&str; 3] = ["oauth", "bearer", "none"];
-pub const CATEGORIES: [&str; 7] = ["dev", "projects", "docs", "payments", "support", "design", "data"];
+pub const CATEGORIES: [&str; 11] = ["dev", "cloud", "projects", "docs", "search", "payments", "crm", "support", "design", "data", "analytics"];
 
 /// `u` as compared with a configured server's URL: parsed (scheme and host in
 /// lower case, default port dropped), without a trailing slash.
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn every_entry_is_complete_https_without_credentials_and_unique() {
         let list: Vec<Value> = serde_json::from_str(LIST).expect("the list is valid JSON");
-        assert!(list.len() >= 12, "{} entries", list.len());
+        assert!(list.len() >= 40, "{} entries", list.len());
         let (mut names, mut urls) = (HashSet::new(), HashSet::new());
         for e in &list {
             let name = e["name"].as_str().unwrap_or_default();
@@ -70,6 +70,16 @@ mod tests {
             for lang in ["en", "tr"] {
                 assert!(!e["description"][lang].as_str().unwrap_or_default().trim().is_empty(), "{name}: description.{lang}");
             }
+        }
+    }
+
+    #[test]
+    fn every_category_has_entries_and_a_label_in_both_languages() {
+        let list: Vec<Value> = serde_json::from_str(LIST).unwrap();
+        let i18n = include_str!("../../ui/js/i18n.js");
+        for c in CATEGORIES {
+            assert!(list.iter().any(|e| e["category"] == c), "{c}: no entry");
+            assert_eq!(i18n.matches(&format!("cd_cat_{c}:")).count(), 2, "{c}: cd_cat_{c} in English and Turkish");
         }
     }
 

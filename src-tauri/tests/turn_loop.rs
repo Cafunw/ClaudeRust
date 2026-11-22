@@ -469,6 +469,127 @@ fn a_dropped_connection_ends_the_turn_and_keeps_the_partial_reply() {
     });
 }
 
+/// Wait for the conversation's `n`th turn to end.
+async fn ended_times(h: &Harness, n: usize) {
+    until("the turn to end", || (h.events("generation-state").iter().filter(|e| e["running"] == false).count() >= n).then_some(())).await;
+    until("the turn to let go", || (!h.st.runs.lock().contains_key(&h.conv) && !h.st.live.lock().contains_key(&h.conv)).then_some(())).await;
+}
+
+/// Is this request the one that asks for the rest of a reply that was cut off?
+fn asks_to_go_on(b: &Value) -> bool {
+    b["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"] == engine::CONTINUE_PROMPT
+}
+
+#[test]
+fn a_cut_off_reply_continues_and_ends_as_one_message() {
+    block_on(async {
+        let api = api(|b| {
+            if asks_to_go_on(b) {
+                // it starts again a word back, as models sometimes do
+                return Reply::Stream(reply(b, vec![text_block(0, &["answer", " goes on."])], "end_turn"));
+            }
+            let mut v = vec![message_start(b)];
+            v.extend(text_block(0, &["Partial ", "answer"]).into_iter().take(3));
+            Reply::Drop(v)
+        })
+        .await;
+        let h = chat(&api);
+        h.st.db.conv_set_model(&h.conv, "claude-haiku-5-5").unwrap();
+        h.st.db.conv_set_options(&h.conv, &json!({"thinking": true})).unwrap();
+        h.send("Hi");
+        assert!(h.ended().await["error"]["message"].is_string());
+        let cut = h.path()[1].clone();
+        assert!(engine::continuable(&cut), "{:?}", cut.meta);
+
+        let id = engine::continue_reply(h.app.handle(), &h.st, &h.conv).await.unwrap();
+        assert_eq!(id, cut.id);
+        ended_times(&h, 2).await;
+        let last = h.events("generation-state").pop().unwrap();
+        assert_eq!(last["error"], Value::Null);
+
+        // one message: the same row, its text joined without the repeat
+        let path = h.path();
+        assert_eq!(path.len(), 2);
+        let a = &path[1];
+        assert_eq!(a.id, cut.id);
+        assert_eq!(a.content, json!([{"type": "text", "text": "Partial answer goes on."}]));
+        assert_eq!(a.meta["stop_reason"], "end_turn");
+        assert!(a.meta["error"].is_null() && a.meta["stopped"].is_null(), "{}", a.meta);
+        assert_eq!(a.meta["usage"]["input_tokens"], 20, "both requests are counted: {}", a.meta["usage"]);
+        assert_eq!(a.meta["model"], "claude-haiku-5-5");
+        assert_eq!(h.st.db.search("goes", 5).unwrap().len(), 1, "indexed again, once");
+
+        // asked with the reply so far and a turn asking for the rest, thinking off
+        let sent = api.streams();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1]["messages"],
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "Partial answer"}]},
+                {"role": "user", "content": [{"type": "text", "text": engine::CONTINUE_PROMPT}]},
+            ])
+        );
+        assert_eq!(sent[0]["thinking"]["type"], "adaptive");
+        assert_eq!(sent[1]["thinking"], json!({"type": "disabled"}));
+        assert_eq!(sent[1]["model"], "claude-haiku-5-5");
+
+        // a reply that ended can't be continued again
+        assert!(engine::continue_reply(h.app.handle(), &h.st, &h.conv).await.is_err());
+    });
+}
+
+#[test]
+fn a_continuation_that_is_stopped_keeps_both_parts() {
+    block_on(async {
+        let api = api(|b| {
+            let mut v = vec![message_start(b)];
+            let piece = if asks_to_go_on(b) { " and more" } else { "Partial answer" };
+            v.extend(text_block(0, &[piece]).into_iter().take(2));
+            Reply::Stall(v)
+        })
+        .await;
+        let h = chat(&api);
+        h.send("Hi");
+        until("the reply to stream", || h.path().get(1).filter(|m| m.content[0]["text"] == "Partial answer").map(|_| ())).await;
+        engine::stop(&h.st, &h.conv);
+        ended_times(&h, 1).await;
+        assert_eq!(h.path()[1].meta["stopped"], true);
+
+        engine::continue_reply(h.app.handle(), &h.st, &h.conv).await.unwrap();
+        // what a view opened now is shown: the reply as one text
+        let joined = json!([{"type": "text", "text": "Partial answer and more"}]);
+        until("the continuation to stream", || h.st.live.lock().get(&h.conv).filter(|l| l.content == joined).map(|_| ())).await;
+        // saved as it streams, so a crash keeps it, no longer marked stopped
+        let saved = until("the continuation to be saved", || h.path().get(1).filter(|m| m.content == joined).cloned()).await;
+        assert!(saved.meta["stopped"].is_null() && saved.meta["stop_reason"].is_null(), "{}", saved.meta);
+        engine::stop(&h.st, &h.conv);
+        ended_times(&h, 2).await;
+        let a = &h.path()[1];
+        assert_eq!(a.content, json!([{"type": "text", "text": "Partial answer and more"}]));
+        assert_eq!(a.meta["stopped"], true);
+        assert!(engine::continuable(a), "stopped again: it can go on again");
+        assert_eq!(a.meta["usage"]["input_tokens"], 20);
+    });
+}
+
+#[test]
+fn a_continue_on_a_finished_reply_is_refused() {
+    block_on(async {
+        let api = api(|b| Reply::Stream(reply(b, vec![text_block(0, &["Hello"])], "end_turn"))).await;
+        let h = chat(&api);
+        h.send("Hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        let before = h.path();
+        let err = engine::continue_reply(h.app.handle(), &h.st, &h.conv).await.unwrap_err();
+        assert!(err.to_string().contains("cut off"), "{err}");
+        assert_eq!(api.streams().len(), 1, "nothing was asked of the API");
+        h.assert_reset();
+        let after = h.path();
+        assert_eq!((after.len(), &after[1].content, &after[1].meta), (before.len(), &before[1].content, &before[1].meta));
+    });
+}
+
 #[test]
 fn stop_mid_stream_keeps_what_had_arrived() {
     block_on(async {

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -511,8 +511,8 @@ impl TurnState {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit(app: &AppHandle, st: &AppState, conv_id: &str, ts: &mut TurnState, mcp: &HashMap<String, (String, String)>, math: bool, extra_live: &HashMap<String, String>, force: bool) {
-    if !force && ts.last_emit.elapsed() < Duration::from_millis(45) {
+fn emit<R: Runtime>(app: &AppHandle<R>, st: &AppState, conv_id: &str, ts: &mut TurnState, mcp: &HashMap<String, (String, String)>, math: bool, extra_live: &HashMap<String, String>, force: bool) {
+    if !force && ts.last_emit.elapsed() < crate::engine::EMIT_EVERY {
         return;
     }
     ts.last_emit = Instant::now();
@@ -597,7 +597,7 @@ enum Outcome {
     Next(String),
 }
 
-pub async fn run(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
+pub async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
     crate::shellenv::ready().await;
     let (mut id, mut fresh) = (user_msg_id, false);
     loop {
@@ -658,6 +658,17 @@ fn first_input_line(message: &Value, files: Vec<Value>, history: &str, human: bo
         line["origin"] = json!({"kind": "human"});
     }
     line
+}
+
+/// The message that asks the CLI to go on with a reply that was cut off. Its session lacks what only
+/// streamed in (the CLI keeps finished blocks), so the reply's last words go with it, as data.
+fn continue_request(reply: &Value) -> Value {
+    let text = render::plain_text(reply);
+    let tail: String = text.chars().skip(text.chars().count().saturating_sub(2000)).collect();
+    json!([{"type": "text", "text": format!(
+        "Your previous reply was cut off. Continue it from exactly where it stopped, without repeating what it already says. It ended with:\n<reply_end>\n{}\n</reply_end>",
+        tail.trim_end()
+    )}])
 }
 
 /// The `fast-mode-unavailable` event for a turn that asked for fast mode and runs without it, from the CLI's
@@ -1013,8 +1024,8 @@ fn track_workflows(bg: &mut HashSet<String>, ev: &Value) -> bool {
 }
 
 #[allow(unused_assignments)]
-async fn run_once(
-    app: &AppHandle,
+async fn run_once<R: Runtime>(
+    app: &AppHandle<R>,
     st: &Arc<AppState>,
     conv_id: &str,
     user_msg_id: String,
@@ -1025,6 +1036,10 @@ async fn run_once(
     let settings = st.settings.read().clone();
     let user = st.db.msg_get(&user_msg_id)?;
     let path = st.db.path_to(&user_msg_id)?;
+    // a turn started from a reply that was cut off goes on with it (send_message's continue_reply)
+    let continuing = user.role == "assistant";
+    // the messages the CLI is to hold already: those before the new message, or the whole reply to go on with
+    let before = if continuing { path.len() } else { path.len().saturating_sub(1) };
     // a chat conversation: plain chat on the Claude account, in a folder of ours
     let chat = conv.kind != "code";
     let cwd = if chat { chat_dir(st) } else { conv.cwd.clone().unwrap_or_default() };
@@ -1052,7 +1067,7 @@ async fn run_once(
     }
 
     // Resume the CLI session at the right point in our tree.
-    let prev_at = path[..path.len().saturating_sub(1)].iter().rposition(|m| m.meta["cc_uuid"].is_string());
+    let prev_at = path[..before].iter().rposition(|m| m.meta["cc_uuid"].is_string());
     let mode = conv.options["permission_mode"].as_str().unwrap_or("default").to_string();
     let mut args: Vec<String> = [
         "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
@@ -1163,7 +1178,8 @@ async fn run_once(
     let (files, file_keys) = unsent_files(project_files, held);
     // A person typed it: the CLI then honours what only a person may type, such as the "ultracode"
     // keyword. Not over a replayed conversation, whose earlier words aren't this message's.
-    let first_line = first_input_line(&user.content, files, &history, !chat && !with_history);
+    let message = if continuing { continue_request(&user.content) } else { user.content.clone() };
+    let first_line = first_input_line(&message, files, &history, !chat && !with_history && !continuing);
     if !file_keys.is_empty() {
         let mut meta = user.meta.clone();
         meta["cc_files"] = json!(file_keys);
@@ -1192,7 +1208,7 @@ async fn run_once(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let err_tail: Arc<parking_lot::Mutex<VecDeque<String>>> = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
-    {
+    let err_reader = {
         let err_tail = err_tail.clone();
         tokio::spawn(async move {
             // read to the end, whatever the encoding (a message in the system
@@ -1205,8 +1221,8 @@ async fn run_once(
                 }
                 t.push_back(l);
             }
-        });
-    }
+        })
+    };
     // the line to this run: Stop for one workflow, a message while one runs
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
     st.cc_ctl.lock().insert(conv_id.to_string(), Ctl { tx: ctl_tx, waiting: false, spare: false });
@@ -1239,6 +1255,19 @@ async fn run_once(
         last_emit: Instant::now() - Duration::from_secs(1),
         cost_before,
     };
+    if continuing {
+        // the reply goes on, no longer cut off: what comes is shown and settled with it
+        let mut reply = st.db.msg_get(&user_msg_id)?;
+        if let Some(m) = reply.meta.as_object_mut() {
+            m.remove("error");
+            m.remove("stopped");
+        }
+        st.db.msg_update(&reply.id, &reply.content, &reply.meta)?;
+        ts.siblings = view::siblings_of(&st.db.tree_nodes(conv_id)?, &reply.id);
+        ts.first_id = Some(reply.id.clone());
+        ts.rows.push(reply);
+    }
+    let seeded = ts.rows.len();
     let mcp: HashMap<String, (String, String)> = HashMap::new();
     let math = settings.latex_enabled;
     let mut session_id: Option<String> = None;
@@ -1688,8 +1717,10 @@ async fn run_once(
     }
     // Let the CLI exit on its own, then stop it and everything it started.
     stop_cli(child, stdin, events.is_err()).await;
+    // what it last wrote (why it exited, a lost session) is read before it's looked at; a process it left
+    // running can keep the pipe open
+    let _ = tokio::time::timeout(Duration::from_secs(1), err_reader).await;
     events?;
-    ts.streaming = None;
     // a turn ended by a Stop that spared the workflows ends stopped too, not failed
     let stopped = interrupted || turn_stopped;
 
@@ -1726,7 +1757,7 @@ async fn run_once(
     if error.as_deref().is_some_and(|e| e.contains("Not logged in") || e.contains("/login")) {
         error = Some("You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).".into());
     }
-    if !fresh && ts.rows.is_empty() && !interrupted && !delivered {
+    if !fresh && ts.rows.len() == seeded && !interrupted && !delivered {
         let text = format!("{} {}", error.clone().unwrap_or_default(), err_text);
         if is_resume_lost(&text) {
             return Ok(Outcome::ResumeLost);
@@ -1785,6 +1816,8 @@ fn settle_rows(
     error: Option<&str>,
     budget_stop: Option<&Value>,
 ) -> AppResult<bool> {
+    // what streamed in of a message the CLI never finished (it exited, or a Stop) is kept
+    ts.rows = ts.display_rows();
     ts.streaming = None;
     let Some(i) = ts.rows.iter().rposition(|r| r.role == "assistant") else { return Ok(false) };
     // the turn's earlier answers are complete too: with no stop_reason, the next start would take them for cut off
@@ -1804,7 +1837,9 @@ fn settle_rows(
         row.meta["cc_cost_total"] = r["total_cost_usd"].clone();
         row.meta["duration_ms"] = wall_ms.map(|ms| json!(ms)).unwrap_or_else(|| r["duration_ms"].clone());
     }
-    row.meta["stop_reason"] = json!(if interrupted { Value::Null } else { json!("end_turn") });
+    // unfinished when stopped, or when the CLI went away mid-reply (as a dropped stream leaves it on the API)
+    let cut_off = interrupted || (result.is_none() && error.is_some());
+    row.meta["stop_reason"] = if cut_off { Value::Null } else { json!("end_turn") };
     if interrupted {
         row.meta["stopped"] = json!(true);
     }
@@ -1867,7 +1902,7 @@ fn answered(input: &Value, message: Option<&str>) -> Value {
 }
 
 /// The CLI's answer for a permission prompt the user (or Stop) resolved.
-fn permission_response(app: &AppHandle, st: &Arc<AppState>, conv_id: &str, done: &PermDone) -> Value {
+fn permission_response<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, done: &PermDone) -> Value {
     let decision = done.reply.as_ref().map(|r| r.decision.as_str());
     let input = &done.input;
     let mut response = match decision {

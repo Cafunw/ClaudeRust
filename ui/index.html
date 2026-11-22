@@ -7,9 +7,11 @@
   <link rel="stylesheet" href="css/app.css">
   <link rel="stylesheet" href="vendor/katex/katex.min.css">
   <script>
-    // Avoid a white flash before settings load.
+    // Avoid a white flash before settings load: the theme chosen last time (main.js keeps it), else the system's.
     (function () {
-      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var saved;
+      try { saved = JSON.parse(localStorage.getItem('clauderust.ui') || '{}').theme; } catch (e) { /* none */ }
+      var dark = saved === 'dark' || (saved !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
       document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     })();
   </script>

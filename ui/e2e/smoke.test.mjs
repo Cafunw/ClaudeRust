@@ -16,7 +16,7 @@ import path from 'node:path';
 import { startMock, TITLE, ARTIFACT_ERROR } from './mock_api.mjs';
 import { contrast } from './contrast.mjs';
 
-const CDP = 'http://127.0.0.1:9333';
+const CDP = `http://127.0.0.1:${process.env.CLAUDERUST_E2E_PORT || 9333}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const required = !!process.env.CLAUDERUST_E2E_REQUIRED;
 

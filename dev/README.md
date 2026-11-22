@@ -22,6 +22,18 @@ npm run e2e
 local mock of the API. Tests that need a real Claude Code CLI, and benchmarks,
 are `#[ignore]`d.
 
+## Installers
+
+```powershell
+npm run build:unsigned   # installers in target/release/bundle, no signing key
+```
+
+`npm run build` (plain `npx tauri build`) also makes the update files the
+in-app updater downloads (`createUpdaterArtifacts` in `tauri.conf.json`), which
+must be signed, so it stops without `TAURI_SIGNING_PRIVATE_KEY` (and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). Only the Release workflow has that key;
+the *Build installers* workflow builds unsigned like `build:unsigned`.
+
 ## Run the app against a local mock of the Claude API
 
 `mock_api.py` speaks the Messages API (SSE streaming) and returns canned
