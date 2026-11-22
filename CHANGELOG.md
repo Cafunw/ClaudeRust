@@ -3,6 +3,129 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.5] - 2026-11-22
+
+Plan usage limits, thinking and Fast mode on your Claude account, code
+execution and Research with an API key, incognito chats, chat memory,
+Skills, a connector directory and MCP Apps.
+
+**Chats on your Claude account**
+- The sidebar shows how much of your plan's usage limits (the 5-hour and
+  weekly windows) is used, as Claude Code reports it. It appears after the
+  first answer on the account since the app started. A banner over the
+  message box says when a limit is close (80 % or the server's warning) or
+  reached; sending stays possible either way.
+- The extended thinking switch now applies here too, on the models where
+  Claude Code lets thinking be turned off.
+- Fast mode, on Opus 5.5 and Fable 5.2: faster answers at twice the price
+  per token, which the switch shows. It works here and with an API key, and
+  Settings can turn it on for new chats. When the account or the API can't
+  give it, the reply runs at standard speed (on the account a note says
+  so).
+- With *Search and reference chats* on, these chats can search your
+  earlier chats too; before, only chats on an API key could.
+
+**With an Anthropic API key**
+- Code execution and file creation (Settings, on by default): Claude can
+  run code in Anthropic's sandbox, for example to analyse data or make a
+  spreadsheet, slides, a document or a PDF. The files it makes are saved in
+  a folder of the chat's, never opened by themselves, and listed under the
+  reply as *Files Claude made*, with *Save a copy* and *Show in its folder*.
+- *Research*: a message sent with it on is split into up to 5
+  sub-questions, each searched by an agent that can only search and read
+  the web, and the answer is a report with its sources. It spends at most
+  the turn's budget (2 USD when none is set); Stop ends all of it.
+- A project whose text files add up to more than 150,000 characters is no
+  longer sent whole with every message: Claude gets the list of files and
+  searches or reads them as it needs. Smaller projects work as before.
+
+**Chats and the sidebar**
+- *New incognito chat*: nothing of it is kept once you close it (the chat,
+  its Claude Code transcript, files its code made), also after a crash. It
+  stays out of search, memory, the past-chat tools, usage totals, the
+  Artifacts page, export and print.
+- Conversations can be pinned, archived and marked unread, and put in
+  sidebar sections (groups in the Code tab) by dragging them there. An
+  answer that ends while you are in another chat marks its chat unread.
+- Chat memory, off until you turn it on in Settings → Memory: a small
+  Claude model keeps short notes about you from your recent chats, which
+  you can read, edit, add to and delete, and new chats get them. One memory
+  for chats outside projects and, unless you turn it off, one per project;
+  a project can be left out. Incognito chats are never read for it.
+- Mermaid code blocks in replies are drawn as diagrams, in a sandboxed
+  frame; the source stays a click away.
+- *Read aloud* speaks an answer with the system's voices, where the system
+  has any.
+- *Print or save as PDF…* in a chat's menu.
+- Screen readers hear answers as they stream, notices and errors; focus
+  stays inside an open dialog and goes back where it was when it closes;
+  a permission card can be answered from the keyboard (Enter allows once,
+  Esc denies).
+
+**Skills, connectors and extensions**
+- Settings → Skills lists your personal skills, a project's, and those of
+  installed plugins, and turns them on or off. *Install skill…* shows what
+  a .zip or .skill holds before it installs, and *Create skill…* starts a
+  chat in which Claude writes one.
+- *Browse connectors*: 15 MCP servers run by their vendors (GitHub,
+  Linear, Notion, Sentry, Atlassian, Asana, Stripe, PayPal, Intercom,
+  Square, Figma, Supabase, Neon, Context7, DeepWiki); picking one fills in
+  the custom connector form.
+- Extensions can be uninstalled, and their settings changed.
+- MCP Apps: a tool that comes with an interactive page shows it with its
+  result, in the artifact sandbox. The page's tool calls follow the same
+  Allow, Ask or Block setting as Claude's own (Ask unless you changed it).
+- MCP servers in a Code session get the session's folder as their root.
+- On Windows and macOS a custom connector's bearer token and an
+  extension's secret settings are kept in the system's credential store,
+  with only a reference in the config file; a token already in the file
+  moves there the next time the app saves the MCP settings. On Linux they
+  stay in the file, and the connector form says so.
+
+**Artifacts**
+- `confirm`, `alert` and `prompt` behave as in a sandboxed page: `confirm`
+  answers no, `alert` shows nothing, `prompt` gives no text.
+- In chats where an artifact can't ask Claude (`window.claude.complete`),
+  such as those on your Claude account, the call is refused without first
+  asking you to allow it.
+- The Artifacts page shows Claude's later edits to an artifact.
+
+**Attachments**
+- Refusals of an attachment are shown in the app's language.
+- A message is refused before sending when its attachments add up to more
+  than about 30 MB, or when a PDF has more than 100 pages for a model with
+  a 200K context; the message says why.
+
+**Other**
+- Settings → About has *Show logs* and *Copy diagnostics*, which copies
+  the end of the app's log with keys, tokens, e-mail addresses and home
+  folders taken out.
+- The computer doesn't go to sleep while Claude works (an answer, a Code
+  session, a workflow or a routine); Settings → *Keep awake while Claude
+  works*, on by default. The display may still turn off.
+
+**Development**
+- The end-to-end test launcher prints a line every minute while it waits
+  for the development copy's window, and that copy's last output when it
+  fails, so a CI log shows why. The CI end-to-end job's first run, with
+  0.1.4, timed out before the window came up.
+
+**Known limits**
+- MCP Apps are shown inline only: no side panel or full screen, and an app
+  can't update what Claude knows.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- There is no extension directory and no extension update check. MCP
+  sampling is not supported.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs, so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.4] - 2026-11-22
 
 Project files and cleanup for chats on your Claude account, Excel and

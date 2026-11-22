@@ -1,7 +1,7 @@
 {
   "name": "clauderust",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Tooling for building ClaudeRust (the app itself is Rust + static UI; no JS build step).",
   "license": "MIT",
   "scripts": {
