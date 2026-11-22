@@ -79,6 +79,20 @@ function appLogTail(n) {
   }
 }
 
+/** Where the start stopped, from the OS: the app's and WebView2's processes with their command lines, the port, the data folders. */
+function processInfo() {
+  if (process.platform !== 'win32') return '';
+  const identifier = JSON.parse(fs.readFileSync(config, 'utf8')).identifier;
+  const ps = [
+    "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'clauderust.exe','msedgewebview2.exe' } | ForEach-Object { $c = [string]$_.CommandLine; if ($c.Length -gt 300) { $c = $c.Substring(0, 300) }; '{0} {1} {2}' -f $_.ProcessId, $_.Name, $c }",
+    "Get-Process clauderust -ErrorAction SilentlyContinue | ForEach-Object { 'clauderust responding: ' + $_.Responding + ', window: ' + $_.MainWindowHandle }",
+    "netstat -ano | Select-String ':9333'",
+    `foreach ($d in "$env:APPDATA\\${identifier}", "$env:LOCALAPPDATA\\${identifier}") { 'folder ' + $d; Get-ChildItem -Recurse -Depth 3 $d -ErrorAction SilentlyContinue | Select-Object -First 25 | ForEach-Object { '  ' + $_.FullName + ' ' + $_.Length } }`,
+    `Get-ChildItem -Recurse "$env:LOCALAPPDATA\\${identifier}" -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { 'DevToolsActivePort: ' + (Get-Content $_.FullName -Raw) }`,
+  ].join('; ');
+  return spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).stdout.trim();
+}
+
 /** What the debugging port answers and how many WebView2 processes exist, for the heartbeat. */
 async function portState() {
   const t = await targets();
@@ -92,6 +106,7 @@ let code = 1;
 try {
   const t0 = Date.now();
   let beat = t0;
+  let infoShown = false;
   // the app's page (from the Tauri CLI's dev server), not the blank one the window starts with
   while (!(await targets())?.some((t) => t.type === 'page' && /^(https?|tauri):/.test(t.url))) {
     if (exited !== null) throw new Error(`the dev copy exited (${exited}) before its window was up; see ${devLog}`);
@@ -101,6 +116,11 @@ try {
       beat = Date.now();
       const last = tail(300).split(/\r?\n/).pop();
       console.log(`[${Math.round((beat - t0) / 1000)} s] waiting for the window; the dev copy's last line: ${last}; ${await portState()}`);
+      // once, a few minutes in (the build is done by then): what the OS says about the app and WebView2
+      if (!infoShown && beat - t0 > 6 * 60_000) {
+        infoShown = true;
+        console.log(`--- processes and folders ---\n${processInfo()}`);
+      }
     }
     await sleep(1000);
   }
@@ -112,7 +132,7 @@ try {
   console.error(e.message);
   console.error(`--- the dev copy's output, last lines ---\n${tail(3000)}`);
   console.error(`--- the app's own log, last lines ---\n${appLogTail(6000)}`);
-  console.error(`--- ${await portState()}`);
+  console.error(`--- ${await portState()}\n${processInfo()}`);
 } finally {
   stop();
 }
