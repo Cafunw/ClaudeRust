@@ -19,12 +19,19 @@ content
 Types:
 - application/vnd.ant.code: source code. Set the language attribute (for example python, rust, typescript).
 - text/markdown: formatted documents.
-- text/html: a complete single-file web page with its HTML, CSS and JavaScript together. External scripts may only come from cdnjs.cloudflare.com, cdn.jsdelivr.net or unpkg.com.
+- text/html: a complete single-file web page with its HTML, CSS and JavaScript together. External scripts may only come from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com, esm.sh or cdn.tailwindcss.com.
 - image/svg+xml: an SVG image.
 - application/vnd.ant.mermaid: a Mermaid diagram (the diagram source only).
-- application/vnd.ant.react: a single-file React component that is the default export and takes no required props. Tailwind CSS utility classes are available. You may import only: react, lucide-react, recharts, lodash, d3, three, mathjs, papaparse, chart.js, framer-motion, clsx, date-fns. Browser storage (localStorage, sessionStorage) is not available.
+- application/vnd.ant.react: a single-file React component that is the default export and takes no required props. Tailwind CSS utility classes are available. You may import only: react, react-dom, lucide-react, recharts, lodash, d3, three, mathjs, papaparse, chart.js, framer-motion, clsx, tailwind-merge, class-variance-authority, date-fns, the shadcn/ui components @/components/ui/NAME where NAME is alert, badge, button, card, checkbox, dialog, input, label, progress, select, separator, slider, switch, tabs, textarea or tooltip (for example `import { Button } from "@/components/ui/button"`), and `cn` from @/lib/utils.
 
-To change an existing artifact, output it again in full with the same identifier; earlier versions remain available to the user. Create at most one artifact per response unless the user asks for more. Do not put markdown code fences inside an artifact. Introduce or summarize the artifact briefly in normal text rather than repeating its content outside it.
+HTML and React artifacts run sandboxed: localStorage, sessionStorage and cookies are not available. To keep data (on this device, for this artifact) use the async window.storage: `await window.storage.set(key, value)` with a string value (JSON.stringify objects), `await window.storage.get(key)` returns `{key, value}` or null, `await window.storage.delete(key)`, `await window.storage.list(prefix)` returns `{keys}`; keys are 1 to 200 characters without spaces, slashes or quotes. An artifact can also ask Claude: `await window.claude.complete(prompt)` returns the text of a short answer (prompts up to 20,000 characters). The user is asked before it runs and may decline, and it can be unavailable or rate-limited, so catch its errors and keep the artifact usable.
+
+To change an existing artifact, output it again in full with the same identifier, or, for a few changes to a long artifact, send only the changes:
+<antArtifact identifier="same-id" type="TYPE" title="Short title" command="update">
+<old_str>text copied exactly from the current version</old_str>
+<new_str>its replacement</new_str>
+</antArtifact>
+Each old_str must appear exactly once in the current version, so include enough surrounding text to make it unique; repeat old_str/new_str pairs for more changes (applied in order). Rewrite in full when most of it changes. Earlier versions remain available to the user. Create at most one artifact per response unless the user asks for more. Do not put markdown code fences inside an artifact. Introduce or summarize the artifact briefly in normal text rather than repeating its content outside it.
 </artifacts_info>"#;
 
 pub fn style_prompt(style: &str, settings: &Settings) -> Option<String> {
@@ -186,5 +193,19 @@ mod tests {
         assert!(sys.contains("antArtifact"));
         assert!(sys.contains("Ada"));
         assert!(sys.contains("<user_style>"));
+    }
+
+    #[test]
+    fn artifacts_info_states_what_the_runtime_provides() {
+        let react = ARTIFACTS_INFO.lines().find(|l| l.starts_with("- application/vnd.ant.react")).unwrap();
+        for m in crate::artifacts::UI_MODULES {
+            assert!(react.contains(&format!(" {m}")), "@/components/ui/{m}");
+        }
+        assert!(react.contains("@/lib/utils"));
+        for api in ["window.storage.set(key, value)", "window.storage.get(key)", "window.storage.delete(key)", "window.storage.list(prefix)", "window.claude.complete(prompt)"] {
+            assert!(ARTIFACTS_INFO.contains(api), "{api}");
+        }
+        assert_eq!(crate::artifact_ai::MAX_PROMPT_CHARS, 20_000, "the prompt says 20,000 characters");
+        assert!(ARTIFACTS_INFO.contains("command=\"update\"") && ARTIFACTS_INFO.contains("<old_str>") && ARTIFACTS_INFO.contains("<new_str>"));
     }
 }

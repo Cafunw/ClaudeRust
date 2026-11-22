@@ -195,6 +195,9 @@ pub fn artifact_json(a: artifacts::ArtifactSpec, version: u32) -> Value {
         "previewable": artifacts::is_previewable(&a.kind),
         "ext": artifacts::extension(&a.kind, a.language.as_deref()),
     });
+    if a.update {
+        v["update"] = Value::Bool(true);
+    }
     // moved in: `json!` would copy it, and it is most of the artifact
     v["content"] = Value::String(a.content);
     v
@@ -952,6 +955,13 @@ pub fn plain_text(content: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_update_says_so_in_its_json() {
+        let spec = |update| artifacts::ArtifactSpec { identifier: "a".into(), kind: "text/html".into(), title: "A".into(), language: None, content: "x".into(), complete: true, update };
+        assert_eq!(artifact_json(spec(true), 2)["update"], true);
+        assert!(artifact_json(spec(false), 1).get("update").is_none());
+    }
 
     #[test]
     fn partial_json() {

@@ -10,6 +10,7 @@ import { updatesSection } from './updates.js';
 import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
 import { oauthControls } from './mcp_oauth_ui.js';
 import { errorNotice } from './neterr.js';
+import { connectorDialog, removeConnector } from './mcp_connector.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -306,9 +307,10 @@ const RENDER = {
       // a config that can't be used starts no servers: say why
       if (status.config_problem) servers.appendChild(h(`<div class="notice error" style="margin:0 0 14px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
       if (!status.servers.length) servers.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('plug', 28)}<div style="margin-top:8px">${t('no_servers')}</div></div>`));
-      for (const s of status.servers) servers.appendChild(serverCard(s, () => draw()));
+      for (const s of status.servers) servers.appendChild(serverCard(s, draw, status));
       actions.innerHTML = '';
-      actions.appendChild(button(t('edit_config'), 'primary', () => editConfig(status, draw)));
+      actions.appendChild(button(t('cc_title'), 'primary', () => connectorDialog(status, draw)));
+      actions.appendChild(button(t('edit_config'), '', () => editConfig(status, draw)));
       actions.appendChild(button(t('open_file'), '', () => call('open_path', { path: status.config_path }).catch(errorToast)));
       actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
       actions.appendChild(button(t('install_extension'), '', () => installExtension(draw)));
@@ -486,19 +488,26 @@ const RENDER = {
   },
 };
 
-function serverCard(s, redraw) {
+/** A server's card; `redraw(status?)` draws the list again, `status` is the mcp_status reply it came from. */
+function serverCard(s, redraw, status) {
   const disabled = (store.settings.disabled_mcp_servers || []).includes(s.name) || s.status === 'disabled';
   const card = h(`<div class="server"><div class="head">${icon('plug', 16)}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
     <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t('tools_count', { n: s.tools.length }) : ''}</div></div>
     <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
+    ${s.transport === 'http' ? `<button class="icon-btn sm" data-a="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">${icon('edit', 15)}</button><button class="icon-btn sm" data-a="remove" title="${esc(t('cc_remove'))}" aria-label="${esc(t('cc_remove'))}">${icon('trash', 15)}</button>` : ''}
     <label class="switch" title="${t('enabled')}"><input type="checkbox" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);
+  if (s.transport === 'http') {
+    card.querySelector('[data-a=edit]').onclick = () => connectorDialog(status, redraw, s.name);
+    card.querySelector('[data-a=remove]').onclick = () => removeConnector(status, s, redraw).catch(errorToast);
+  }
   card.querySelector('input').addEventListener('change', (e) => {
     const set = new Set(store.settings.disabled_mcp_servers || []);
     if (e.target.checked) set.delete(s.name); else set.add(s.name);
     save({ disabled_mcp_servers: [...set] });
     setTimeout(redraw, 1500);
   });
-  if (s.error) card.appendChild(errorNotice(s.error)).style.margin = '10px 0 0';
+  // (a server waiting for a sign-in says so in its badge and its Sign in button)
+  if (s.error && s.status !== 'needs_auth') card.appendChild(errorNotice(s.error)).style.margin = '10px 0 0';
   card.appendChild(oauthControls(s, redraw));
   if (s.tools.length) {
     const tl = h('<div class="tools-list"></div>');

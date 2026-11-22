@@ -7,6 +7,7 @@ import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
 import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot } from './util.js';
 import { conversationMenu } from './chat.js';
 import { pendingUpdate, showUpdates } from './updates.js';
+import { tight, roomStep } from './sidebar_room.js';
 
 const RECENT_LIMIT = 30;
 
@@ -107,7 +108,11 @@ export function mountSidebar() {
     if (e.target.closest('[data-act=toggle]')) toggleSidebar();
   });
   $('#sidebar-scrim').addEventListener('click', closeOverlay);
-  narrow.addEventListener('change', closeOverlay);
+  // folded at start because the window was narrow: it opens once there's room
+  autoFolded = store.sidebarCollapsed && !loadLocal().sidebarCollapsed;
+  wasTight = tight(window.innerWidth, false);
+  window.addEventListener('resize', fitRoom);
+  new MutationObserver(fitRoom).observe($('#artifact-panel'), { attributes: true, attributeFilter: ['class'] });
   on('conversations-changed', refreshSidebar);
   on('running-changed', renderLists);
   on('route-changed', () => { rememberRoute(); highlight(); closeOverlay(); });
@@ -121,7 +126,7 @@ export function mountSidebar() {
     highlight();
   });
   on('settings-changed', renderUserCard);
-  on('collapse-sidebar', () => { if (!store.sidebarCollapsed) toggleSidebar(); });
+  on('collapse-sidebar', fitRoom);
 }
 
 function renderNav() {
@@ -136,21 +141,39 @@ function renderNav() {
   highlight();
 }
 
+function setCollapsed(on) {
+  store.sidebarCollapsed = on;
+  $('#sidebar').classList.toggle('collapsed', on);
+}
+
+// folded by itself to make room, not by you (sidebar_room.js); not saved,
+// so a later start opens it as you left it
+let autoFolded = false;
+let wasTight = false;
+
 export function toggleSidebar() {
-  store.sidebarCollapsed = !store.sidebarCollapsed;
-  $('#sidebar').classList.toggle('collapsed', store.sidebarCollapsed);
+  autoFolded = false;
+  setCollapsed(!store.sidebarCollapsed);
   saveLocal({ sidebarCollapsed: store.sidebarCollapsed });
+}
+
+/** Fold or open the sidebar as the room for it runs out or comes back. */
+function fitRoom() {
+  const panel = $('#artifact-panel');
+  const now = tight(window.innerWidth, !!panel && !panel.classList.contains('hidden'));
+  const step = roomStep(wasTight, now, store.sidebarCollapsed, autoFolded);
+  wasTight = now;
+  if (step) { setCollapsed(step === 'fold'); autoFolded = step === 'fold'; }
 }
 
 // as wide as app.css's narrow layout, where the open sidebar lies over the page
 const narrow = window.matchMedia('(max-width: 760px)');
 
-/** In a narrow window, fold the sidebar that covers the page (not saved, so
- *  a later start in a wide window opens it as you left it). */
+/** In a narrow window, fold the sidebar that covers the page. */
 function closeOverlay() {
   if (!narrow.matches || store.sidebarCollapsed) return;
-  store.sidebarCollapsed = true;
-  $('#sidebar').classList.add('collapsed');
+  setCollapsed(true);
+  autoFolded = true;
 }
 
 function renderUserCard() {

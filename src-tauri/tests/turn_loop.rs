@@ -197,7 +197,7 @@ fn stalled(body: &Value) -> Reply {
 
 type Events = Arc<Mutex<Vec<(String, Value)>>>;
 
-const EVENTS: [&str; 5] = ["generation-state", "turn", "permission-request", "permission-resolved", "conversation-updated"];
+const EVENTS: [&str; 6] = ["generation-state", "turn", "permission-request", "permission-resolved", "conversation-updated", "generation-retry"];
 
 struct Harness {
     app: tauri::App<MockRuntime>,
@@ -473,18 +473,29 @@ fn stop_mid_stream_keeps_what_had_arrived() {
 #[test]
 fn a_reply_cut_off_by_a_crash_is_kept_and_shown_stopped() {
     block_on(async {
-        let api = api(stalled).await;
+        // quiet in the middle of a block: no later event makes the save due, only time
+        let api = api(|b| {
+            let mut v = vec![message_start(b)];
+            v.extend(text_block(0, &["Partial ", "answer"]).into_iter().take(3));
+            Reply::Stall(v)
+        })
+        .await;
         let dir = temp_dir();
         let file = dir.join("app.db");
         let h = Harness::new(&api, Db::open(&file).unwrap(), dir);
-        h.send("Hi");
-        // the database as the next start finds it, while the reply is still streaming
+        let user = h.send("Hi");
+        // the database as the next start finds it, while the reply is still streaming;
+        // the reply's row is the leaf only once the turn has stored it
         let next = Db::open(&file).unwrap();
-        let leaf = h.st.db.conv_get(&h.conv).unwrap().current_leaf.unwrap();
-        until("the reply so far to be saved", || (next.msg_get(&leaf).unwrap().content[0]["text"] == "Partial answer").then_some(())).await;
-        assert!(next.msg_get(&leaf).unwrap().meta["stop_reason"].is_null(), "unfinished");
+        let saved = until("the reply so far to be saved", || {
+            let leaf = next.conv_get(&h.conv).unwrap().current_leaf?;
+            next.msg_get(&leaf).ok().filter(|m| m.content[0]["text"] == "Partial answer")
+        })
+        .await;
+        assert_eq!(saved.parent_id.as_deref(), Some(user.as_str()));
+        assert!(saved.meta["stop_reason"].is_null(), "unfinished");
         assert_eq!(next.mark_interrupted().unwrap(), 1, "what every start runs");
-        let saved = next.msg_get(&leaf).unwrap();
+        let saved = next.msg_get(&saved.id).unwrap();
         assert_eq!(saved.meta["stopped"], true);
         assert_eq!(saved.content[0], json!({"type": "text", "text": "Partial answer"}));
         engine::stop(&h.st, &h.conv);
@@ -558,6 +569,51 @@ fn a_rate_limited_request_is_retried() {
         let a = &h.path()[1];
         assert_eq!(a.content, json!([{"type": "text", "text": "Hello"}]));
         assert!(a.meta["error"].is_null());
+        let reasons: Vec<Value> = h.events("generation-retry").iter().map(|r| r["reason"].clone()).collect();
+        assert_eq!(reasons, vec![json!("rate_limited")]);
+    });
+}
+
+#[test]
+fn a_server_error_is_retried_and_the_wait_is_announced() {
+    block_on(async {
+        let n = AtomicUsize::new(0);
+        let api = api(move |b| match n.fetch_add(1, Ordering::SeqCst) {
+            0 => Reply::Plain(500, vec![("retry-after", "0")], json!({"type": "error", "error": {"type": "api_error", "message": "Internal server error"}}).to_string()),
+            _ => Reply::Stream(reply(b, vec![text_block(0, &["Hello"])], "end_turn")),
+        })
+        .await;
+        let h = chat(&api);
+        h.send("Hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        h.assert_reset();
+        assert_eq!(h.path()[1].content, json!([{"type": "text", "text": "Hello"}]));
+        let retries = h.events("generation-retry");
+        assert_eq!(retries.len(), 1, "{retries:?}");
+        let wait = retries[0]["wait_ms"].as_u64().unwrap();
+        assert!(wait < 1000, "retry-after 0 waits only the jitter, not {wait} ms");
+        assert_eq!(retries[0], json!({"conversation_id": h.conv, "attempt": 1, "max_attempts": 4, "wait_ms": wait, "reason": "server_error"}));
+        // what takes the notice down: the reply's own turn events, after it
+        let ev = h.events.lock().unwrap();
+        let at = ev.iter().position(|(n, _)| n == "generation-retry").unwrap();
+        assert!(ev[at..].iter().any(|(n, p)| n == "turn" && p["conversation_id"] == h.conv.as_str()), "no turn event after the retry");
+    });
+}
+
+#[test]
+fn a_broken_reply_from_an_openai_compatible_endpoint_keeps_what_had_arrived() {
+    block_on(async {
+        let api = api(|_| Reply::Drop(vec![json!({"choices": [{"delta": {"content": "Partial "}}]}), json!({"choices": [{"delta": {"content": "answer"}}]})])).await;
+        let h = chat(&api);
+        h.st.settings.write().oai_base_url = format!("{}/v1", api.url);
+        h.st.db.conv_set_model(&h.conv, "oai:local").unwrap();
+        h.send("Hi");
+        let end = h.ended().await;
+        assert!(end["error"]["message"].is_string(), "{end}");
+        h.assert_reset();
+        let a = &h.path()[1];
+        assert_eq!(a.content, json!([{"type": "text", "text": "Partial answer"}]));
+        assert_eq!(a.meta["error"]["message"], end["error"]["message"]);
     });
 }
 
@@ -577,6 +633,7 @@ fn an_overloaded_model_falls_back_to_another() {
         h.assert_reset();
         let models: Vec<Value> = api.streams().iter().map(|b| b["model"].clone()).collect();
         assert_eq!(models, vec![json!("claude-opus-5-5"), json!("claude-sonnet-5-5")]);
+        assert!(h.events("generation-retry").is_empty(), "the API said not to retry");
         let a = &h.path()[1];
         assert_eq!(a.meta["overload_fallback"], json!({"from": "claude-opus-5-5", "to": "claude-sonnet-5-5"}));
         assert_eq!(a.meta["model"], "claude-sonnet-5-5");

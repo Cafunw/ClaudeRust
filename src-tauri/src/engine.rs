@@ -2,7 +2,7 @@
 //! streams responses to the UI, runs tools (MCP and Code-mode tools) with
 //! permission prompts, and loops until the model finishes its turn.
 
-use crate::anthropic::{Accumulator, Client, StreamOutcome};
+use crate::anthropic::{Accumulator, Client, Retry, StreamOutcome};
 use crate::attachments;
 use crate::codetools::{self, CodeSession, Perm};
 use crate::db::{Conversation, Db, Message};
@@ -120,6 +120,19 @@ fn emit_state<R: Runtime>(app: &AppHandle<R>, conv_id: &str, running: bool, erro
         "generation-state",
         json!({"conversation_id": conv_id, "running": running, "error": error}),
     );
+}
+
+/// `generation-retry` for each automatic retry of the conversation's
+/// request; the UI shows it until the conversation's next `turn` or
+/// `generation-state` event, or a newer retry.
+fn retry_notice<R: Runtime>(app: &AppHandle<R>, conv_id: &str) -> impl Fn(&Retry) + Send + Sync + 'static {
+    let (app, conv_id) = (app.clone(), conv_id.to_string());
+    move |r| {
+        let _ = app.emit(
+            "generation-retry",
+            json!({"conversation_id": conv_id, "attempt": r.attempt, "max_attempts": r.max_attempts, "wait_ms": r.wait_ms, "reason": r.reason}),
+        );
+    }
 }
 
 pub fn emit_conv_updated<R: Runtime>(app: &AppHandle<R>, conv_id: &str) {
@@ -1104,7 +1117,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
         }
 
         let client = match st.client() {
-            Ok(c) => c,
+            Ok(c) => c.on_retry(retry_notice(app, conv_id)),
             Err(e) => {
                 am.meta["error"] = serde_json::to_value(&e)?;
                 st.db.msg_update(&am_id, &am.content, &am.meta)?;
@@ -1133,15 +1146,24 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
             let mut cur = am.clone();
             // the first block's start has nothing to save yet
             let mut saved = (Instant::now(), 1);
-            let mut on_event = |acc: &Accumulator, _changed: Option<usize>| {
-                if save_due(&mut saved, Instant::now(), acc.blocks.len()) {
+            // changed since the last save, since the last render: a quiet stream
+            // still calls (`Client::stream`), so the last change before a pause
+            // is saved and shown, once
+            let (mut unsaved, mut unshown) = (false, false);
+            let mut on_event = |acc: &Accumulator, changed: Option<usize>| {
+                if changed.is_some() {
+                    (unsaved, unshown) = (true, true);
+                }
+                if unsaved && save_due(&mut saved, Instant::now(), acc.blocks.len()) {
+                    unsaved = false;
                     let mut c = base.clone();
                     c.extend(acc.content());
                     saves.save(Value::Array(c), cur.meta.clone());
                 }
-                if last_emit.elapsed() < Duration::from_millis(45) {
+                if !unshown || last_emit.elapsed() < Duration::from_millis(45) {
                     return;
                 }
+                unshown = false;
                 last_emit = Instant::now();
                 live_tick(&st2, conv_id, &renderer, &mut cur, &base, acc, |t| emit_turn(&app2, conv_id, t));
             };
@@ -1433,7 +1455,10 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut saved = (Instant::now(), 1);
     let saves = PartialSaves::of(st.db.clone(), am_id.clone());
+    // the reply so far, which an error drops: `text` only ever grows
+    let mut so_far = String::new();
     let res = crate::oai::stream(&settings.oai_base_url, &settings.oai_api_key, &model, messages, settings.max_tokens, cancel, |text| {
+        so_far.push_str(&text[so_far.len()..]);
         if save_due(&mut saved, Instant::now(), 1) {
             saves.save(json!([{"type": "text", "text": text}]), am.meta.clone());
         }
@@ -1465,6 +1490,9 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
             None
         }
         Err(e) => {
+            if !so_far.is_empty() {
+                am.content = json!([{"type": "text", "text": so_far}]);
+            }
             am.meta["error"] = serde_json::to_value(&e)?;
             Some(e)
         }
@@ -1496,7 +1524,8 @@ pub(crate) fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &
     use crate::artifacts::Segment;
     for seg in crate::artifacts::split(text) {
         if let Segment::Artifact(a) = seg {
-            if !a.complete {
+            // an update holds edits, not the artifact. shortcut: the gallery keeps the last full version; apply the edits here too (as artifact_update.js does) if it should show them
+            if !a.complete || a.update {
                 continue;
             }
             let _ = st.db.artifact_upsert(&crate::db::ArtifactRow {
@@ -1896,6 +1925,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cr-state-{}", crate::util::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")))
+    }
+
+    #[test]
+    fn the_gallery_keeps_full_versions_not_edits() {
+        let st = test_state();
+        let conv = st.db.conv_create("chat", "claude-opus-5-5", None, None, &json!({})).unwrap();
+        let m = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([]), meta: json!({}), created_at: 0 };
+        st.db.msg_insert(&m).unwrap();
+        let full = "<antArtifact identifier=\"a\" type=\"text/html\" title=\"A\">full</antArtifact>";
+        let edit = "<antArtifact identifier=\"a\" type=\"text/html\" title=\"A\" command=\"update\"><old_str>full</old_str><new_str>x</new_str></antArtifact>";
+        save_artifacts(&st, &conv.id, &m.id, &format!("{full}\n{edit}"));
+        let rows = st.db.artifact_list(10).unwrap();
+        assert_eq!(rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), ["full"]);
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { t } from './i18n.js';
 import { icon } from './icons.js';
 import * as keymap from './keymap.js';
 import { h, esc } from './util.js';
-import { showAllEarlier } from './chat.js';
+import { drawAll, releaseAll } from './chat.js';
 
 let bar = null;
 let hits = [];
@@ -26,8 +26,9 @@ async function search(q) {
   clearMarks();
   const col = document.querySelector('.chat-scroll .chat-col');
   if (!col || !q) return update();
-  // a long conversation draws its older turns only when asked: they are searched too
-  await showAllEarlier();
+  // a long conversation draws its older turns only when asked, and parks
+  // those far off screen: all of them are drawn while the bar is open
+  await drawAll();
   if (mine !== seq || !col.isConnected) return;
   clearMarks();
   const ql = q.toLowerCase();
@@ -84,6 +85,7 @@ export function closeFind() {
   clearMarks();
   if (bar) bar.remove();
   bar = null;
+  releaseAll();
 }
 
 export function openFind() {

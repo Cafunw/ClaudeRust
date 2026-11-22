@@ -7,14 +7,15 @@ import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t, tOr, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
-import { store, emit, modelInfo, displayName } from './store.js';
-import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot } from './util.js';
+import { store, emit, on as onUi, modelInfo, displayName } from './store.js';
+import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot, scrollBehavior } from './util.js';
 import { createComposer } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
-import { PAGE_TURNS, pageStart } from './turnwindow.js';
+import { PAGE_TURNS, pageStart, parked } from './turnwindow.js';
+import { retryLabel } from './retry_ui.js';
 
 let cur = null;
 
@@ -75,6 +76,7 @@ export async function openConversation(id, { focus = true } = {}) {
   const bottom = h(`<div class="chat-bottom"><div class="inner"><div class="perm-area"></div><div class="composer-slot"></div><div class="composer-hint"></div></div></div>`);
   v.append(top, scroll, bottom);
 
+  clearRetry();
   if (cur && cur.ro) cur.ro.disconnect();
   cur = {
     id,
@@ -302,6 +304,7 @@ async function sendInConversation(text, atts) {
 }
 
 function appendOptimisticUser(text, atts) {
+  rewindow();
   const turn = { id: 'pending-' + Date.now(), role: 'user', parts: [], siblings: { count: 1 } };
   if (atts.length) turn.parts.push({ kind: 'attachments', items: atts.map((a) => ({ name: a.name, kind: a.kind, size: a.size, src: a.preview })) });
   if (text) turn.parts.push({ kind: 'user_text', text });
@@ -324,11 +327,11 @@ export async function reload() {
   cur.order = data.turns.map((x) => x.id);
   cur.turns = new Map(data.turns.map((x) => [x.id, x]));
   cur.shown = at >= 0 ? at : pageStart(data.turns, data.turns.length);
-  const keep = new Set(cur.order.slice(cur.shown));
-  for (const [tid, el] of cur.els) if (!keep.has(tid)) { el.remove(); cur.els.delete(tid); }
+  dropUndrawn();
   for (const turn of data.turns.slice(cur.shown)) upsertTurn(turn, false);
   placeTurns();
   drawEarlierButton();
+  parkLater();
   markLast();
   rebuildArtifacts();
   renderTopbar();
@@ -359,6 +362,7 @@ function onScroll() {
   else if (top < (cur.lastTop ?? 0) - 2) cur.stick = false;
   cur.lastTop = top;
   updateScrollButton();
+  parkLater();
   if (top < 600 && cur.stick === false) showEarlier();
 }
 
@@ -412,13 +416,105 @@ async function drawEarlier(c) {
 }
 
 /** Draw every turn (the find bar and the outline look through all of them). */
-export async function showAllEarlier() {
+async function showAllEarlier() {
   const c = cur;
   while (c && cur === c && hasEarlier()) {
     const was = [c.shown, c.order.length];
     await showEarlier();
     if (c.shown === was[0] && c.order.length === was[1]) return;
   }
+}
+
+/** Remove the elements of turns that aren't drawn (before `shown`, or no longer on the branch). */
+function dropUndrawn() {
+  const keep = new Set(cur.order.slice(cur.shown));
+  for (const [tid, el] of cur.els) if (!keep.has(tid)) { el.remove(); cur.els.delete(tid); }
+}
+
+/** Back to the last page (you sent, or a new turn started): what scrolling
+ *  up drew goes, and "Show earlier messages" with it. */
+function rewindow() {
+  if (!cur || cur.hold) return;
+  const start = pageStart(cur.order.map((id) => cur.turns.get(id)), cur.order.length);
+  if (start <= cur.shown) return;
+  const anchor = cur.els.get(cur.order[start]);
+  const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
+  cur.shown = start;
+  dropUndrawn();
+  drawEarlierButton();
+  if (anchor) cur.scrollEl.scrollTop += anchor.getBoundingClientRect().top - y0;
+}
+
+// ----------------------------------------------------- parked turns (turnwindow.js)
+
+function park(el, height) {
+  el.style.height = `${height}px`;
+  el.replaceChildren();
+  el.__usig = null;
+  el.classList.add('parked');
+}
+
+/** Draw parked turns again from their data, keeping what's on screen where
+ *  it is: one above the view can come out taller or shorter than its
+ *  placeholder (the window was resized meanwhile). */
+function unpark(c, list) {
+  const top = c.scrollEl.getBoundingClientRect().top;
+  const anchor = c.order.slice(c.shown).map((id) => c.els.get(id)).find((el) => el && el.getBoundingClientRect().bottom > top);
+  const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
+  for (const [el, turn] of list) {
+    el.classList.remove('parked');
+    el.style.height = '';
+    if (turn.role === 'user') renderUserTurn(el, turn); else renderAssistantTurn(el, turn);
+  }
+  const dy = anchor ? anchor.getBoundingClientRect().top - y0 : 0;
+  if (Math.abs(dy) >= 1) c.scrollEl.scrollTop += dy;
+}
+
+let parkFrame = 0;
+function parkLater() {
+  if (!parkFrame) parkFrame = requestAnimationFrame(parkFar);
+}
+
+function parkFar() {
+  parkFrame = 0;
+  const c = cur;
+  if (!c || c.hold) return;
+  const view = c.scrollEl.clientHeight;
+  if (!view) return; // not laid out (hidden): nothing to measure against
+  const top = c.scrollEl.getBoundingClientRect().top;
+  const go = [];
+  const back = [];
+  for (const tid of c.order.slice(c.shown)) {
+    const el = c.els.get(tid);
+    const turn = c.turns.get(tid);
+    if (!el || !turn) continue;
+    const r = el.getBoundingClientRect();
+    const was = el.classList.contains('parked');
+    // the answer coming in, and a turn being edited, stay drawn
+    const want = parked(Math.max(top - r.bottom, r.top - top - view, 0), view, was) && !turn.streaming && !el.contains(document.activeElement);
+    if (want && !was) go.push([el, r.height]);
+    else if (!want && was) back.push([el, turn]);
+  }
+  // (measured first: parking keeps every height, so nothing moves)
+  for (const [el, height] of go) park(el, height);
+  if (back.length) unpark(c, back);
+}
+
+/** Draw every turn and keep them all drawn until `releaseAll` (the find bar searches the page). */
+export async function drawAll() {
+  const c = cur;
+  if (!c) return;
+  c.hold = true;
+  await showAllEarlier();
+  if (cur !== c) return;
+  const list = c.order.slice(c.shown).map((id) => [c.els.get(id), c.turns.get(id)]).filter(([el]) => el && el.classList.contains('parked'));
+  if (list.length) unpark(c, list);
+}
+
+export function releaseAll() {
+  if (!cur || !cur.hold) return;
+  cur.hold = false;
+  parkLater();
 }
 
 function updateScrollButton() {
@@ -430,7 +526,7 @@ function updateScrollButton() {
   const show = !nearBottom();
   if (show && !btn) {
     btn = h(`<button class="scroll-down" aria-label="scroll">${icon('arrowDown', 16)}</button>`);
-    btn.onclick = () => { cur.stick = true; cur.scrollEl.scrollTo({ top: cur.scrollEl.scrollHeight, behavior: 'smooth' }); };
+    btn.onclick = () => { cur.stick = true; cur.scrollEl.scrollTo({ top: cur.scrollEl.scrollHeight, behavior: scrollBehavior() }); };
     bottom.appendChild(btn);
   } else if (!show && btn) btn.remove();
 }
@@ -498,6 +594,11 @@ function upsertTurn(turn, live = true, before = null) {
   }
   cur.turns.set(turn.id, turn);
   if (!cur.order.includes(turn.id)) cur.order.push(turn.id);
+  if (el.classList.contains('parked')) {
+    if (!live) return; // drawn from its data when it comes near
+    el.classList.remove('parked');
+    el.style.height = '';
+  }
   if (turn.role === 'user') renderUserTurn(el, turn); else renderAssistantTurn(el, turn);
   if (live && stick) scrollToBottom(true);
 }
@@ -525,25 +626,28 @@ function branchNav(turn) {
 
 // ---- outline: jump between your messages
 
-/** The user-message elements currently shown, in order. */
-function userTurnEls() {
-  return cur ? [...cur.colEl.querySelectorAll('.turn.user')].filter((e) => e.querySelector('.user-text')) : [];
+const userText = (turn) => (turn && turn.role === 'user' && (turn.parts.find((p) => p.kind === 'user_text') || {}).text) || '';
+
+/** Your messages drawn, in order, as [element, text] (from the data: a parked one is empty). */
+function userTurns() {
+  if (!cur) return [];
+  return cur.order.slice(cur.shown).map((id) => [cur.els.get(id), userText(cur.turns.get(id))]).filter(([el, text]) => el && text);
 }
 
 function jumpTo(el) {
-  el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  el.scrollIntoView({ block: 'start', behavior: scrollBehavior() });
   el.classList.add('flash');
   setTimeout(() => el.classList.remove('flash'), 1200);
 }
 
 function showOutline(anchor) {
-  const els = userTurnEls();
-  if (!els.length) { toast(t('outline_empty')); return; }
+  const mine = userTurns();
+  if (!mine.length) { toast(t('outline_empty')); return; }
   showMenu(anchor, [
     { header: t('outline_title') },
     ...(hasEarlier() ? [{ label: t('show_earlier'), icon: 'history', onClick: () => showAllEarlier().then(() => showOutline(anchor)) }] : []),
-    ...els.map((e, i) => {
-      const text = e.querySelector('.user-text').textContent.trim().replace(/\s+/g, ' ');
+    ...mine.map(([e, raw], i) => {
+      const text = raw.trim().replace(/\s+/g, ' ');
       return { label: text.length > 90 ? `${text.slice(0, 90)}…` : text, right: String(i + 1), onClick: () => jumpTo(e) };
     }),
   ], { placement: 'bottom-end', width: 380 });
@@ -555,7 +659,7 @@ window.addEventListener('keydown', (e) => {
   // keep the key for fields (Alt+↓ opens a <select>) and for dialogs and menus
   if (e.target && e.target.closest && e.target.closest('textarea, input, select, [contenteditable], .xterm')) return;
   if (document.querySelector('.modal-scrim, .popover')) return;
-  const els = userTurnEls();
+  const els = userTurns().map(([el]) => el);
   if (!els.length) return;
   e.preventDefault();
   // positions relative to the top of the scroll area; the message a jump
@@ -837,6 +941,8 @@ function rebuildArtifacts() {
 
 export function onTurnEvent({ conversation_id, turn }) {
   if (!cur || cur.id !== conversation_id) return;
+  if (cur.retry && Date.now() >= cur.retry.until) clearRetry();
+  if (!cur.els.has(turn.id)) rewindow();
   upsertTurn(turn, true);
   markLast();
   rebuildArtifacts();
@@ -867,8 +973,34 @@ export function stopTurn(id) {
       for (const x of q) for (const a of x.atts || []) cur.composer.addStaged(a);
     }
   }
+  if (cur && cur.id === id) clearRetry();
   call('stop_generation', { conversationId: id }).catch(errorToast);
 }
+
+// ------------------------------------------------------- automatic retries
+
+/** "Rate limited, retrying in 12 s (2/5)" under the composer, counting down,
+ *  while the backend waits to try the request again. */
+function showRetry(ev) {
+  clearRetry();
+  const hint = $('.composer-hint', cur.bottomEl);
+  const until = Date.now() + Math.max(0, Number(ev.wait_ms) || 0);
+  const draw = () => { hint.textContent = retryLabel(ev, Math.ceil((until - Date.now()) / 1000)); };
+  cur.retry = { until, timer: setInterval(draw, 1000) };
+  hint.classList.add('retrying');
+  draw();
+}
+
+function clearRetry() {
+  if (!cur || !cur.retry) return;
+  clearInterval(cur.retry.timer);
+  cur.retry = null;
+  const hint = $('.composer-hint', cur.bottomEl);
+  hint.textContent = '';
+  hint.classList.remove('retrying');
+}
+
+on('generation-retry', (ev) => { if (ev && cur && cur.id === ev.conversation_id && cur.running !== false) showRetry(ev); });
 
 function showQueue(convId) {
   if (!cur || cur.id !== convId) return;
@@ -895,6 +1027,7 @@ export function onStateEvent({ conversation_id, running, error }) {
   cur.running = running;
   cur.composer.setRunning(running);
   if (!running) {
+    clearRetry();
     cur.permEl.innerHTML = '';
     reload().catch(() => {});
     if (error && error.kind === 'no_api_key') emit('open-settings', 'account');
@@ -992,6 +1125,7 @@ function showPermission(p) {
 
 export function closeCurrent() {
   openSeq++; // a load still under way is for a view that's gone
+  clearRetry();
   if (cur && cur.ro) cur.ro.disconnect();
   cur = null;
 }
@@ -1002,6 +1136,17 @@ on('cc-waiting', ({ conversation_id, waiting }) => {
   if (cur && cur.id === conversation_id && cur.running) cur.composer.setRunning(true, waiting);
   // what was queued while the turn worked goes now, not after the workflow
   if (waiting && (queues.get(conversation_id) || []).length) sendQueued(conversation_id);
+});
+// a message written by a button elsewhere (an artifact's "Try fixing"): sent as if typed, or queued while Claude responds
+onUi('send-message', ({ conversationId, text }) => {
+  if (!cur || cur.id !== conversationId) return;
+  if (cur.running && !cur.composer.waiting()) {
+    if (!queues.has(cur.id)) queues.set(cur.id, []);
+    queues.get(cur.id).push({ text, atts: [] });
+    showQueue(cur.id);
+    return;
+  }
+  sendInConversation(text, []).catch(errorToast);
 });
 // the CLI ignored ultracode (dynamic workflows off for the account): say so once per chat
 const ucWarned = new Set();

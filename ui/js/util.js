@@ -1,6 +1,7 @@
 // DOM helpers, menus, modals and toasts.
 import { icon } from './icons.js';
 import { t } from './i18n.js';
+import { friendlyError } from './neterr.js';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -134,7 +135,18 @@ export function toast(msg, kind = '', { action, onAction, duration } = {}) {
   setTimeout(() => el.remove(), ms + 400);
 }
 
-export function errorToast(e) { toast((e && e.message) || String(e), 'error'); }
+/** A failure as a toast: a transport error said plainly, its raw text a click away. */
+export function errorToast(e) {
+  const raw = (e && e.message) || String(e);
+  const plain = friendlyError(raw);
+  if (!plain) { toast(raw, 'error'); return; }
+  toast(plain, 'error', { action: t('err_details'), onAction: () => modal({ title: t('err_details'), body: h(`<div class="mono small" style="white-space:pre-wrap;word-break:break-word">${esc(raw)}</div>`) }) });
+}
+
+/** How a scroll the app makes moves: at once when the system asks for reduced motion. */
+export function scrollBehavior() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+}
 
 // ------------------------------------------------------------------- menus
 let openMenu = null;

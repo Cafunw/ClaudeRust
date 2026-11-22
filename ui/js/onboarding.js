@@ -5,6 +5,7 @@ import { call } from './api.js';
 import { store, emit } from './store.js';
 import { $, esc, h, button, errorToast } from './util.js';
 import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
+import { errorNotice } from './neterr.js';
 
 export function renderOnboarding(view, done) {
   view.innerHTML = `<div class="onboard"><div class="onboard-card">
@@ -20,7 +21,7 @@ export function renderOnboarding(view, done) {
       <div class="field" style="margin-top:10px"><label class="label">${t('base_url')}</label><input class="input mono" data-f="base" value="${esc(store.settings.base_url || 'https://api.anthropic.com')}"><div class="help">${t('base_url_help')}</div></div>
       <div class="field"><label class="label">${t('language')}</label><select class="select" data-f="lang">${LANGUAGES.map((l) => `<option value="${l.id}" ${l.id === (store.settings.language || 'auto') ? 'selected' : ''}>${l.name}</option>`).join('')}</select></div>
     </details>
-    <div class="notice error hidden" data-f="err"></div>
+    <div data-f="err"></div>
     <button class="btn lg" data-f="go" style="width:100%">${t('continue_btn')}</button>
   </div></div>`;
   const go = $('[data-f=go]', view);
@@ -30,7 +31,7 @@ export function renderOnboarding(view, done) {
     const key = $('[data-f=key]', view).value.trim();
     const name = $('[data-f=name]', view).value.trim();
     const base = $('[data-f=base]', view).value.trim();
-    err.classList.add('hidden');
+    err.replaceChildren();
     if (!key && !store.settings.has_api_key) { $('[data-f=key]', view).focus(); return; }
     go.disabled = true;
     go.textContent = t('connecting');
@@ -41,8 +42,7 @@ export function renderOnboarding(view, done) {
       await call('save_settings', { patch: { onboarded: true } });
       done();
     } catch (e) {
-      err.textContent = e.message;
-      err.classList.remove('hidden');
+      err.replaceChildren(errorNotice(e.message));
       go.disabled = false;
       go.textContent = t('continue_btn');
       if (e.status !== 401 && key) {

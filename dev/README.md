@@ -1,5 +1,27 @@
 # Development helpers
 
+## Tests
+
+What CI (`.github/workflows/ci.yml`) runs, from the repository root:
+
+```powershell
+# Rust: unit, integration (src-tauri/tests) and doc tests, then lints
+cd src-tauri
+cargo test --no-default-features
+cargo clippy --no-default-features --all-targets -- -D warnings
+cd ..
+# UI: lint and the unit tests of ui/js (ui/test, plain node --test)
+npm ci --ignore-scripts
+npm run lint
+npm run test:ui
+# end to end, Windows: builds, starts and stops a dev copy (see below)
+npm run e2e
+```
+
+`cargo test` needs no API key or network: the integration tests talk to a
+local mock of the API. Tests that need a real Claude Code CLI, and benchmarks,
+are `#[ignore]`d.
+
 ## Run the app against a local mock of the Claude API
 
 `mock_api.py` speaks the Messages API (SSE streaming) and returns canned
@@ -35,28 +57,57 @@ Prompts that trigger specific behaviours:
 Protocol (WebView2 only) through the critical flows: send a message and see
 the reply stream in, Stop a slow reply, edit a message, Retry, move between
 the versions, a permission card for an MCP tool call and for a Code session's
-file write, Settings, and the sidebar search. It starts nothing itself: its
-mock of the API (`ui/e2e/mock_api.mjs`, in the test's own process) answers
-on a free port, and with no dev copy listening on `127.0.0.1:9333` every
-test is skipped.
+file write, Settings, the sidebar search, an HTML artifact from a reply
+opening in the preview panel and readable in the dark and the light theme,
+"Try fixing" on an artifact that throws, deleting a conversation from the sidebar, and a long (300-turn) conversation
+loading its earlier turns as you scroll up. Its mock of the API
+(`ui/e2e/mock_api.mjs`, in the test's own process) answers on a free port.
 
-Start the dev copy with its own identifier (its own settings and chats, not
-the installed app's), the test key and the debugging port, then run the test:
+One command builds and starts the dev copy, runs the suite and stops the
+copy, as the `e2e` CI job does:
+
+```powershell
+npm run e2e        # or: node ui/e2e/run.mjs [tauri config]
+```
+
+`ui/e2e/run.mjs` starts `npx tauri dev --no-watch --config dev/e2e.conf.json`
+(its own identifier, so its own settings and chats, not the installed app's)
+with these variables, waits for the window (up to 25 minutes for a first
+build), runs the tests and ends the copy's process tree:
+
+| Variable | Value | Why |
+|---|---|---|
+| `CLAUDERUST_API_KEY` | `sk-ant-test` | the only key the mock takes; the keyring is not touched |
+| `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` | `--remote-debugging-port=9333` | the port the tests drive the page on |
+| `CLAUDE_CONFIG_DIR` | an empty temporary folder | a built-in Code session runs your own Claude Code hooks from `<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`; on Windows `HOME` and `USERPROFILE` do not move that folder (the app asks Windows for the profile folder) |
+| `CLAUDERUST_E2E_REQUIRED` | `1` (for the tests only) | a test that would be skipped fails instead |
+
+The copy's output goes to `target/e2e/dev.log`, and on a failure the app's
+own log is copied next to it (`app.log`; CI uploads both as the `e2e-logs`
+artifact). It refuses to start while something else listens on port 9333.
+
+To drive a copy you started yourself instead (for example to watch it), set
+the same variables, start it, and run the tests once the window is up:
 
 ```powershell
 $env:CLAUDERUST_API_KEY = 'sk-ant-test'
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9333'
-npx tauri dev --config dev/e2e.conf.json
-# in another terminal, once the window is up
+$env:CLAUDE_CONFIG_DIR = (New-Item -ItemType Directory -Force "$env:TEMP\clauderust-e2e-config").FullName
+npx tauri dev --no-watch --config dev/e2e.conf.json
+# in another terminal
 npm run test:e2e
 ```
 
+There, with no dev copy listening on `127.0.0.1:9333` every test is skipped,
+and the Code session step is skipped when the copy would run hooks of your
+Claude Code settings (it asks the app before the session's first message).
+
 For the run the test points that copy's API base URL and MCP configuration
-at its mock and turns notifications, worktrees and checkpoints off; it puts
-them back and deletes the conversations it made at the end. It refuses a copy
-on the installed app's data folder or without an API key. The Code session
-step is skipped when `~/.claude/settings.json` has hooks, since a built-in
-Code session would run them. Remove `%APPDATA%\dev.clauderust.e2e` when done.
+at its mock, follows the system theme, and turns notifications, worktrees and
+checkpoints off; it puts them back and deletes the conversations it made at
+the end. It refuses a copy on the installed app's data folder or without an
+API key. Remove `%APPDATA%\dev.clauderust.e2e` and
+`%LOCALAPPDATA%\dev.clauderust.e2e` when done.
 
 ## Fake MCP server
 

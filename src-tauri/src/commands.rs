@@ -719,7 +719,16 @@ pub async fn update_conversation(app: AppHandle, state: St<'_>, req: ConvUpdate)
 pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     engine::stop(&st, &id);
-    let worktree = st.db.conv_get(&id).ok().map(|c| c.options["worktree"].clone()).filter(|w| w.is_object());
+    let conv = st.db.conv_get(&id).ok();
+    let worktree = conv.as_ref().map(|c| c.options["worktree"].clone()).filter(|w| w.is_object());
+    // a chat's CLI sessions, read while its messages are there; their transcripts go with it
+    let sessions = match conv {
+        Some(c) => {
+            let st = st.clone();
+            blocking(move || crate::claudecode::chat_sessions(&st.db, &c)).await.unwrap_or_default()
+        }
+        None => Default::default(),
+    };
     st.db.conv_delete(&id)?;
     st.code_sessions.lock().remove(&id);
     st.shells.kill_conversation(&id);
@@ -740,16 +749,24 @@ pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> A
         st.pending_perms.lock().remove(&k);
         st.permissions.lock().remove(&k);
     }
-    if let Some(info) = worktree {
-        // only once the cancelled turn has really finished (a Write in
-        // progress, the Claude Code CLI shutting down), so the safety commit
-        // of uncommitted work sees everything; the outcome is reported
-        let st = st.clone();
-        tauri::async_runtime::spawn(async move {
-            let start = std::time::Instant::now();
-            while st.runs.lock().contains_key(&id) && start.elapsed() < std::time::Duration::from_secs(20) {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
+    // only once the cancelled turn has really finished (a Write in progress,
+    // the Claude Code CLI shutting down and writing its transcript), so the
+    // safety commit of uncommitted work sees everything; the outcome is reported
+    tauri::async_runtime::spawn(async move {
+        let start = std::time::Instant::now();
+        while st.runs.lock().contains_key(&id) && start.elapsed() < std::time::Duration::from_secs(20) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let (st2, id2) = (st.clone(), id.clone());
+        let cleaned = tauri::async_runtime::spawn_blocking(move || -> AppResult<()> {
+            let gone = crate::claudecode::unreferenced(&st2.db, sessions)?;
+            crate::claudecode::remove_chat_files(&st2.data_dir, &id2, &gone);
+            Ok(())
+        });
+        if let Ok(Err(e)) = cleaned.await {
+            log::warn!("removing the files of chat {id} failed: {e}");
+        }
+        if let Some(info) = worktree {
             let path = info["path"].as_str().unwrap_or_default().to_string();
             let r = if st.runs.lock().contains_key(&id) {
                 Err(AppError::msg("the session was still stopping"))
@@ -768,8 +785,8 @@ pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> A
                     let _ = app.emit("notice", json!({"message": format!("The session's worktree was kept at {path}: {e}"), "error": true}));
                 }
             }
-        });
-    }
+        }
+    });
     Ok(())
 }
 

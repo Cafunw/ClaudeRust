@@ -20,6 +20,10 @@ export function friendlyError(raw) {
     if (code === 404) return t('neterr_not_found');
     return t(code >= 500 ? 'neterr_server' : 'neterr_http', { code });
   }
+  m = s.match(/connection stalled: nothing arrived for (\d+) s/i);
+  if (m) return t('neterr_stalled', { s: m[1] });
+  // (before "connection closed": the answer had started, the connection broke while it came)
+  if (/error decoding response body|error reading a body|unexpected end of file|end of file before message|closed before message completed/i.test(s)) return t('neterr_interrupted');
   if (/error sending request|error trying to connect|connection (?:refused|reset|closed)|^network error/i.test(s)) return t('neterr_connect');
   return null;
 }

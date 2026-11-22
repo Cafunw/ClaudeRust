@@ -3,9 +3,11 @@ import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
 import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
-import { $, esc, h, showMenu, errorToast, relTime, searchToggle } from './util.js';
+import { $, esc, h, showMenu, errorToast, relTime, searchToggle, modal, button } from './util.js';
 import { copyText, decorate } from './parts.js';
 import { storageCall } from './artifact_storage.js';
+import { resolveVersions } from './artifact_update.js';
+import { createConsent, fixMessage } from './artifact_bridge.js';
 
 let panel = null;
 let renderTimer = null;
@@ -39,7 +41,8 @@ function scheduleRender() {
 
 export function open(convId, map, identifier, version, { streaming = false } = {}) {
   const followLatest = !version || streaming;
-  panel = { convId, map, identifier, version, view: null, followLatest, lastDocKey: null };
+  // errors: `${identifier}@${version}` -> the first error its page reported
+  panel = { convId, map, identifier, version, view: null, followLatest, lastDocKey: null, errors: new Map() };
   const el = aside();
   const wasHidden = el.classList.contains('hidden');
   if (el.classList.contains('hidden')) window.dispatchEvent(new Event('artifact-opened'));
@@ -69,8 +72,11 @@ export function close() {
 
 export function isOpen() { return !!panel; }
 
+/** An artifact's versions, each update applied to the version before it. */
+function versionsOf(identifier) { return resolveVersions(panel.map.get(identifier) || []); }
+
 function currentArtifact() {
-  const list = panel.map.get(panel.identifier) || [];
+  const list = versionsOf(panel.identifier);
   if (!list.length) return null;
   if (panel.followLatest || !panel.version) return list[list.length - 1];
   return list.find((v) => v.version === panel.version) || list[list.length - 1];
@@ -81,12 +87,12 @@ async function render() {
   const el = aside();
   const a = currentArtifact();
   if (!a) { el.innerHTML = `<div class="ap-empty">${t('no_artifacts')}</div>`; return; }
-  const list = panel.map.get(panel.identifier) || [];
+  const list = versionsOf(panel.identifier);
   const previewable = a.previewable || a.type === 'text/markdown';
   const view = !a.complete ? 'code' : (panel.view || (previewable ? 'preview' : 'code'));
 
   if (!el.querySelector('.ap-head')) {
-    el.innerHTML = `<div class="resizer"></div><div class="ap-head"></div><div class="ap-body"></div>`;
+    el.innerHTML = `<div class="resizer"></div><div class="ap-head"></div><div class="ap-alert"></div><div class="ap-body"></div>`;
     bindResizer(el.querySelector('.resizer'));
   }
   const head = el.querySelector('.ap-head');
@@ -94,8 +100,8 @@ async function render() {
   const titleBtn = h(`<button class="ap-title">${icon(ARTIFACT_ICON[a.type] || 'file', 16)}<span class="ellipsis">${esc(a.title || a.identifier)}</span>${panel.map.size > 1 ? icon('chevDown', 14) : ''}</button>`);
   titleBtn.onclick = () => {
     if (panel.map.size < 2) return;
-    showMenu(titleBtn, [...panel.map.entries()].map(([id, vs]) => {
-      const last = vs[vs.length - 1];
+    showMenu(titleBtn, [...panel.map.keys()].map((id) => {
+      const last = versionsOf(id).at(-1);
       return { label: last.title || id, sub: last.label, icon: ARTIFACT_ICON[last.type] || 'file', checked: id === panel.identifier, onClick: () => { panel.identifier = id; panel.version = null; panel.followLatest = true; panel.view = null; render(); } };
     }), { width: 280 });
   };
@@ -125,6 +131,7 @@ async function render() {
   const cl = h(`<button class="icon-btn" title="${t('close')}">${icon('x', 18)}</button>`);
   cl.onclick = close;
   head.append(copyB, dl, cl);
+  drawAlert(a);
 
   const body = el.querySelector('.ap-body');
   const docKey = `${view}|${a.type}|${a.identifier}|${a.version}|${a.complete}|${isDark()}|${a.content.length}|${a.content.slice(-64)}`;
@@ -155,8 +162,14 @@ async function render() {
       const frame = document.createElement('iframe');
       frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals allow-downloads allow-popups-to-escape-sandbox');
       frame.setAttribute('referrerpolicy', 'no-referrer');
-      // whose window.storage this frame's calls use (not the panel's: it may show another artifact by then)
+      // whose window.storage and window.claude this frame's calls use (not the panel's: it may show another artifact by then)
       frame.dataset.scope = `${panel.convId}/${myId}`;
+      frame.dataset.conv = panel.convId;
+      frame.dataset.artifact = myId;
+      frame.dataset.version = a.version;
+      frame.dataset.title = a.title || myId;
+      // a new page reports its errors anew
+      panel.errors.delete(`${myId}@${a.version}`);
       frame.src = artifactUrl(token);
       if (a.type !== 'text/html') frame.classList.add('dark-ok');
       body.appendChild(frame);
@@ -174,6 +187,71 @@ async function render() {
     if (fetching === mine) fetching = null;
     if (mine.panel.again && panel === mine.panel) { mine.panel.again = false; render(); }
   }
+}
+
+// `${conversation}/${identifier}@${version}|${error}` already sent to Claude to fix
+const fixesSent = new Set();
+
+/** Above the artifact: an update that couldn't be applied, or the error its
+ *  page threw, with "Try fixing" (a message to Claude, sent only on a click
+ *  here: the frame can't send one itself). */
+function drawAlert(a) {
+  const slot = aside().querySelector('.ap-alert');
+  if (!slot) return;
+  const err = a.error ? { kind: 'update', message: a.error } : panel.errors.get(`${a.identifier}@${a.version}`);
+  const key = err ? `${panel.convId}/${a.identifier}@${a.version}|${err.message}` : '';
+  const shown = err && !fixesSent.has(key) ? key : '';
+  if ((slot.dataset.key || '') === shown) return;
+  slot.dataset.key = shown;
+  slot.innerHTML = '';
+  if (!shown) return;
+  const what = t(err.kind === 'update' ? 'art_update_failed' : 'art_error');
+  const note = h(`<div class="notice error" style="margin:8px 10px 0">${icon('alert', 15)}<div class="grow small"><div>${esc(what)}</div><div class="err-raw"><div class="mono">${esc(err.message.slice(0, 300))}</div></div><div class="actions"></div></div></div>`);
+  const convId = panel.convId;
+  note.querySelector('.actions').appendChild(button(t('art_try_fix'), 'sm', () => {
+    fixesSent.add(key);
+    const m = fixMessage(a, err);
+    emit('send-message', { conversationId: convId, text: t(m.key, m.vars) });
+    if (panel) drawAlert(currentArtifact() || a);
+  }));
+  slot.appendChild(note);
+}
+
+function frameError(frame, d) {
+  const key = `${frame.dataset.artifact}@${frame.dataset.version}`;
+  // the first is usually the cause; a page that throws on every frame would redraw this all the time
+  if (panel.errors.has(key)) return;
+  panel.errors.set(key, { kind: 'runtime', message: String(d.message || 'unknown').slice(0, 2000), stack: String(d.stack || '').slice(0, 2000) });
+  const a = currentArtifact();
+  if (a && `${a.identifier}@${a.version}` === key) drawAlert(a);
+}
+
+function askConsent(scope, title) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); m.close(); } };
+    const footer = [
+      button(t('elicit_decline'), '', () => finish('decline')),
+      button(t('allow_once'), '', () => finish('once')),
+      button(t('art_ai_allow_artifact'), 'primary', () => finish('always')),
+    ];
+    const m = modal({
+      title: t('art_ai_title'),
+      body: `<p style="margin:4px 0 6px;font-size:14.5px;line-height:1.5">${esc(t('art_ai_body', { title }))}</p>`,
+      footer,
+      onClose: () => { if (!done) { done = true; resolve(null); } },
+    });
+  });
+}
+
+const consented = createConsent(askConsent);
+
+/** window.claude.complete of a frame: the prompt is all it chooses (artifact_ai.rs). */
+async function complete(frame, args) {
+  const [prompt] = Array.isArray(args) ? args : [];
+  if (typeof prompt !== 'string') throw new Error('window.claude.complete takes a prompt string.');
+  if (!(await consented(frame.dataset.scope, frame.dataset.title))) throw new Error('The user did not allow this artifact to ask Claude.');
+  return call('artifact_complete', { conversationId: frame.dataset.conv, artifactId: frame.dataset.artifact, prompt });
 }
 
 function bindResizer(r) {
@@ -242,13 +320,16 @@ export { store };
 // one side panel at a time
 window.addEventListener('workspace-opened', () => { if (panel) close(); });
 
-// window.storage calls of the previewed artifact (only from our own frame)
+// what the previewed artifact asks of the app (only from our own frame):
+// window.storage and window.claude.complete calls, and its errors
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || d.__artifactStorage !== 'call') return;
+  if (!d || (d.__artifact !== 'call' && d.__artifact !== 'error')) return;
   const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
-  if (!frame) return;
-  let reply;
-  try { reply = { result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }; } catch (err) { reply = { error: String((err && err.message) || err) }; }
-  e.source.postMessage({ __artifactStorage: 'reply', id: d.id, ...reply }, '*');
+  if (!frame || !panel) return;
+  if (d.__artifact === 'error') { frameError(frame, d); return; }
+  const reply = (r) => e.source.postMessage({ __artifact: 'reply', id: d.id, ...r }, '*');
+  const fail = (err) => reply({ error: String((err && err.message) || err) });
+  if (d.op === 'complete') { complete(frame, d.args).then((result) => reply({ result }), fail); return; }
+  try { reply({ result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }); } catch (err) { fail(err); }
 });

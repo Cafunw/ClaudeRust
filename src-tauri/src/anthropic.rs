@@ -8,16 +8,81 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub const API_VERSION: &str = "2026-10-21";
+
+/// Retries of a request that failed for a reason that may pass (rate limit,
+/// overload, server error, network).
+pub const MAX_RETRIES: u32 = 4;
 
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    quiet: Quiet,
+    on_retry: Option<RetryHook>,
+}
+
+type RetryHook = Arc<dyn Fn(&Retry) + Send + Sync>;
+
+/// A retry about to be waited for.
+pub struct Retry {
+    /// which retry this is, 1 to `max_attempts`
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub wait_ms: u64,
+    /// `rate_limited`, `overloaded`, `server_error` or `network`
+    pub reason: &'static str,
+}
+
+fn retry_reason(e: &AppError) -> &'static str {
+    match (e.status(), e.kind()) {
+        (529, _) | (_, "overloaded_error") => "overloaded",
+        (429, _) => "rate_limited",
+        (0, _) => "network",
+        _ => "server_error",
+    }
+}
+
+/// How long a stream may send nothing before it counts as stalled: the
+/// connection died without a word (sleep and resume, a network switch).
+/// While text streams, deltas come many times a second, so 90 s of nothing
+/// there is never the model. Before the first block, in thinking, tool input
+/// and server tools the model may go quiet for long, and the API documents
+/// its keep-alive pings as "any number" of them, not a rate: 5 minutes there.
+#[derive(Clone, Copy)]
+struct Quiet {
+    text: Duration,
+    other: Duration,
+}
+
+const QUIET: Quiet = Quiet { text: Duration::from_secs(90), other: Duration::from_secs(300) };
+
+impl Quiet {
+    fn allowed(&self, acc: &Accumulator) -> Duration {
+        if acc.blocks.last().is_some_and(|b| b["type"] == "text") {
+            self.text
+        } else {
+            self.other
+        }
+    }
+}
+
+/// While a stream sends nothing, `on_event` is called this often anyway.
+const TICK: Duration = Duration::from_secs(1);
+
+/// A stream that sent nothing for `quiet`: a network error (the UI words it
+/// like a broken connection), and the only `Api` error with status 0.
+fn stalled(quiet: Duration) -> AppError {
+    AppError::Api {
+        status: 0,
+        kind: "network".into(),
+        message: format!("The connection stalled: nothing arrived for {} s.", quiet.as_secs()),
+    }
 }
 
 pub struct StreamOutcome {
@@ -83,7 +148,36 @@ impl Client {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            quiet: QUIET,
+            on_retry: None,
         })
+    }
+
+    /// `f` is told of every retry before it is waited for.
+    pub fn on_retry(mut self, f: impl Fn(&Retry) + Send + Sync + 'static) -> Client {
+        self.on_retry = Some(Arc::new(f));
+        self
+    }
+
+    /// Wait before retry `attempt` after `err` (`wait`: the seconds the
+    /// server asked for), told to `on_retry` first.
+    async fn backoff(&self, attempt: u32, wait: Option<f64>, err: &AppError, cancel: Option<&CancellationToken>) -> AppResult<()> {
+        let secs = wait.unwrap_or_else(|| (0.8 * 2f64.powi(attempt as i32 - 1)).min(20.0));
+        let backoff = Duration::from_millis((secs.min(60.0) * 1000.0) as u64 + jitter_ms());
+        log::warn!("request failed ({err}); retry {attempt}/{MAX_RETRIES} in {backoff:?}");
+        if let Some(f) = &self.on_retry {
+            f(&Retry { attempt, max_attempts: MAX_RETRIES, wait_ms: backoff.as_millis() as u64, reason: retry_reason(err) });
+        }
+        match cancel {
+            Some(c) => tokio::select! {
+                _ = c.cancelled() => Err(AppError::Cancelled),
+                _ = tokio::time::sleep(backoff) => Ok(()),
+            },
+            None => {
+                tokio::time::sleep(backoff).await;
+                Ok(())
+            }
+        }
     }
 
     fn headers(&self, betas: &[String]) -> HeaderMap {
@@ -110,7 +204,6 @@ impl Client {
         cancel: Option<&CancellationToken>,
     ) -> AppResult<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let max_retries = 4u32;
         let mut attempt = 0u32;
         loop {
             let req = self
@@ -156,20 +249,11 @@ impl Client {
                     (retryable, None, AppError::Http(e))
                 }
             };
-            if !retryable || attempt >= max_retries {
+            if !retryable || attempt >= MAX_RETRIES {
                 return Err(err);
             }
             attempt += 1;
-            let backoff = wait.unwrap_or_else(|| (0.8 * 2f64.powi(attempt as i32 - 1)).min(20.0));
-            let backoff = Duration::from_millis((backoff.min(60.0) * 1000.0) as u64 + jitter_ms());
-            log::warn!("request failed ({err}); retry {attempt}/{max_retries} in {backoff:?}");
-            match cancel {
-                Some(c) => tokio::select! {
-                    _ = c.cancelled() => return Err(AppError::Cancelled),
-                    _ = tokio::time::sleep(backoff) => {}
-                },
-                None => tokio::time::sleep(backoff).await,
-            }
+            self.backoff(attempt, wait, &err, cancel).await?;
         }
     }
 
@@ -180,7 +264,10 @@ impl Client {
     }
 
     /// Streaming Messages request. `on_event` is called after every applied
-    /// event with the accumulator state and the index of the changed block.
+    /// event with the accumulator state and the index of the changed block,
+    /// and every `TICK` while nothing arrives (with `None`). A stream that
+    /// stalls (see `Quiet`) is asked for again while nothing of the reply
+    /// has come; after that it ends with a network error.
     pub async fn stream<F>(
         &self,
         body: &Value,
@@ -193,25 +280,54 @@ impl Client {
     {
         let mut body = body.clone();
         body["stream"] = Value::Bool(true);
-        let resp = self.post_retry("/v1/messages", &body, betas, Some(cancel)).await?;
+        let mut stalls = 0u32;
+        loop {
+            let resp = self.post_retry("/v1/messages", &body, betas, Some(cancel)).await?;
+            let out = self.read_stream(resp, cancel, &mut on_event).await;
+            // stalled before any of the reply came: nothing is lost by asking again
+            match &out.error {
+                Some(e @ AppError::Api { status: 0, .. }) if stalls < MAX_RETRIES && out.acc.content().is_empty() => {
+                    stalls += 1;
+                    self.backoff(stalls, None, e, Some(cancel)).await?;
+                }
+                _ => return Ok(out),
+            }
+        }
+    }
+
+    /// The events of one response (see `stream`).
+    async fn read_stream<F>(&self, resp: reqwest::Response, cancel: &CancellationToken, on_event: &mut F) -> StreamOutcome
+    where
+        F: FnMut(&Accumulator, Option<usize>),
+    {
         let mut acc = Accumulator::default();
         let mut stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::with_capacity(8192);
         let mut parser = SseParser::default();
+        let mut heard = Instant::now();
         loop {
             let chunk = tokio::select! {
                 _ = cancel.cancelled() => {
-                    return Ok(StreamOutcome { acc, error: Some(AppError::Cancelled) });
+                    return StreamOutcome { acc, error: Some(AppError::Cancelled) };
                 }
-                c = stream.next() => c,
+                c = tokio::time::timeout(TICK, stream.next()) => c,
             };
+            let Ok(chunk) = chunk else {
+                let quiet = self.quiet.allowed(&acc);
+                if heard.elapsed() < quiet {
+                    on_event(&acc, None);
+                    continue;
+                }
+                return StreamOutcome { acc, error: Some(stalled(quiet)) };
+            };
+            heard = Instant::now();
             match chunk {
                 None => break,
                 Some(Err(e)) => {
-                    return Ok(StreamOutcome {
+                    return StreamOutcome {
                         acc,
                         error: Some(AppError::Http(e)),
-                    })
+                    }
                 }
                 Some(Ok(bytes)) => {
                     buf.extend_from_slice(&bytes);
@@ -225,22 +341,22 @@ impl Client {
                         };
                         match acc.apply(&data) {
                             Ok(changed) => on_event(&acc, changed),
-                            Err(e) => return Ok(StreamOutcome { acc, error: Some(e) }),
+                            Err(e) => return StreamOutcome { acc, error: Some(e) },
                         }
                         if acc.done {
-                            return Ok(StreamOutcome { acc, error: None });
+                            return StreamOutcome { acc, error: None };
                         }
                     }
                 }
             }
         }
         if !acc.done && acc.stop_reason.is_none() {
-            return Ok(StreamOutcome {
+            return StreamOutcome {
                 acc,
                 error: Some(AppError::msg("The connection closed before the response finished.")),
-            });
+            };
         }
-        Ok(StreamOutcome { acc, error: None })
+        StreamOutcome { acc, error: None }
     }
 
     /// GET /v1/models (all pages).
@@ -746,6 +862,117 @@ mod tests {
             assert!(c.list_models().await.unwrap().is_empty());
         }
         assert_eq!(conns.load(std::sync::atomic::Ordering::SeqCst), 1, "one connection, reused");
+    }
+
+    /// A local Messages API that answers its `i`th request with the SSE
+    /// events of `replies[i]`; a reply without `message_stop` then stays
+    /// open and silent. Counts the requests.
+    async fn sse_server(replies: Vec<Vec<Value>>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        std::env::set_var("NO_PROXY", "127.0.0.1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let events = replies.get(n2.fetch_add(1, SeqCst)).cloned().unwrap_or_default();
+                tokio::spawn(async move {
+                    // all of the request, so closing never resets the connection
+                    let mut buf = vec![];
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        let Ok(k) = s.read(&mut chunk).await else { return };
+                        buf.extend_from_slice(&chunk[..k]);
+                        let head = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+                        let len = head.map(|h| String::from_utf8_lossy(&buf[..h]).to_ascii_lowercase());
+                        let len = len.and_then(|h| h.lines().find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))));
+                        if k == 0 || head.is_some_and(|h| buf.len() >= h + len.unwrap_or(0)) {
+                            break;
+                        }
+                    }
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").await;
+                    for ev in &events {
+                        let data = format!("event: {}\ndata: {ev}\n\n", ev["type"].as_str().unwrap_or(""));
+                        let _ = s.write_all(format!("{:x}\r\n{data}\r\n", data.len()).as_bytes()).await;
+                    }
+                    if events.last().is_some_and(|e| e["type"] == "message_stop") {
+                        let _ = s.write_all(b"0\r\n\r\n").await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), n)
+    }
+
+    fn start() -> Value {
+        json!({"type": "message_start", "message": {"id": "m", "model": "x", "role": "assistant", "content": [], "usage": {"input_tokens": 1}}})
+    }
+
+    fn text_start_and(piece: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": piece}}),
+        ]
+    }
+
+    async fn stream_quietly(c: &Client) -> (StreamOutcome, usize) {
+        let mut ticks = 0;
+        let out = tokio::time::timeout(Duration::from_secs(20), c.stream(&json!({}), &[], &CancellationToken::new(), |acc: &Accumulator, changed| {
+            ticks += usize::from(changed.is_none() && !acc.blocks.is_empty());
+        }))
+        .await
+        .expect("the stalled stream hung")
+        .unwrap();
+        (out, ticks)
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_before_the_reply_is_asked_for_again() {
+        let mut whole = vec![start()];
+        whole.extend(text_start_and("Hello"));
+        whole.extend([json!({"type": "content_block_stop", "index": 0}), json!({"type": "message_stop"})]);
+        let (base, requests) = sse_server(vec![vec![start()], whole]).await;
+        let retries = std::sync::Arc::new(parking_lot::Mutex::new(vec![]));
+        let seen = retries.clone();
+        let mut c = Client::new(&base, "k").unwrap().on_retry(move |r| seen.lock().push((r.attempt, r.max_attempts, r.reason)));
+        // before any block the long window holds: the short one must not apply
+        c.quiet = Quiet { text: Duration::from_secs(60), other: Duration::from_millis(300) };
+        let (out, _) = stream_quietly(&c).await;
+        assert!(out.error.is_none(), "{:?}", out.error.map(|e| e.to_string()));
+        assert_eq!(out.acc.content(), vec![json!({"type": "text", "text": "Hello"})]);
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(*retries.lock(), vec![(1, MAX_RETRIES, "network")]);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_in_the_reply_ends_with_what_came() {
+        let mut v = vec![start()];
+        v.extend(text_start_and("Hel"));
+        let (base, requests) = sse_server(vec![v]).await;
+        let mut c = Client::new(&base, "k").unwrap();
+        // in text the short window holds: the long one must not apply
+        c.quiet = Quiet { text: Duration::from_millis(1500), other: Duration::from_secs(60) };
+        let (out, ticks) = stream_quietly(&c).await;
+        let e = out.error.expect("a stalled stream is an error");
+        assert_eq!((e.kind(), e.status()), ("network", 0), "{e}");
+        assert!(e.to_string().contains("stalled"), "{e}");
+        assert_eq!(out.acc.content(), vec![json!({"type": "text", "text": "Hel"})]);
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1, "what came would be lost by asking again");
+        assert!(ticks >= 1, "on_event was not called while the stream was quiet");
+    }
+
+    #[test]
+    fn retries_say_why() {
+        let api = |status, kind: &str| AppError::Api { status, kind: kind.into(), message: String::new() };
+        assert_eq!(retry_reason(&api(429, "rate_limit_error")), "rate_limited");
+        assert_eq!(retry_reason(&api(529, "overloaded_error")), "overloaded");
+        assert_eq!(retry_reason(&api(500, "overloaded_error")), "overloaded");
+        assert_eq!(retry_reason(&api(503, "api_error")), "server_error");
+        assert_eq!(retry_reason(&stalled(Duration::from_secs(90))), "network");
     }
 
     #[test]

@@ -18,6 +18,9 @@ pub struct ArtifactSpec {
     pub language: Option<String>,
     pub content: String,
     pub complete: bool,
+    /// `command="update"`: `content` holds `<old_str>`/`<new_str>` pairs for
+    /// the previous version, applied by the panel (ui/js/artifact_update.js).
+    pub update: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +115,7 @@ pub fn split(text: &str) -> Vec<Segment> {
                 let mut kind = String::new();
                 let mut title = String::new();
                 let mut language = None;
+                let mut update = false;
                 for cap in ATTR_RE.captures_iter(attrs_str) {
                     let v = unescape_attr(&cap[2]);
                     match &cap[1] {
@@ -119,6 +123,7 @@ pub fn split(text: &str) -> Vec<Segment> {
                         "type" => kind = v,
                         "title" => title = v,
                         "language" => language = Some(v).filter(|s: &String| !s.is_empty()),
+                        "command" => update = v == "update",
                         _ => {}
                     }
                 }
@@ -144,6 +149,7 @@ pub fn split(text: &str) -> Vec<Segment> {
                         language,
                         content: String::new(),
                         complete: false,
+                        update,
                     }));
                     break;
                 }
@@ -157,6 +163,7 @@ pub fn split(text: &str) -> Vec<Segment> {
                             language,
                             content,
                             complete: true,
+                            update,
                         }));
                         rest = &body[k + CLOSE_TAG.len()..];
                     }
@@ -170,6 +177,7 @@ pub fn split(text: &str) -> Vec<Segment> {
                             language,
                             content,
                             complete: false,
+                            update,
                         }));
                         break;
                     }
@@ -234,28 +242,36 @@ pub fn extension(kind: &str, language: Option<&str>) -> String {
 
 const BASE_STYLE: &str = r#"<style>:root{color-scheme:light dark}html,body{margin:0;padding:0}body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}</style>"#;
 
+/// HTML is written against the browser's default of dark text on white, so a
+/// fragment keeps that pair in the dark theme too: themed dark, a light box
+/// it draws without a text colour of its own would come out white on white.
+const FRAGMENT_STYLE: &str = "<style>:root{color-scheme:light}body{background:#ffffff;color:#141413}</style>";
+
 /// Content Security Policy for artifact documents: they may load common
 /// libraries from public CDNs but run in an opaque, sandboxed origin.
 pub const ARTIFACT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com https://esm.sh https://cdn.tailwindcss.com; style-src 'unsafe-inline' https:; img-src * data: blob:; font-src * data:; connect-src https: data: blob:; media-src * data: blob:; frame-src 'none'; worker-src blob:";
 
-/// The error overlay, and the APIs Claude's artifacts expect: `window.storage`
-/// asks the app over postMessage (the sandbox has no storage of its own; see
-/// ui/js/artifact_storage.js). `window.claude.complete` would spend the
-/// user's API credit from model-written code with no prompt, so it only says
-/// it isn't there.
+/// The error overlay, and the APIs Claude's artifacts expect. The sandbox can
+/// reach nothing but the app's page, so these ask it over postMessage (see
+/// ui/js/artifacts.js): `window.storage` (ui/js/artifact_storage.js) and
+/// `window.claude.complete` (asks the person first, then artifact_ai.rs).
+/// Errors go to the app too, which offers to ask Claude for a fix.
 const ERROR_HOOK: &str = r#"<script>
-window.addEventListener('error', function (e) {
-  var d = document.getElementById('__artifact_error') || document.createElement('pre');
-  d.id = '__artifact_error';
-  d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;margin:0;padding:10px 14px;background:#fde8e4;color:#7a1f0e;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;max-height:40%;overflow:auto;z-index:99999';
-  d.textContent = 'Error: ' + (e.message || e.error || 'unknown');
-  document.body && document.body.appendChild(d);
-});
 (function () {
   var seq = 0, waiting = {};
+  window.addEventListener('error', function (e) {
+    var message = String(e.message || e.error || 'unknown');
+    var d = document.getElementById('__artifact_error') || document.createElement('pre');
+    d.id = '__artifact_error';
+    d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;margin:0;padding:10px 14px;background:#fde8e4;color:#7a1f0e;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;max-height:40%;overflow:auto;z-index:99999';
+    d.textContent = 'Error: ' + message;
+    document.body && document.body.appendChild(d);
+    var stack = e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 6).join('\n') : '';
+    window.parent.postMessage({ __artifact: 'error', message: message, stack: stack }, '*');
+  });
   window.addEventListener('message', function (e) {
     var d = e.data;
-    if (e.source !== window.parent || !d || d.__artifactStorage !== 'reply' || !waiting[d.id]) return;
+    if (e.source !== window.parent || !d || d.__artifact !== 'reply' || !waiting[d.id]) return;
     var w = waiting[d.id];
     delete waiting[d.id];
     if (d.error) w[1](new Error(d.error)); else w[0](d.result);
@@ -264,7 +280,7 @@ window.addEventListener('error', function (e) {
     return new Promise(function (ok, fail) {
       var id = ++seq;
       waiting[id] = [ok, fail];
-      window.parent.postMessage({ __artifactStorage: 'call', id: id, op: op, args: args }, '*');
+      window.parent.postMessage({ __artifact: 'call', id: id, op: op, args: args }, '*');
     });
   }
   window.storage = {
@@ -273,7 +289,7 @@ window.addEventListener('error', function (e) {
     delete: function (key, shared) { return call('delete', [key, !!shared]); },
     list: function (prefix, shared) { return call('list', [prefix, !!shared]); }
   };
-  window.claude = { complete: function () { return Promise.reject(new Error('window.claude.complete is not available in ClaudeRust artifacts.')); } };
+  window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };
 })();
 </script>"#;
 
@@ -291,16 +307,20 @@ pub fn build_document(kind: &str, content: &str, dark: bool) -> String {
         "text/html" => {
             let lower = content.to_ascii_lowercase();
             if lower.contains("<html") || lower.contains("<!doctype") {
-                // inject the error hook right after <head> if present
-                if let Some(i) = lower.find("<head>") {
-                    let mut s = content.to_string();
-                    s.insert_str(i + 6, ERROR_HOOK);
-                    return s;
-                }
-                format!("{ERROR_HOOK}{content}")
+                // the hook goes first, so the page's scripts find its APIs, but after the
+                // doctype: anything before it would put the page in quirks mode
+                let html = lower.find("<html");
+                let at = lower
+                    .find("<!doctype")
+                    .filter(|&i| html.is_none_or(|h| i < h))
+                    .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
+                    .unwrap_or(0);
+                let mut s = content.to_string();
+                s.insert_str(at, ERROR_HOOK);
+                s
             } else {
                 format!(
-                    "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{BASE_STYLE}{ERROR_HOOK}</head><body>{content}</body></html>"
+                    "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{BASE_STYLE}{FRAGMENT_STYLE}{ERROR_HOOK}</head><body>{content}</body></html>"
                 )
             }
         }
@@ -330,7 +350,7 @@ mermaid.initialize({{ startOnLoad: true, theme: '{mtheme}', securityLevel: 'stri
 const UI_SHIM: &str = include_str!("artifact_ui.js");
 
 /// The `@/components/ui/<name>` modules React artifacts can import, all served by UI_SHIM.
-const UI_MODULES: [&str; 16] = [
+pub(crate) const UI_MODULES: [&str; 16] = [
     "alert", "badge", "button", "card", "checkbox", "dialog", "input", "label", "progress", "select", "separator", "slider",
     "switch", "tabs", "textarea", "tooltip",
 ];
@@ -407,7 +427,7 @@ try {{
   if (!Comp) throw new Error('The artifact has no default export to render.');
   createRoot(document.getElementById('root')).render(React.createElement(Comp));
 }} catch (e) {{
-  window.dispatchEvent(new ErrorEvent('error', {{ message: e && e.message ? e.message : String(e) }}));
+  window.dispatchEvent(new ErrorEvent('error', {{ message: e && e.message ? e.message : String(e), error: e }}));
 }}
 </script></body></html>"##,
         theme = theme_attr(dark),
@@ -498,11 +518,114 @@ mod tests {
     }
 
     #[test]
+    fn split_reads_the_update_command() {
+        let t = "<antArtifact identifier=\"calc\" type=\"text/html\" title=\"Calc\" command=\"update\">\n<old_str>a</old_str>\n<new_str>b</new_str>\n</antArtifact>";
+        match &split(t)[0] {
+            Segment::Artifact(a) => {
+                assert!(a.update && a.complete);
+                assert_eq!(a.content, "<old_str>a</old_str>\n<new_str>b</new_str>");
+            }
+            _ => panic!(),
+        }
+        match &split("<antArtifact identifier=\"calc\" type=\"text/html\" title=\"Calc\">x</antArtifact>")[0] {
+            Segment::Artifact(a) => assert!(!a.update),
+            _ => panic!(),
+        }
+    }
+
+    /// WCAG contrast ratio of two `#rrggbb` colours.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let lum = |hex: &str| {
+            let c: Vec<f64> = (0..3)
+                .map(|i| u8::from_str_radix(&hex[1 + 2 * i..3 + 2 * i], 16).unwrap() as f64 / 255.0)
+                .map(|v| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) })
+                .collect();
+            0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The colours the page's body ends up with: the last `body{background;color}` and `color-scheme` set.
+    fn page_colours(doc: &str) -> (String, String, String) {
+        let pair = Regex::new(r"body\{background:(#[0-9a-f]{6});color:(#[0-9a-f]{6})\}").unwrap();
+        let scheme = Regex::new(r"color-scheme:([a-z ]+)").unwrap();
+        let c = pair.captures_iter(doc).last().expect("a background and text colour");
+        let s = scheme.captures_iter(doc).last().expect("a color-scheme");
+        (c[1].to_string(), c[2].to_string(), s[1].to_string())
+    }
+
+    #[test]
+    fn html_fragments_are_readable_in_both_themes() {
+        for dark in [false, true] {
+            let d = build_document("text/html", "<h1>Hello</h1><p>Some text.</p>", dark);
+            let (bg, fg, scheme) = page_colours(&d);
+            // light only: in `light dark` the browser's default text turns white in the dark theme
+            assert_eq!(scheme, "light", "dark={dark}");
+            assert!(contrast(&bg, &fg) >= 7.0, "dark={dark}: {fg} on {bg}");
+        }
+        // the themed documents follow the app's theme, readable in both too
+        for kind in ["application/vnd.ant.react", "application/vnd.ant.mermaid"] {
+            for dark in [false, true] {
+                let (bg, fg, _) = page_colours(&build_document(kind, "x", dark));
+                assert!(contrast(&bg, &fg) >= 7.0, "{kind} dark={dark}: {fg} on {bg}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fragment_gets_a_page_with_the_hook_before_its_own_code() {
+        let content = "<p id=x>hi</p><script>window.storage.get('k')</script>";
+        let d = build_document("text/html", content, true);
+        assert!(d.starts_with("<!doctype html>"));
+        let at = |s: &str| d.find(s).unwrap_or_else(|| panic!("{s} missing"));
+        // the colours, then the APIs, then the artifact's own code (which may call them right away)
+        assert!(at(BASE_STYLE) < at(FRAGMENT_STYLE));
+        assert!(at(FRAGMENT_STYLE) < at(ERROR_HOOK));
+        assert!(at(ERROR_HOOK) < at(content));
+        assert!(d.ends_with(&format!("<body>{content}</body></html>")));
+    }
+
+    #[test]
+    fn a_full_document_keeps_its_colours_and_gets_the_hook_after_its_doctype() {
+        let page = "<!DOCTYPE html>\n<html lang=\"en\"><head lang=\"en\"><style>body{background:#000;color:#0f0}</style></head><body><script>window.storage.get('k')</script></body></html>";
+        for dark in [false, true] {
+            let d = build_document("text/html", page, dark);
+            // the doctype stays first (no quirks mode), and nothing of ours but the hook is added
+            assert!(d.starts_with("<!DOCTYPE html><script>"), "dark={dark}");
+            assert_eq!(d.replacen(ERROR_HOOK, "", 1), page);
+            assert!(d.find("window.storage = {").unwrap() < d.find("window.storage.get('k')").unwrap());
+        }
+        // a comment may come before the doctype
+        let d = build_document("text/html", "<!-- made by Claude --><!doctype html><html><body>x</body></html>", false);
+        assert!(d.starts_with(&format!("<!-- made by Claude --><!doctype html>{ERROR_HOOK}<html>")));
+        // no doctype: quirks mode already, the hook goes first
+        let d = build_document("text/html", "<html><body>x</body></html>", false);
+        assert!(d.starts_with(ERROR_HOOK));
+    }
+
+    #[test]
+    fn script_documents_report_errors_to_the_app_and_bridge_complete() {
+        for (kind, content) in [
+            ("text/html", "<p>x</p>"),
+            ("text/html", "<!doctype html><html><body>x</body></html>"),
+            ("application/vnd.ant.react", "export default () => null"),
+            ("application/vnd.ant.mermaid", "graph TD; A-->B"),
+        ] {
+            let d = build_document(kind, content, false);
+            assert!(d.contains("window.parent.postMessage({ __artifact: 'error', message: message, stack: stack }, '*');"), "{kind}");
+            assert!(d.contains("window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };"), "{kind}");
+        }
+        // React's own errors (Babel, a missing export) carry their stack to the app
+        assert!(build_document("application/vnd.ant.react", "x", false).contains("String(e), error: e }"));
+    }
+
+    #[test]
     fn documents_get_storage_and_stay_sandboxed() {
         for kind in ["text/html", "application/vnd.ant.react"] {
             let d = build_document(kind, "<p>x</p>", false);
             assert!(d.contains("window.storage = {"), "{kind}");
-            assert!(d.contains("__artifactStorage: 'call'"), "{kind}");
+            assert!(d.contains("__artifact: 'call'"), "{kind}");
         }
         // the policy is as tight as before: nothing by default, no 'self', no nested frames
         assert!(ARTIFACT_CSP.starts_with("default-src 'none';"));

@@ -6,7 +6,7 @@ import { icon } from './icons.js';
 import { t, tOr } from './i18n.js';
 import { call } from './api.js';
 import { store, modelInfo, emit, rememberModel } from './store.js';
-import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast } from './util.js';
+import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast, modal, button } from './util.js';
 
 const PASTE_AS_FILE = 6000;
 
@@ -24,6 +24,44 @@ function ccInfoOf(model, cwd, onReady) {
   }
   if (e.info === undefined && onReady) e.p.then(onReady);
   return e.info;
+}
+
+/** What to send for MCP prompt arguments `defs` (name, description,
+ *  required) from the typed `values`, in the same order: the filled ones
+ *  (`args`), and the index of a required one left empty (`missing`, else -1). */
+export function promptArgValues(defs, values) {
+  const filled = (i) => String(values[i] ?? '').trim() !== '';
+  return {
+    missing: defs.findIndex((a, i) => a.required && !filled(i)),
+    args: Object.fromEntries(defs.flatMap((a, i) => (filled(i) ? [[a.name, values[i]]] : []))),
+  };
+}
+
+/** One form for the arguments of MCP prompt `p`: resolves to them, or null when cancelled. */
+function promptArgs(p) {
+  const defs = p.arguments || [];
+  if (!defs.length) return Promise.resolve({});
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const body = h(`<div>${p.description ? `<p class="small muted" style="margin:0 0 14px">${esc(p.description)}</p>` : ''}</div>`);
+    const inputs = defs.map((a, i) => {
+      const f = h(`<div class="field"><label class="label" for="mcp-arg-${i}">${esc(a.name)}${a.required ? ' *' : ''}</label><input class="input" id="mcp-arg-${i}" ${a.required ? 'aria-required="true"' : ''}></div>`);
+      if (a.description) f.appendChild(h(`<div class="help">${esc(a.description)}</div>`));
+      body.appendChild(f);
+      return f.querySelector('input');
+    });
+    const submit = () => {
+      const { missing, args } = promptArgValues(defs, inputs.map((x) => x.value));
+      inputs.forEach((x, i) => x.classList.toggle('invalid', i === missing));
+      if (missing >= 0) { inputs[missing].focus(); return; }
+      finish(args);
+      m.close();
+    };
+    for (const x of inputs) x.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submit(); } });
+    const m = modal({ title: p.name, body, footer: [button(t('cancel'), '', () => m.close()), button(t('mcp_prompt_add'), 'primary', submit)], onClose: () => finish(null) });
+    setTimeout(() => inputs[0].focus(), 30);
+  });
 }
 
 export function thinkingSupported(m) {
@@ -378,11 +416,35 @@ export function createComposer(opts) {
     showMenu(anchor, items, { placement: 'top-start', width: 280 });
   }
 
+  /** A still of the screen or window picked in the system's share picker, as a PNG attachment. */
+  async function addScreenshot() {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    } catch (e) {
+      if (e && e.name !== 'NotAllowedError') errorToast(e); // (NotAllowedError: the picker was cancelled)
+      return;
+    }
+    try {
+      const frame = await new ImageCapture(stream.getVideoTracks()[0]).grabFrame();
+      const c = document.createElement('canvas');
+      c.width = frame.width;
+      c.height = frame.height;
+      c.getContext('2d').drawImage(frame, 0, 0);
+      const png = await new Promise((res) => c.toBlob(res, 'image/png'));
+      await addFile(png, `${t('screenshot')} ${new Date().toLocaleTimeString().replace(/:/g, '.')}.png`);
+    } catch (e) {
+      errorToast(e);
+    } finally {
+      stream.getTracks().forEach((tr) => tr.stop());
+    }
+  }
+
   async function attachMenu(anchor) {
     const items = [
       { label: t('upload_file'), icon: 'paperclip', onClick: async () => { const paths = await call('pick_files'); addPaths(paths); } },
-      { label: t('add_screenshot'), icon: 'image', disabled: true },
     ];
+    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) items.push({ label: t('add_screenshot'), icon: 'image', onClick: addScreenshot });
     if (store.mcpServers.some((s) => s.status === 'connected')) {
       items.push({ sep: true }, {
         label: t('prompts_resources'), icon: 'plug', keepOpen: true,
@@ -402,12 +464,8 @@ export function createComposer(opts) {
   }
 
   async function usePrompt(p) {
-    const args = {};
-    for (const a of p.arguments || []) {
-      const v = window.prompt(`${a.name}${a.description ? ' — ' + a.description : ''}`, '');
-      if (v === null) return;
-      args[a.name] = v;
-    }
+    const args = await promptArgs(p);
+    if (!args) return;
     try { addStaged(await call('mcp_get_prompt', { server: p.server, name: p.name, args })); } catch (e) { errorToast(e); }
   }
 

@@ -3,6 +3,7 @@
 pub mod anthropic;
 pub mod applog;
 pub mod archmap;
+pub mod artifact_ai;
 pub mod artifacts;
 pub mod claudecode;
 pub mod attachments;
@@ -32,6 +33,7 @@ pub mod mcp_oauth;
 pub mod memory;
 pub mod models;
 pub mod oai;
+pub mod office;
 pub mod pathguard;
 pub mod prompts;
 pub mod pullrequest;
@@ -320,6 +322,7 @@ pub fn run() {
             };
             let _ = db.mark_interrupted();
             let _ = db.delete_unfinished_imports();
+            claudecode::sweep_prompt_files(&data_dir);
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             st.shells.set_app(app.handle().clone());
             devtools::start(app.handle());
@@ -432,6 +435,7 @@ pub fn run() {
             commands::list_artifacts,
             commands::delete_artifact,
             commands::serve_artifact,
+            artifact_ai::artifact_complete,
             commands::render_markdown,
             commands::highlight_code,
             commands::mcp_status,

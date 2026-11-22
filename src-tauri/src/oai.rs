@@ -18,6 +18,8 @@ pub const PREFIX: &str = "oai:";
 /// stalled. Generous: a local model on a CPU can take minutes to read a long
 /// prompt before its first token.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Once tokens flow, a quiet spell is a dead connection, not a slow model.
+const STREAMING_IDLE: Duration = Duration::from_secs(90);
 
 /// The HTTP client, with `idle` as its read timeout. The app's own limit
 /// (`IDLE_TIMEOUT`) gets a client shared by the requests (see
@@ -135,9 +137,10 @@ pub struct Outcome {
 
 /// Stream a chat completion; `on_text` gets the text so far.
 pub async fn stream(base: &str, key: &str, model: &str, messages: Vec<Value>, max_tokens: u32, cancel: &CancellationToken, on_text: impl FnMut(&str)) -> AppResult<Outcome> {
-    stream_with(base, key, model, messages, max_tokens, cancel, IDLE_TIMEOUT, on_text).await
+    stream_with(base, key, model, messages, max_tokens, cancel, (IDLE_TIMEOUT, STREAMING_IDLE), on_text).await
 }
 
+/// `stream` with its quiet limits given: before the first text, and after it.
 #[allow(clippy::too_many_arguments)]
 async fn stream_with(
     base: &str,
@@ -146,7 +149,7 @@ async fn stream_with(
     messages: Vec<Value>,
     max_tokens: u32,
     cancel: &CancellationToken,
-    idle: Duration,
+    (idle, streaming_idle): (Duration, Duration),
     mut on_text: impl FnMut(&str),
 ) -> AppResult<Outcome> {
     let body = json!({
@@ -181,14 +184,16 @@ async fn stream_with(
     let mut finish = None;
     let mut usage = Value::Null;
     loop {
+        let quiet = if text.is_empty() { idle } else { idle.min(streaming_idle) };
+        let stalled = || AppError::msg(format!("{base} stopped sending (nothing for {} s); the reply is incomplete.", quiet.as_secs()));
         let chunk = tokio::select! {
-            c = stream.next() => c,
+            c = tokio::time::timeout(quiet, stream.next()) => c.map_err(|_| stalled())?,
             _ = cancel.cancelled() => return Ok(Outcome { text, finish, usage, cancelled: true }),
         };
         let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|e| {
             if e.is_timeout() {
-                AppError::msg(format!("{base} stopped sending (nothing for {} s); the reply is incomplete.", idle.as_secs()))
+                stalled()
             } else {
                 AppError::msg(format!("The connection to {base} broke: {e}"))
             }
@@ -333,12 +338,13 @@ mod tests {
         let base = serve_once(SSE_HEAD, parts, true).await;
         let r = tokio::time::timeout(
             Duration::from_secs(10),
-            stream_with(&base, "", "m", vec![], 10, &CancellationToken::new(), Duration::from_secs(1), |_| {}),
+            // the long limit is before the first text: after "Hel" the short one holds
+            stream_with(&base, "", "m", vec![], 10, &CancellationToken::new(), (Duration::from_secs(60), Duration::from_secs(1)), |_| {}),
         )
         .await
         .expect("the stalled stream hung");
         let e = r.err().expect("a stalled stream is an error").to_string();
-        assert!(e.contains("stopped sending"), "{e}");
+        assert!(e.contains("stopped sending (nothing for 1 s)"), "{e}");
     }
 
     #[tokio::test]

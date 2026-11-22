@@ -1,7 +1,8 @@
 // Rendering of assistant message parts (text, thinking, tools, notices).
 import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
-import { esc, h, morph, toast, fmtUsd, snapshot, sameSnapshot, relPath } from './util.js';
+import { esc, h, morph, toast, errorToast, fmtUsd, snapshot, sameSnapshot, relPath } from './util.js';
+import { friendlyError } from './neterr.js';
 import { lineDiff } from './diffstat.js';
 import { call } from './api.js';
 import { store, modelInfo } from './store.js';
@@ -103,7 +104,7 @@ document.addEventListener('click', async (e) => {
   if (saveBtn) {
     const block = saveBtn.closest('.code-block');
     const code = block?.querySelector('code')?.innerText || '';
-    try { await call('save_text_file', { name: codeFileName(block?.dataset.lang), content: code }); } catch (err) { toast(String((err && err.message) || err), 'error'); }
+    try { await call('save_text_file', { name: codeFileName(block?.dataset.lang), content: code }); } catch (err) { errorToast(err); }
     return;
   }
   const runBtn = e.target.closest('.code-run');
@@ -370,18 +371,21 @@ function errorMessage(err) {
   if (err.status === 401 || k === 'authentication_error') return t('err_auth');
   if (err.status === 429 || k === 'rate_limit_error') return t('err_rate_limit');
   if (err.status === 529 || k === 'overloaded_error') return t('err_overloaded');
-  if (k === 'network') return t('err_network', { msg: err.message });
-  return err.message || t('error_title');
+  return friendlyError(err.message) || (k === 'network' ? t('err_network') : err.message || t('error_title'));
 }
 
 function renderNotice(el, p, ctx) {
   el.className = 'notice';
   let html = '';
   switch (p.code) {
-    case 'error':
+    case 'error': {
       el.classList.add('error');
-      html = `${icon('alert', 16)}<div class="grow"><div>${esc(errorMessage(p.error))}</div><div class="actions"></div></div>`;
+      const msg = errorMessage(p.error);
+      const raw = (p.error && p.error.message) || '';
+      const details = raw && raw !== msg ? `<details class="err-raw"><summary>${esc(t('err_details'))}</summary><div class="mono">${esc(raw)}</div></details>` : '';
+      html = `${icon('alert', 16)}<div class="grow"><div>${esc(msg)}</div>${details}<div class="actions"></div></div>`;
       break;
+    }
     case 'refusal':
       el.classList.add('warn');
       html = `${icon('shield', 16)}<div class="grow">${esc(t('refusal'))}${p.details && p.details.explanation ? `<div class="small">${esc(p.details.explanation)}</div>` : ''}</div>`;

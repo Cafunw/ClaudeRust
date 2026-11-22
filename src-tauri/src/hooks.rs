@@ -1,5 +1,6 @@
 //! Hooks: shell commands run at points of an agent turn, configured in
-//! Claude Code's settings format (`hooks` in `~/.claude/settings.json`,
+//! Claude Code's settings format (`hooks` in `~/.claude/settings.json`, or
+//! `$CLAUDE_CONFIG_DIR/settings.json` as the CLI reads it,
 //! `<project>/.claude/settings.json` and `.claude/settings.local.json`),
 //! for the built-in agent (the Claude Code CLI runs its own).
 //!
@@ -131,14 +132,14 @@ fn hash_hooks(root: &Path, found: &HashMap<String, Vec<Hook>>) -> Option<(String
 /// The hooks that apply in `cwd`. `trusted` maps project roots to the
 /// trusted configuration hash.
 pub fn load(cwd: &Path, trusted: &HashMap<String, String>) -> Config {
-    load_in(dirs::home_dir().as_deref(), cwd, trusted)
+    load_in(crate::import::claude_code_dir().as_deref(), cwd, trusted)
 }
 
-/// `load` with the user's home folder given (tests use their own).
-fn load_in(home: Option<&Path>, cwd: &Path, trusted: &HashMap<String, String>) -> Config {
+/// `load` with the user's Claude Code folder (`~/.claude`) given (tests use their own).
+fn load_in(user_dir: Option<&Path>, cwd: &Path, trusted: &HashMap<String, String>) -> Config {
     let mut cfg = Config::default();
-    if let Some(home) = home {
-        if let Some(v) = read_settings(&home.join(".claude").join("settings.json"), &mut cfg.problems) {
+    if let Some(dir) = user_dir {
+        if let Some(v) = read_settings(&dir.join("settings.json"), &mut cfg.problems) {
             parse(&v, &mut cfg.events);
         }
     }
@@ -384,7 +385,7 @@ mod tests {
         let home = dir.join("home");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"command":"echo user"}]}]}}"#).unwrap();
-        let cfg = load_in(Some(&home), &dir, &trusted);
+        let cfg = load_in(Some(&home.join(".claude")), &dir, &trusted);
         let stop: Vec<&str> = cfg.events["Stop"].iter().map(|h| h.command.as_str()).collect();
         assert_eq!(stop, ["echo user", "echo done"]);
         assert!(cfg.problems.iter().all(|p| !p.contains(&*dir.to_string_lossy())), "{:?}", cfg.problems);

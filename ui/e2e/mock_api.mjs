@@ -6,6 +6,8 @@
 //   "slow ..."                    -> 400 words at 50 ms each (to test Stop)
 //   "... echo ..."                -> calls the MCP server's echo tool, if offered
 //   "... write the file ..."      -> calls Write on <cwd>/e2e.txt (Code sessions)
+//   "... broken artifact ..."     -> an HTML artifact whose script throws
+//   "... artifact ..."            -> an HTML artifact: a fragment with no colours of its own
 //   a tool result                 -> "Done: <the result>"
 //   anything else                 -> "Answer <n> to <text>. ..." in pieces
 import http from 'node:http';
@@ -13,6 +15,11 @@ import path from 'node:path';
 
 export const TEST_KEY = 'sk-ant-test';
 export const TITLE = 'E2E smoke chat';
+export const ARTIFACT_ERROR = 'e2e artifact failure';
+
+const artifact = (identifier, body) => `Here it is.\n\n<antArtifact identifier="${identifier}" type="text/html" title="E2E ${identifier}">\n${body}\n</antArtifact>\n\nDone.`;
+const PAGE = artifact('page', '<h1 id="e2e-title">Hello from the artifact</h1>\n<p id="e2e-text">This text has to be readable in either theme.</p>');
+const BROKEN = artifact('broken', `<p>Before the error.</p>\n<script>throw new Error('${ARTIFACT_ERROR}')</script>`);
 
 const MODELS = [['claude-opus-5-5', 'Claude Opus 5.5'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5'], ['claude-haiku-5-5', 'Claude Haiku 5.5']]
   .map(([id, display_name]) => ({ id, display_name, type: 'model', created_at: '2026-01-01T00:00:00Z' }));
@@ -88,7 +95,9 @@ async function stream(res, body, mock) {
     await text(["I'll write it."], 0);
     tool('toolu_write', 'Write', { file_path: path.join(mock.cwd, 'e2e.txt'), content: 'written by the e2e test\n' });
     stop = 'tool_use';
-  } else await text(`Answer ${n} to ${asked}. The mock streams this reply in pieces.`.split(/(?<= )/), 80);
+  } else if (/broken artifact/i.test(asked)) await text(BROKEN.split(/(?<=\n)/), 80);
+  else if (/\bartifact\b/i.test(asked)) await text(PAGE.split(/(?<=\n)/), 80);
+  else await text(`Answer ${n} to ${asked}. The mock streams this reply in pieces.`.split(/(?<= )/), 80);
   if (gone) { mock.aborted++; return; }
   send({ type: 'message_delta', delta: { stop_reason: stop }, usage: { output_tokens: 5 } });
   send({ type: 'message_stop' });

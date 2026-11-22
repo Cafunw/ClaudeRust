@@ -261,9 +261,89 @@ fn clean_title(reply: &str) -> Option<String> {
 /// An empty folder of ours where chat conversations run the CLI, so no
 /// project's files, memory or settings are within its reach.
 fn chat_dir(st: &AppState) -> String {
-    let d = st.data_dir.join("chat-cli");
+    let d = chat_path(&st.data_dir);
     let _ = std::fs::create_dir_all(&d);
     d.display().to_string()
+}
+
+fn chat_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("chat-cli")
+}
+
+/// The CLI sessions a chat refers to, on every branch. None for a code session: its transcripts are the
+/// person's own Claude Code history, in their project's folder.
+pub fn chat_sessions(db: &crate::db::Db, conv: &crate::db::Conversation) -> AppResult<HashSet<String>> {
+    if conv.kind == "code" {
+        return Ok(HashSet::new());
+    }
+    // the latest session, before its first answer is stored, is only in the options
+    let mut out: HashSet<String> = conv.options["cc_session"].as_str().map(String::from).into_iter().collect();
+    let nodes = db.tree_nodes(&conv.id)?;
+    let parents: HashSet<&str> = nodes.iter().filter_map(|n| n.parent_id.as_deref()).collect();
+    for leaf in nodes.iter().filter(|n| !parents.contains(n.id.as_str())) {
+        out.extend(db.path_to(&leaf.id)?.into_iter().filter_map(|m| m.meta["cc_session"].as_str().map(String::from)));
+    }
+    Ok(out)
+}
+
+/// Those of `sessions` no conversation refers to any more (a fork resuming one keeps it). It reads every
+/// message, so a deleted chat's cleanup runs it off the command.
+pub fn unreferenced(db: &crate::db::Db, sessions: HashSet<String>) -> AppResult<Vec<String>> {
+    if sessions.is_empty() {
+        return Ok(vec![]);
+    }
+    let used = db.imported_keys()?;
+    Ok(sessions.into_iter().filter(|s| !used.contains(&format!("claude-code:{s}"))).collect())
+}
+
+/// What a deleted chat leaves behind: its prompt file and the CLI transcripts of `sessions`.
+pub fn remove_chat_files(data_dir: &std::path::Path, conv_id: &str, sessions: &[String]) {
+    let chat = chat_path(data_dir);
+    if plain_name(conv_id) {
+        let _ = std::fs::remove_file(prompt_path(&chat, conv_id));
+    }
+    if let Some(dir) = crate::import::claude_code_dir().and_then(|c| transcripts_dir(&c, &chat)) {
+        remove_transcripts(&dir, sessions);
+    }
+}
+
+/// The prompt files that versions before 0.1.4 (or a crash) left behind; at start, before any turn runs.
+pub fn sweep_prompt_files(data_dir: &std::path::Path) {
+    let Ok(dir) = std::fs::read_dir(chat_path(data_dir)) else { return };
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("system-") && name.ends_with(".txt") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// An id that is safe to join to a folder: no separators, dots or drive letters.
+fn plain_name(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Where the CLI keeps the transcripts of sessions run in `cwd`: a folder named after it, each UTF-16 unit
+/// but an ASCII letter or digit made a dash. shortcut: over 200 characters the CLI adds a hash of its own,
+/// not matched here, so those transcripts stay; compute that hash if such data folders turn up.
+fn transcripts_dir(config: &std::path::Path, cwd: &std::path::Path) -> Option<PathBuf> {
+    let mut name = String::new();
+    for c in cwd.to_string_lossy().chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c);
+        } else {
+            name.extend(std::iter::repeat_n('-', c.len_utf16()));
+        }
+    }
+    (name.len() <= 200).then(|| config.join("projects").join(name))
+}
+
+fn remove_transcripts(dir: &std::path::Path, sessions: &[String]) {
+    for s in sessions.iter().filter(|s| plain_name(s)) {
+        let _ = std::fs::remove_file(dir.join(format!("{s}.jsonl")));
+        // what the CLI keeps beside a transcript (sub-agents, large tool results)
+        let _ = std::fs::remove_dir_all(dir.join(s));
+    }
 }
 
 /// Does a turn of this conversation run through the CLI (and so on the Claude
@@ -561,6 +641,69 @@ fn history_context(path: &[Message]) -> String {
     } else {
         all
     }
+}
+
+/// The first line the CLI reads: the project files the session lacks, the earlier conversation (when a
+/// new session replaces one), then the message without the API engine's reminders.
+fn first_input_line(message: &Value, files: Vec<Value>, history: &str, human: bool) -> Value {
+    let mut content = files;
+    if !history.is_empty() {
+        content.push(json!({"type": "text", "text": format!(
+            "<earlier_conversation>\n{history}\n</earlier_conversation>\n\nThe Claude Code session for the conversation above is no longer available, so this continues in a new session. Use it as context for the message below."
+        )}));
+    }
+    content.extend(message.as_array().into_iter().flatten().filter(|b| !is_reminder(b)).cloned());
+    let mut line = json!({"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": null, "session_id": ""});
+    if human {
+        line["origin"] = json!({"kind": "human"});
+    }
+    line
+}
+
+/// The CLI's `api_retry` line as the `generation-retry` event the API engine sends (engine.rs).
+fn retry_notice(conv_id: &str, ev: &Value) -> Value {
+    let reason = match ev["error_status"].as_u64() {
+        Some(429) => "rate_limited",
+        Some(529) => "overloaded",
+        Some(_) => "server_error",
+        None => "network",
+    };
+    json!({"conversation_id": conv_id, "attempt": ev["attempt"], "max_attempts": ev["max_retries"], "wait_ms": ev["retry_delay_ms"], "reason": reason})
+}
+
+/// A project's PDFs and images for a turn's message, with the keys to note on it: all of them in a new
+/// session; in a resumed one, those no message it `held` carried (its transcript keeps them, so they
+/// aren't sent again), such as a file added to the project since.
+fn unsent_files(blocks: Vec<Value>, held: &[Message]) -> (Vec<Value>, Vec<String>) {
+    let sent: HashSet<&str> = held.iter().flat_map(|m| m.meta["cc_files"].as_array().into_iter().flatten()).filter_map(Value::as_str).collect();
+    blocks
+        .into_iter()
+        .map(|b| {
+            let key = crate::util::sha256_hex(b.to_string().as_bytes())[..16].to_string();
+            (b, key)
+        })
+        .filter(|(_, key)| !sent.contains(key.as_str()))
+        .unzip()
+}
+
+/// A chat's prompt file, removed when dropped: the CLI reads it as it starts and every turn writes it anew.
+struct PromptFile(PathBuf);
+
+impl Drop for PromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn prompt_path(dir: &std::path::Path, conv_id: &str) -> PathBuf {
+    dir.join(format!("system-{conv_id}.txt"))
+}
+
+/// The prompt goes to the CLI by file: a project's knowledge can pass the command-line limit.
+fn write_prompt(dir: &std::path::Path, conv_id: &str, system: &str) -> std::io::Result<PromptFile> {
+    let file = prompt_path(dir, conv_id);
+    std::fs::write(&file, system)?;
+    Ok(PromptFile(file))
 }
 
 /// Permission rules the user allowed "for this session", turned into
@@ -884,10 +1027,7 @@ async fn run_once(
     }
 
     // Resume the CLI session at the right point in our tree.
-    let prev = path[..path.len().saturating_sub(1)]
-        .iter()
-        .rev()
-        .find(|m| m.meta["cc_uuid"].is_string());
+    let prev_at = path[..path.len().saturating_sub(1)].iter().rposition(|m| m.meta["cc_uuid"].is_string());
     let mode = conv.options["permission_mode"].as_str().unwrap_or("default").to_string();
     let mut args: Vec<String> = [
         "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
@@ -915,17 +1055,20 @@ async fn run_once(
     let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
     let mut sdk_tools: Arc<ChatTools> = Arc::default();
     let mut chat_allowed: Vec<String> = vec![];
+    // a project's PDFs and images, and the chat prompt file (kept until the turn ends)
+    let mut project_files: Vec<Value> = vec![];
+    let mut _prompt_file: Option<PromptFile> = None;
     if chat {
         // our chat prompt (instructions, style, project knowledge) replaces the coding one.
-        // The prompt goes by file: a project's knowledge can pass the command-line limit.
         // shortcut: no memory search in these chats (the API engine runs it in-process)
         let mut s = settings.clone();
         s.chat_search = false;
         let rc = crate::engine::build_request_context(st, &conv, &s).await?;
-        let file = std::path::Path::new(&cwd).join(format!("system-{conv_id}.txt"));
-        if let Err(e) = std::fs::write(&file, rc.system) {
-            return fail(format!("Could not write the chat prompt ({}): {e}", file.display()));
-        }
+        let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &rc.system) {
+            Ok(f) => f,
+            Err(e) => return fail(format!("Could not write the chat prompt (in {cwd}): {e}")),
+        };
+        project_files = rc.prefix_blocks;
         // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
         let tools = chat_tools(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)).collect());
         let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
@@ -934,7 +1077,8 @@ async fn run_once(
         chat_allowed = allowed;
         sdk_tools = Arc::new(tools);
         args.push("--system-prompt-file".into());
-        args.push(file.display().to_string());
+        args.push(file.0.display().to_string());
+        _prompt_file = Some(file);
     } else if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
         args.push("--append-system-prompt".into());
         args.push(block);
@@ -946,13 +1090,17 @@ async fn run_once(
     }
     // earlier messages but no CLI session to resume (a fork into another
     // folder, or a conversation begun with the built-in engine): replay them
-    let mut with_history = prev.is_none() && path.len() > 1;
+    let mut with_history = prev_at.is_none() && path.len() > 1;
     let mut cost_before = 0.0;
-    if let Some(p) = prev {
+    // the messages the CLI session already holds: those up to where it resumes
+    let mut held: &[Message] = &[];
+    if let Some(i) = prev_at {
+        let p = &path[i];
         if let Some(sid) = p.meta["cc_session"].as_str() {
             if fresh || !transcript_exists(sid) {
                 with_history = true;
             } else {
+                held = &path[..=i];
                 args.push("--resume".into());
                 args.push(sid.to_string());
                 let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
@@ -986,32 +1134,15 @@ async fn run_once(
         args.extend(rules);
     }
 
-    let mut content: Vec<Value> = user
-        .content
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|b| !is_reminder(b))
-        .collect();
-    if with_history {
-        let h = history_context(&path[..path.len().saturating_sub(1)]);
-        if !h.is_empty() {
-            content.insert(0, json!({"type": "text", "text": format!(
-                "<earlier_conversation>\n{h}\n</earlier_conversation>\n\nThe Claude Code session for the conversation above is no longer available, so this continues in a new session. Use it as context for the message below."
-            )}));
-        }
-    }
-    let mut first_line = json!({
-        "type": "user",
-        "message": {"role": "user", "content": content},
-        "parent_tool_use_id": null,
-        "session_id": ""
-    });
+    let history = if with_history { history_context(&path[..path.len().saturating_sub(1)]) } else { String::new() };
+    let (files, file_keys) = unsent_files(project_files, held);
     // A person typed it: the CLI then honours what only a person may type, such as the "ultracode"
     // keyword. Not over a replayed conversation, whose earlier words aren't this message's.
-    if !chat && !with_history {
-        first_line["origin"] = json!({"kind": "human"});
+    let first_line = first_input_line(&user.content, files, &history, !chat && !with_history);
+    if !file_keys.is_empty() {
+        let mut meta = user.meta.clone();
+        meta["cc_files"] = json!(file_keys);
+        st.db.msg_update(&user_msg_id, &user.content, &meta)?;
     }
 
     let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
@@ -1302,9 +1433,12 @@ async fn run_once(
                             result_grace = REPORT_WAIT;
                         }
                     }
-                    // the report's request is being retried (rate limit, overload): it is still coming
-                    if ev["subtype"] == "api_retry" && idle && stdin.is_some() && result_grace == REPORT_WAIT && result_at.is_some() {
-                        result_at = Some(Instant::now());
+                    if sub == "api_retry" {
+                        let _ = app.emit("generation-retry", retry_notice(conv_id, &ev));
+                        // the report's request is being retried (rate limit, overload): it is still coming
+                        if idle && stdin.is_some() && result_grace == REPORT_WAIT && result_at.is_some() {
+                            result_at = Some(Instant::now());
+                        }
                     }
                 }
                 "stream_event" if top_level => {
@@ -2228,5 +2362,147 @@ mod tests {
         ];
         let h = history_context(&path);
         assert_eq!(h, "User: fix it\n\nAssistant: Looking.\n\nAssistant: Done.");
+    }
+
+    /// A project's text file goes in the chat's prompt file, its PDFs and images in the first line the CLI
+    /// reads, once per session.
+    #[tokio::test]
+    async fn project_files_reach_a_cli_chat_once() {
+        let dir = std::env::temp_dir().join(format!("cr-cc-proj-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let p = st.db.project_create("Launch", "").unwrap();
+        let file = |name: &str, mime: &str, kind: &str, data: &str, at: i64| crate::db::ProjectFile {
+            id: new_id(), project_id: p.id.clone(), name: name.into(), mime: mime.into(), size: data.len() as i64, kind: kind.into(), data: data.into(), created_at: at,
+        };
+        st.db.project_file_add(&file("notes.md", "text/markdown", "text", "The launch is on Friday.", 1)).unwrap();
+        st.db.project_file_add(&file("brief.pdf", "application/pdf", "pdf", "JVBERi0xLjQK", 2)).unwrap();
+        let conv = st.db.conv_create("chat", "claude-opus-5-5", Some(&p.id), None, &json!({})).unwrap();
+        let settings = crate::settings::Settings::default();
+        let rc = crate::engine::build_request_context(&st, &conv, &settings).await.unwrap();
+
+        // the prompt file: the text file, not the PDF; gone once the turn is over
+        let f = write_prompt(&dir, &conv.id, &rc.system).unwrap();
+        let written = std::fs::read_to_string(&f.0).unwrap();
+        assert!(written.contains("<document name=\"notes.md\">\nThe launch is on Friday.") && !written.contains("JVBERi0"), "{written}");
+        let path = f.0.clone();
+        drop(f);
+        assert!(!path.exists());
+
+        // the first line: the PDF as a document block, then the message
+        let (files, keys) = unsent_files(rc.prefix_blocks.clone(), &[]);
+        let line = first_input_line(&json!([{"type": "text", "text": "When is the launch?"}]), files, "", false);
+        let content = line["message"]["content"].as_array().unwrap();
+        assert_eq!(content[0], json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}, "title": "brief.pdf"}));
+        assert_eq!(content[1], json!({"type": "text", "text": "When is the launch?"}));
+        assert_eq!((content.len(), line["type"].as_str(), line["origin"].is_null(), keys.len()), (2, Some("user"), true, 1));
+
+        // a resumed session holds it, so it isn't sent again; a file added to the project since is
+        let m = |role: &str, meta: Value| Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: role.into(), content: json!([]), meta, created_at: 0 };
+        let held = [m("user", json!({"cc_files": keys})), m("assistant", json!({"cc_uuid": "u1", "cc_session": "s1"}))];
+        assert!(unsent_files(rc.prefix_blocks.clone(), &held).0.is_empty());
+        st.db.project_file_add(&file("chart.png", "image/png", "image", "iVBORw0KGgo=", 3)).unwrap();
+        let rc = crate::engine::build_request_context(&st, &conv, &settings).await.unwrap();
+        let (files, keys) = unsent_files(rc.prefix_blocks.clone(), &held);
+        assert_eq!(files, vec![json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}})]);
+        assert_eq!(keys.len(), 1);
+
+        // a new session in place of a lost one: every file, the earlier conversation, then the message
+        let (files, _) = unsent_files(rc.prefix_blocks, &[]);
+        let line = first_input_line(&json!([{"type": "text", "text": "<system-reminder>r</system-reminder>"}, {"type": "text", "text": "And the venue?"}]), files, "User: When is the launch?", true);
+        let content = line["message"]["content"].as_array().unwrap();
+        assert_eq!(content.iter().map(|b| b["type"].as_str().unwrap()).collect::<Vec<_>>(), ["document", "image", "text", "text"]);
+        assert!(content[2]["text"].as_str().unwrap().starts_with("<earlier_conversation>\nUser: When is the launch?\n</earlier_conversation>"));
+        assert_eq!((content[3]["text"].as_str(), line["origin"]["kind"].as_str()), (Some("And the venue?"), Some("human")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_retries_are_announced_like_the_api_engines() {
+        let ev = |status: Value| json!({"type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 10, "retry_delay_ms": 1500, "error_status": status});
+        assert_eq!(
+            retry_notice("c1", &ev(json!(429))),
+            json!({"conversation_id": "c1", "attempt": 2, "max_attempts": 10, "wait_ms": 1500, "reason": "rate_limited"})
+        );
+        assert_eq!(retry_notice("c1", &ev(json!(529)))["reason"], "overloaded");
+        assert_eq!(retry_notice("c1", &ev(json!(503)))["reason"], "server_error");
+        assert_eq!(retry_notice("c1", &ev(Value::Null))["reason"], "network");
+    }
+
+    /// Deleting a chat gives up the CLI sessions only it referred to, on every branch: a fork resuming one
+    /// keeps it, and a code session's are the person's own.
+    #[test]
+    fn a_deleted_chat_gives_up_only_its_own_sessions() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let add = |conv: &str, parent: Option<&str>, meta: Value| {
+            let m = Message { id: new_id(), conversation_id: conv.into(), parent_id: parent.map(Into::into), role: "assistant".into(), content: json!([]), meta, created_at: 0 };
+            db.msg_insert(&m).unwrap();
+            m
+        };
+        let delete = |conv: &crate::db::Conversation| {
+            let sessions = chat_sessions(&db, conv).unwrap();
+            db.conv_delete(&conv.id).unwrap();
+            let mut gone = unreferenced(&db, sessions).unwrap();
+            gone.sort();
+            gone
+        };
+        // the latest session, before its first answer is stored, is only in the options
+        let a = db.conv_create("chat", "claude-opus-5-5", None, None, &json!({"cc_session": "s4"})).unwrap();
+        let u = add(&a.id, None, json!({}));
+        let r1 = add(&a.id, Some(&u.id), json!({"cc_uuid": "x1", "cc_session": "s1"}));
+        add(&a.id, Some(&r1.id), json!({"cc_uuid": "x2", "cc_session": "s2"}));
+        // a regenerated answer, on a branch of its own
+        add(&a.id, Some(&u.id), json!({"cc_uuid": "x3", "cc_session": "s3"}));
+        let b = db.conv_create("chat", "claude-opus-5-5", None, None, &json!({})).unwrap();
+        db.copy_path(&[u, r1], &b.id, true).unwrap();
+        assert_eq!(delete(&a), ["s2", "s3", "s4"]);
+        assert!(db.conv_get(&a.id).is_err());
+        assert_eq!(delete(&b), ["s1"]);
+
+        let c = db.conv_create("code", "claude-opus-5-5", None, Some("/p"), &json!({"cc_session": "s9"})).unwrap();
+        add(&c.id, None, json!({"cc_uuid": "x9", "cc_session": "s9"}));
+        assert!(delete(&c).is_empty());
+        // a chat that never ran on the CLI: nothing to read
+        let d = db.conv_create("chat", "claude-opus-5-5", None, None, &json!({})).unwrap();
+        add(&d.id, None, json!({}));
+        assert!(delete(&d).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_chats_files_go_by_plain_name_only() {
+        let cfg = std::env::temp_dir().join(format!("cr-cc-cfg-{}", new_id()));
+        // the CLI's folder for the chats of a dev copy, as found on disk
+        let chat = std::path::Path::new(r"C:\Users\x\AppData\Roaming\dev.clauderust.designdev\chat-cli");
+        assert_eq!(transcripts_dir(&cfg, chat), Some(cfg.join("projects").join("C--Users-x-AppData-Roaming-dev-clauderust-designdev-chat-cli")));
+        // a character outside the BMP is two UTF-16 units, so two dashes
+        assert_eq!(transcripts_dir(&cfg, std::path::Path::new("/a\u{1F600}b")), Some(cfg.join("projects").join("-a--b")));
+        assert_eq!(transcripts_dir(&cfg, std::path::Path::new(&"x".repeat(201))), None);
+
+        let dir = cfg.join("projects").join("p");
+        std::fs::create_dir_all(dir.join("s1").join("subagents")).unwrap();
+        for f in ["s1.jsonl", "s2.jsonl", "keep.jsonl"] {
+            std::fs::write(dir.join(f), "{}").unwrap();
+        }
+        std::fs::write(cfg.join("outside.jsonl"), "{}").unwrap();
+        remove_transcripts(&dir, &["s1".into(), "s2".into(), "missing".into(), "../../outside".into(), String::new()]);
+        assert!(!dir.join("s1.jsonl").exists() && !dir.join("s1").exists() && !dir.join("s2.jsonl").exists());
+        assert!(dir.join("keep.jsonl").exists() && cfg.join("outside.jsonl").exists());
+
+        // the prompt file of a deleted chat (none of its sessions: nothing in the real Claude Code folder is touched)
+        let data = cfg.join("data");
+        std::fs::create_dir_all(chat_path(&data)).unwrap();
+        std::fs::write(chat_path(&data).join("system-c1.txt"), "x").unwrap();
+        std::fs::write(data.join("y.txt"), "x").unwrap();
+        remove_chat_files(&data, "c1", &[]);
+        remove_chat_files(&data, "x/../../y", &[]);
+        assert!(!chat_path(&data).join("system-c1.txt").exists() && data.join("y.txt").exists());
+        // at start, the prompt files of any chat go; nothing else there does
+        for f in ["system-a.txt", "system-b.txt", "notes.txt"] {
+            std::fs::write(chat_path(&data).join(f), "x").unwrap();
+        }
+        sweep_prompt_files(&data);
+        let left: Vec<_> = std::fs::read_dir(chat_path(&data)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["notes.txt"]);
+        let _ = std::fs::remove_dir_all(cfg);
     }
 }

@@ -1,19 +1,30 @@
 // End-to-end smoke test of the critical UI flows, driven over the Chrome
-// DevTools Protocol in a running dev copy of the app. It starts nothing
-// itself: run the app as dev/README.md says, then `npm run test:e2e`. With
-// no dev copy listening on 127.0.0.1:9333 the tests are skipped.
+// DevTools Protocol in a running dev copy of the app. `npm run e2e`
+// (ui/e2e/run.mjs) starts that copy, runs this and stops it; `npm run
+// test:e2e` drives a copy you started as dev/README.md says. With no dev
+// copy listening on 127.0.0.1:9333 the tests are skipped (under run.mjs,
+// which sets CLAUDERUST_E2E_REQUIRED, anything that would skip fails).
 //
 // It points the dev copy's API base URL (and an MCP server) at a mock in
 // this process, and restores both afterwards.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { startMock, TITLE } from './mock_api.mjs';
+import { startMock, TITLE, ARTIFACT_ERROR } from './mock_api.mjs';
+import { contrast } from './contrast.mjs';
 
 const CDP = 'http://127.0.0.1:9333';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const required = !!process.env.CLAUDERUST_E2E_REQUIRED;
+
+/** Skip `t`, or fail it when every test has to run. */
+function cannotRun(t, why) {
+  if (required) assert.fail(why);
+  t.skip(why);
+}
 
 async function devPage() {
   try {
@@ -83,24 +94,30 @@ let cdp = null;
 let boot = null;
 if (page) {
   cdp = await connect(page);
-  boot = await cdp.ev(`window.__TAURI__ ? window.__TAURI__.core.invoke('bootstrap') : null`).catch(() => null);
+  // (a copy just started may still be loading its page)
+  for (let i = 0; i < 20 && !boot; i++) {
+    boot = await cdp.ev(`window.__TAURI__ ? window.__TAURI__.core.invoke('bootstrap') : null`).catch(() => null);
+    if (!boot) await sleep(500);
+  }
   // a dev copy on the installed app's identifier shares its settings and chats
   if (!boot) skip = `the page on ${CDP} is not ClaudeRust`;
   else if (/dev\.clauderust\.desktop([\\/]|$)/.test(boot.data_dir)) skip = 'the dev copy uses the installed app\'s data folder; start it with its own identifier (see dev/README.md)';
   else if (!boot.settings.has_api_key) skip = 'the dev copy has no API key; start it with CLAUDERUST_API_KEY=sk-ant-test (see dev/README.md)';
   if (skip) cdp.close();
 }
+if (skip && required) throw new Error(`e2e: ${skip}`);
 
 let mock = null;
 let ev = null;
 let restore = null;
 const made = [];
 
-async function waitFor(what, expr, ms = 20000) {
+/** Wait for `expr` to be truthy in the page (or with `run`, another frame's evaluate). */
+async function waitFor(what, expr, ms = 20000, run = ev) {
   const t0 = Date.now();
   let last;
   while (Date.now() - t0 < ms) {
-    last = await ev(expr);
+    last = await run(expr);
     if (last) return last;
     await sleep(100);
   }
@@ -140,7 +157,8 @@ before(async () => {
   mock = await startMock();
   await ev(PRELUDE);
   const settings = await ev(`__e2e.invoke('get_settings')`);
-  const patch = { base_url: mock.url, chat_engine: 'api', code_engine: 'builtin', code_worktree: 'off', code_checkpoints: false, notifications: false };
+  // theme: the dark-mode test emulates the system's colour scheme
+  const patch = { base_url: mock.url, chat_engine: 'api', code_engine: 'builtin', code_worktree: 'off', code_checkpoints: false, notifications: false, artifacts_enabled: true, theme: 'system' };
   const old = Object.fromEntries(Object.keys(patch).map((k) => [k, settings[k]]));
   const mcp = (await ev(`__e2e.invoke('mcp_status')`)).config;
   restore = async () => {
@@ -265,20 +283,22 @@ test('a tool call waits on the permission card', { skip, timeout: 60000 }, async
   assert.deepEqual(mock.mcpCalls, [{ name: 'echo', arguments: { text: 'hi' } }]);
 });
 
-// A built-in Code session runs the hooks of ~/.claude/settings.json (your own
-// Claude Code hooks): this test is skipped where there are any.
-const homeHooks = (() => {
-  try { return Object.keys(JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).hooks || {}).length > 0; } catch { return false; }
-})();
-
-test('a Code session asks before it writes a file', { skip: skip || (homeHooks && 'a Code session would run the hooks in ~/.claude/settings.json'), timeout: 60000 }, async () => {
+test('a Code session asks before it writes a file', { skip, timeout: 60000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clauderust-e2e-'));
   mock.cwd = dir;
   let conv = null;
   try {
     conv = await ev(`__e2e.invoke('create_conversation', { req: { kind: 'code', cwd: ${JSON.stringify(dir)}, options: { engine: 'builtin', worktree: false, permission_mode: 'default' } } })`);
+    // a built-in Code session runs your own Claude Code hooks (from its first
+    // message on): not in a test. run.mjs starts the copy without them.
+    const hooks = await ev(`__e2e.invoke('hooks_info', { conversationId: ${JSON.stringify(conv.id)} })`);
+    if (hooks.active.length) {
+      cannotRun(t, `the dev copy would run ${hooks.active.length} hook(s) from your Claude Code settings; start it with CLAUDE_CONFIG_DIR on an empty folder (npm run e2e does)`);
+      return;
+    }
     await ev(`__e2e.emit('navigate', { name: 'chat', params: { id: ${JSON.stringify(conv.id)} } })`);
-    await waitFor('the session', `__e2e.store.route.params.id === ${JSON.stringify(conv.id)} && !!document.querySelector('#view .composer textarea')`);
+    // its own view (the route changes first, while the previous chat's composer is still there)
+    await waitFor('the session', `document.querySelector('#view .topbar .code-topinfo')?.textContent === ${JSON.stringify(path.basename(dir))} && !!document.querySelector('#view .composer textarea')`);
     assert.ok(await ev(`__e2e.type('please write the file')`));
     await waitFor('the permission card', `!!document.querySelector('#view .perm-card')`);
     assert.ok((await ev(`document.querySelector('#view .perm-card').innerText`)).includes(await ev(`__e2e.t('write_file')`)));
@@ -320,6 +340,182 @@ test('the sidebar search finds the conversation', { skip, timeout: 60000 }, asyn
   assert.equal(await convId(), made[0]);
   assert.equal(await ev(`document.querySelector('.palette')`), null);
   await waitFor('the conversation', `__e2e.turns().some((t) => t.text.includes('e2e edited'))`);
+});
+
+// ------------------------------------------------------------- artifacts
+
+const PANEL_FRAME = `document.querySelector('#artifact-panel:not(.hidden) .ap-body iframe')`;
+
+/** A session in the artifact panel's preview frame other than the one at
+ *  `not`, once its document has loaded. The frame has a process of its own,
+ *  so a debugging target of its own. */
+async function previewFrame(not = '') {
+  const src = await waitFor('the artifact preview', `(${PANEL_FRAME}?.src || '') !== ${JSON.stringify(not)} && ${PANEL_FRAME}?.src`);
+  const t0 = Date.now();
+  let target;
+  while (!(target = (await (await fetch(`${CDP}/json`)).json()).find((x) => x.type === 'iframe' && x.url === src))) {
+    if (Date.now() - t0 > 10000) throw new Error(`no debugging target for the preview frame ${src}`);
+    await sleep(100);
+  }
+  const frame = await connect(target);
+  await waitFor('the preview to load', `document.readyState === 'complete'`, 10000, frame.ev);
+  return { frame, src };
+}
+
+const closePanel = async () => {
+  await ev(`[...document.querySelectorAll('#artifact-panel .ap-head .icon-btn')].find((b) => b.title === __e2e.t('close')).click()`);
+  await waitFor('the panel to close', `document.querySelector('#artifact-panel').classList.contains('hidden')`);
+};
+
+test('an artifact in a reply opens in the preview panel', { skip, timeout: 60000 }, async () => {
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await waitFor('the new chat composer', `!!document.querySelector('#view .welcome .composer textarea')`);
+  assert.ok(await ev(`__e2e.type('show me an artifact')`));
+  made.push(await convId());
+  // it opens by itself as it is written
+  await waitFor('the panel to open', `!document.querySelector('#artifact-panel').classList.contains('hidden')`);
+  await idle();
+  const card = `document.querySelector('#view .artifact-card[data-identifier="page"]')`;
+  assert.ok(await ev(`!!${card}`), 'the reply shows the artifact card');
+  // and again from its card
+  await closePanel();
+  await ev(`${card}.click()`);
+  const { frame } = await previewFrame();
+  try {
+    assert.equal(await frame.ev(`document.getElementById('e2e-title').textContent`), 'Hello from the artifact');
+  } finally {
+    frame.close();
+  }
+});
+
+test('an HTML artifact is readable in the dark and the light theme', { skip, timeout: 60000 }, async () => {
+  let src = await waitFor('the open preview', `${PANEL_FRAME}?.src`);
+  try {
+    for (const scheme of ['dark', 'light']) {
+      const before = await ev(`document.documentElement.dataset.theme`);
+      // the system's colour scheme, in the app and in the frame (which has a process of its own)
+      const media = { features: [{ name: 'prefers-color-scheme', value: scheme }] };
+      await cdp.send('Emulation.setEmulatedMedia', media);
+      await waitFor(`the ${scheme} theme`, `document.documentElement.dataset.theme === '${scheme}'`);
+      // a theme change draws the preview again, in a new frame
+      const { frame, src: now } = await previewFrame(before === scheme ? '' : src);
+      src = now;
+      try {
+        await frame.send('Emulation.setEmulatedMedia', media);
+        assert.ok(await frame.ev(`matchMedia('(prefers-color-scheme: ${scheme})').matches`), `the frame did not take the ${scheme} scheme`);
+        const texts = await frame.ev(`['e2e-title', 'e2e-text'].map((id) => {
+          const el = document.getElementById(id);
+          const layers = [];
+          for (let n = el; n; n = n.parentElement) layers.push(getComputedStyle(n).backgroundColor);
+          return { id, color: getComputedStyle(el).color, layers };
+        })`);
+        // what shows through a transparent page: the frame element and what is under it
+        const under = await ev(`(() => {
+          const layers = [];
+          for (let n = ${PANEL_FRAME}; n; n = n.parentElement) layers.push(getComputedStyle(n).backgroundColor);
+          return layers;
+        })()`);
+        for (const { id, color, layers } of texts) {
+          const all = [...layers, ...under, 'rgb(255, 255, 255)'];
+          const ratio = contrast(color, all);
+          assert.ok(ratio >= 4.5, `${scheme}: #${id} in ${color} on ${all.join(' / ')} has a contrast of ${ratio.toFixed(2)}:1`);
+        }
+      } finally {
+        frame.close();
+      }
+    }
+    await closePanel();
+  } finally {
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+  }
+});
+
+test('an artifact that throws offers to ask Claude for a fix', { skip, timeout: 60000 }, async () => {
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await waitFor('the new chat composer', `!!document.querySelector('#view .welcome .composer textarea')`);
+  assert.ok(await ev(`__e2e.type('show me a broken artifact')`));
+  made.push(await convId());
+  await idle();
+  const fix = `[...document.querySelectorAll('#artifact-panel .ap-alert button')].find((b) => b.textContent.trim() === __e2e.t('art_try_fix'))`;
+  await waitFor('the Try fixing button', `!!${fix}`);
+  assert.match(await ev(`document.querySelector('#artifact-panel .ap-alert').innerText`), new RegExp(ARTIFACT_ERROR));
+  const sent = mock.requests.length;
+  await ev(`${fix}.click()`);
+  await until('the request for a fix', () => mock.requests.length > sent);
+  const asked = lastSent().at(-1).content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+  assert.ok(asked.includes(ARTIFACT_ERROR), `the message for a fix has the error: ${asked}`);
+  await idle();
+  await closePanel();
+});
+
+test('the delete menu item removes a conversation from the sidebar', { skip, timeout: 60000 }, async () => {
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await waitFor('the new chat composer', `!!document.querySelector('#view .welcome .composer textarea')`);
+  assert.ok(await ev(`__e2e.type('e2e delete me')`));
+  const id = await convId();
+  made.push(id);
+  await idle();
+  const link = `document.querySelector('#sidebar .chat-link[data-id="${id}"]')`;
+  await waitFor('the sidebar link', `!!${link}`);
+  await ev(`${link}.querySelector('.more').click()`);
+  await waitFor('the menu', `!!document.querySelector('.popover .menu-item.danger')`);
+  await ev(`document.querySelector('.popover .menu-item.danger').click()`);
+  await waitFor('the confirmation', `!!document.querySelector('.modal-scrim .modal-foot .btn.danger')`);
+  await ev(`document.querySelector('.modal-scrim .modal-foot .btn.danger').click()`);
+  await waitFor('the link to go', `!${link}`);
+  assert.equal(await ev(`__e2e.store.route.name`), 'new', 'the deleted chat is no longer open');
+  assert.ok(!(await ev(`__e2e.invoke('list_conversations', {})`)).some((c) => c.id === id), 'deleted from the database');
+});
+
+test('a long conversation opens on its last turns and loads the rest as you scroll up', { skip, timeout: 120000 }, async (t) => {
+  // imported as a claude.ai export: no model needed for 300 turns
+  const title = `E2E long chat ${crypto.randomUUID()}`;
+  const n = 150;
+  const at = (i) => new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString();
+  const chat_messages = Array.from({ length: n }, (_, i) => [
+    { uuid: crypto.randomUUID(), sender: 'human', text: `question ${i} of the long chat`, created_at: at(2 * i) },
+    { uuid: crypto.randomUUID(), sender: 'assistant', text: `## Answer ${i}\n\nSome **bold** text, \`code\` and a list:\n\n- one\n- two\n\n\`\`\`js\nconst x${i} = ${i};\n\`\`\``, created_at: at(2 * i + 1) },
+  ]).flat();
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'clauderust-e2e-')), 'conversations.json');
+  fs.writeFileSync(file, JSON.stringify([{ uuid: crypto.randomUUID(), name: title, created_at: at(0), chat_messages }]));
+  try {
+    const r = await ev(`__e2e.invoke('import_claude_export', { path: ${JSON.stringify(file)} })`);
+    assert.equal(r.imported, 1, JSON.stringify(r));
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+  const id = (await ev(`__e2e.invoke('list_conversations', {})`)).find((c) => c.title === title).id;
+  made.push(id);
+  await ev(`__e2e.emit('navigate', { name: 'chat', params: { id: ${JSON.stringify(id)} } })`);
+  await waitFor('the last answer', `__e2e.store.route.params.id === ${JSON.stringify(id)} && __e2e.turns().at(-1)?.text.includes('Answer ${n - 1}')`);
+  const pageTurns = await ev(`import('./js/turnwindow.js').then((m) => m.PAGE_TURNS)`);
+  const opened = await ev(`[document.querySelectorAll('#view .turn').length, document.querySelectorAll('#view *').length]`);
+  assert.ok(opened[0] <= pageTurns + 1, `opened with ${opened[0]} turns drawn`);
+  // scrolled to the top a page at a time, the first question comes into view
+  // (the first one drawn: one far above the view may be parked, empty; and
+  // textContent, as innerText is empty for one the browser skips off screen)
+  const FIRST = `Number(/question (\\d+) of the long chat/.exec(document.querySelector('#view .turn.user:not(.parked)')?.textContent)?.[1] ?? -1)`;
+  for (let was = await ev(FIRST); was !== 0; was = await ev(FIRST)) {
+    await ev(`(() => { const s = document.querySelector('#view .chat-scroll'); s.scrollTop = 0; s.dispatchEvent(new Event('scroll')); })()`);
+    await waitFor(`the page before question ${was}`, `${FIRST} < ${was}`, 10000);
+  }
+  // the turns far from the view (more than 6 screens) are parked: emptied,
+  // keeping their height, so the page doesn't grow with the conversation
+  const top = await waitFor('the far turns to be parked', `(() => {
+    const s = document.querySelector('#view .chat-scroll');
+    const top = s.getBoundingClientRect().top;
+    const view = s.clientHeight;
+    const turns = [...document.querySelectorAll('#view .turn')];
+    const far = turns.filter((el) => { const r = el.getBoundingClientRect(); return Math.max(top - r.bottom, r.top - top - view, 0) > 6 * view; });
+    const left = far.filter((el) => !el.classList.contains('parked')).length;
+    return left === 0 && { turns: turns.length, far: far.length, drawn: turns.filter((el) => !el.classList.contains('parked')).length, nodes: document.querySelectorAll('#view *').length };
+  })()`);
+  t.diagnostic(`opened with ${opened[0]} turns and ${opened[1]} nodes; at the top ${top.drawn} of ${top.turns} turns drawn, ${top.nodes} nodes`);
+  assert.equal(top.turns, 2 * n, 'every turn has its place');
+  assert.ok(top.far > 0, 'the conversation is longer than 6 screens');
+  // and back at the end, the last answer is drawn again
+  await ev(`(() => { const s = document.querySelector('#view .chat-scroll'); s.scrollTop = s.scrollHeight; })()`);
+  await waitFor('the last answer again', `__e2e.turns().at(-1).text.includes('Answer ${n - 1}')`);
 });
 
 test('no uncaught errors in the page', { skip }, () => {
