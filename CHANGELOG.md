@@ -3,6 +3,106 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.4] - 2026-11-22
+
+Project files and cleanup for chats on your Claude account, Excel and
+PowerPoint attachments, artifacts that can be fixed and can ask Claude,
+custom connectors, and streams that no longer hang.
+
+**Chats on your Claude account**
+- A project's PDFs and images now reach these chats; before, they were
+  silently left out. They go with the first message of a Claude Code
+  session and are not sent again on later turns, except files added to the
+  project since.
+- Deleting such a chat also deletes its Claude Code transcript (unless a
+  fork of it still uses it) and its system-prompt file. That file is now
+  also removed when each turn ends, and the ones earlier versions left
+  behind are removed at start.
+
+**Attachments**
+- Excel (.xlsx) and PowerPoint (.pptx) files can be attached: their text
+  goes to Claude, each sheet as CSV (up to 10,000 rows and 200 columns),
+  each slide as its lines of text.
+- A PDF over 22 MB or over 600 pages is refused when you attach it, with
+  the reason, instead of failing when the message is sent.
+- A binary file that happens to read as text (for example one padded with
+  NULs) is no longer attached as text. Text file types such as logs still
+  are.
+- *Add screenshot* is no longer greyed out: it attaches a still of the
+  screen or window you pick in the system's picker.
+
+**Artifacts**
+- An HTML artifact that sets no colours of its own shows dark text on a
+  light background in the dark theme too; before, it could be white on
+  white.
+- When an artifact throws an error, or Claude's edit to it cannot be
+  applied, a notice above it offers *Try fixing*: a click sends Claude the
+  error and asks for a fix.
+- With an Anthropic API key, an artifact can ask Claude
+  (`window.claude.complete`) after you allow it, once or always for that
+  artifact. Answers come from the model set for chat titles and use your
+  API key. Limits: prompts of up to 20,000 characters, 10 calls a minute
+  for each artifact and 100 for a conversation's artifacts until the app
+  restarts.
+- Claude can change a long artifact by sending only the passages it
+  replaces instead of writing it again in full. If such an edit cannot be
+  applied, the version before it stays on screen.
+
+**Long conversations**
+- Turns you loaded by scrolling up are unloaded again when they are far off
+  screen (they keep their place and are drawn again as you come back), so
+  memory stays bounded in very long chats. Find in the conversation still
+  searches all of it.
+
+**MCP**
+- *Add custom connector* in Settings → Developer adds a remote MCP server
+  by name and URL, with an optional bearer token or OAuth client ID; a
+  server that needs a sign-in offers *Sign in* in your browser. Remote
+  servers' cards have Edit and Remove.
+- An MCP prompt's arguments are filled in a form in the app, with the
+  required ones marked, instead of one system dialog per argument.
+
+**Stability**
+- A stream that goes silent is detected instead of waiting up to 10
+  minutes: with an API key the turn stops after 90 s without data while
+  text is coming in (5 minutes otherwise, for example while Claude thinks),
+  and a request that stalls before anything arrived is tried again.
+  OpenAI-compatible providers stop after 90 s of silence once text has
+  started.
+- A reply that stalls part way is still saved up to where it stopped.
+
+**Interface**
+- Automatic retries show a line under the message box with the reason and
+  a countdown, such as "Rate limited, retrying in 12 s (2/4)", also in
+  chats on your Claude account.
+- The sidebar that folded by itself to make room (a narrow window, or an
+  artifact open in a window under 1500 px wide) opens again when the room
+  is back, unless you folded or opened it yourself in between.
+- Connection errors in chats, notifications and the first-start setup are
+  said plainly, with the raw error text under *Details*.
+- The system's reduce-motion setting is honoured: animations and smooth
+  scrolling are turned off; spinners still turn, slowly.
+
+**Development**
+- The end-to-end UI test starts its own development copy (test identifier,
+  test key, no user hooks) with `npm run e2e`, and CI runs it on Windows.
+  That CI job first runs with this release.
+
+**Known limits**
+- A custom connector's bearer token is stored as plain text in the MCP
+  config file, not in the system's credential store.
+- AI-powered artifacts do not work in chats on your Claude account: they
+  need an Anthropic API key. There the permission question still shows
+  before the call is refused.
+- `window.confirm` and `window.alert` inside artifacts do not behave as in
+  a browser: `confirm` gives no plain yes or no (so `if (confirm(...))`
+  always goes on), and `alert` shows nothing.
+- A PDF over the limits is refused with no text-only fallback. The 100-page
+  limit of the 200K-context models and the total size of several PDFs are
+  not checked before sending.
+- The Artifacts page shows an artifact's last full version, without
+  Claude's later edits to it.
+
 ## [0.1.3] - 2026-11-22
 
 Long conversations open fast, Auto mode asks in more cases, older MCP
