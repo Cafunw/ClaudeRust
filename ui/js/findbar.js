@@ -4,6 +4,7 @@ import { t } from './i18n.js';
 import { icon } from './icons.js';
 import * as keymap from './keymap.js';
 import { h, esc } from './util.js';
+import { showAllEarlier } from './chat.js';
 
 let bar = null;
 let hits = [];
@@ -19,10 +20,16 @@ function clearMarks() {
   idx = -1;
 }
 
-function search(q) {
+let seq = 0;
+async function search(q) {
+  const mine = ++seq;
   clearMarks();
   const col = document.querySelector('.chat-scroll .chat-col');
   if (!col || !q) return update();
+  // a long conversation draws its older turns only when asked: they are searched too
+  await showAllEarlier();
+  if (mine !== seq || !col.isConnected) return;
+  clearMarks();
   const ql = q.toLowerCase();
   const walker = document.createTreeWalker(col, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => {

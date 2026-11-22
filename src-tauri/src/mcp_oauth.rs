@@ -82,13 +82,12 @@ pub fn forget(key: &str) {
 
 #[cfg(all(any(target_os = "macos", target_os = "windows"), not(test)))]
 mod store {
-    const SERVICE: &str = "dev.clauderust.desktop";
     /// Windows keeps at most 2560 bytes per credential, and two JWTs can be
     /// longer: a value is split over several.
     const CHUNK: usize = 2048;
 
     fn entry(key: &str, part: &str) -> keyring::Result<keyring::Entry> {
-        keyring::Entry::new(SERVICE, &format!("{key}.{part}"))
+        keyring::Entry::new(crate::settings::secret_service(), &format!("{key}.{part}"))
     }
 
     fn count(key: &str) -> Option<usize> {
@@ -233,21 +232,26 @@ impl reqwest::dns::Resolve for PublicOnly {
     }
 }
 
-/// The HTTP client for the sign-in of the server at `url`. It follows a
-/// redirect only within the same origin (one elsewhere could carry a code or
-/// token to an address nobody checked) and, for a server outside the user's
-/// network, connects to public addresses only.
-pub async fn client_for(url: &str) -> AppResult<reqwest::Client> {
-    let u = secure_url(url)?;
-    let same_origin = reqwest::redirect::Policy::custom(|a| {
+/// Redirects followed only within the first request's origin: one elsewhere
+/// could carry a code, a token or a configured header to an address nobody
+/// checked.
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|a| {
         let first = a.previous().first().map(Url::origin);
         if a.previous().len() < 5 && first == Some(a.url().origin()) {
             a.follow()
         } else {
             a.stop()
         }
-    });
-    let mut b = reqwest::Client::builder().redirect(same_origin).connect_timeout(Duration::from_secs(20)).timeout(Duration::from_secs(30));
+    })
+}
+
+/// The HTTP client for the sign-in of the server at `url`. It follows
+/// redirects within the same origin only and, for a server outside the
+/// user's network, connects to public addresses only.
+pub async fn client_for(url: &str) -> AppResult<reqwest::Client> {
+    let u = secure_url(url)?;
+    let mut b = reqwest::Client::builder().redirect(same_origin_redirects()).connect_timeout(Duration::from_secs(20)).timeout(Duration::from_secs(30));
     if !local_server(&u).await {
         b = b.dns_resolver(Arc::new(PublicOnly));
     }

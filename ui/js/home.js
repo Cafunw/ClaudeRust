@@ -2,7 +2,7 @@
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit, displayName } from './store.js';
+import { store, emit, displayName, newChatModel } from './store.js';
 import { $, esc } from './util.js';
 import { createComposer } from './composer.js';
 
@@ -39,7 +39,7 @@ export function renderNewChat(view, { projectId = null, text = '' } = {}) {
     mode: 'chat',
     placeholder: t('help_today'),
     draftKey: 'new',
-    initial: { model: store.settings.default_model },
+    initial: { model: newChatModel('chat') },
     onSend: (txt, atts, st) => startConversation({ text: txt, atts, st, projectId }),
   });
   $('.composer-wrap', view).appendChild(composer.el);

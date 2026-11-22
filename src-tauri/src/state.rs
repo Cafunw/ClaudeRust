@@ -106,7 +106,30 @@ impl AppState {
     pub fn code_session(&self, conv_id: &str, cwd: &str) -> Arc<CodeSession> {
         let mut m = self.code_sessions.lock();
         m.entry(conv_id.to_string())
-            .or_insert_with(|| Arc::new(CodeSession::for_conversation(PathBuf::from(cwd), conv_id, self.shells.clone())))
+            .or_insert_with(|| {
+                let mut s = CodeSession::for_conversation(PathBuf::from(cwd), conv_id, self.shells.clone());
+                // Auto mode's "written in the session" also spans app restarts
+                if let Ok(c) = self.db.conv_get(conv_id) {
+                    s.started = CodeSession::conversation_start(c.created_at);
+                }
+                Arc::new(s)
+            })
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_code_session_starts_with_its_conversation() {
+        let dir = std::env::temp_dir().join(format!("cr-state-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = AppState::new(Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let conv = st.db.conv_create("code", "m", None, Some(&dir.to_string_lossy()), &serde_json::json!({})).unwrap();
+        let s = st.code_session(&conv.id, &dir.to_string_lossy());
+        assert_eq!(s.started, CodeSession::conversation_start(conv.created_at));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

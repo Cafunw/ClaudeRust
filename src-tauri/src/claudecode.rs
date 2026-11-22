@@ -897,8 +897,10 @@ async fn run_once(
     .map(|s| s.to_string())
     .collect();
     // Auto mode is ours: the CLI asks (default mode) and we answer safe
-    // requests ourselves.
+    // requests ourselves. The CLI writes files itself: whatever changed since
+    // the conversation began counts as written by it.
     args.push(if mode == "auto" { "default".to_string() } else { mode.clone() });
+    let auto_since = crate::codetools::CodeSession::conversation_start(conv.created_at);
     if !conv.model.trim().is_empty() && conv.model != "default" {
         args.push("--model".into());
         args.push(conv.model.clone());
@@ -1395,6 +1397,7 @@ async fn run_once(
                             let mut sess = crate::codetools::CodeSession::new(PathBuf::from(&cwd));
                             // the CLI's Bash is bash on Windows too, where `\` escapes (`.\./x` is `../x`)
                             sess.powershell = false;
+                            sess.started = auto_since;
                             if crate::codetools::check_permission("auto", &tool, &input, &[], Some(&sess)) == crate::codetools::Perm::Allow {
                                 write_line(&mut stdin, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
                                     "response": {"behavior": "allow", "updatedInput": input, "toolUseID": tool_use_id}}})).await;

@@ -5,7 +5,7 @@ import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
 import { t, tOr } from './i18n.js';
 import { call } from './api.js';
-import { store, modelInfo, emit } from './store.js';
+import { store, modelInfo, emit, rememberModel } from './store.js';
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast } from './util.js';
 
 const PASTE_AS_FILE = 6000;
@@ -73,6 +73,7 @@ export function createComposer(opts) {
 
   function persist(patch) {
     Object.assign(st, patch);
+    if ('model' in patch) rememberModel(mode, patch.model);
     refreshBar();
     opts.onOptions && opts.onOptions(patch);
   }

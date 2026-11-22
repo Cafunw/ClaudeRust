@@ -312,9 +312,17 @@ function renderTool(el, p) {
   el.className = 'tool' + (open || isTodo ? ' open' : '');
   if (p.id) el.dataset.toolId = p.id;
   if (p.status !== 'running') liveOutput.delete(p.id);
+  // a closed card's body (inputs, diffs, output: long, and most cards stay closed) is drawn when it's opened;
+  // a running one's at once, for its live output
+  const drawn = open || p.status === 'running' || p.status === 'awaiting_permission';
   el.innerHTML = `<button class="tool-head">${icon(ic, 15)}<span class="tname">${esc(sum.name)}</span><span class="targ">${esc(sum.arg)}</span>${stat}${statusHtml(p)}${isTodo ? '' : icon('chevRight', 14, 'class="chev"')}</button>
-    <div class="tool-body">${isTodo ? todosHtml(p.input && p.input.todos) : toolBody(p)}</div>`;
-  if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => { el.classList.toggle('open'); if (!el.classList.contains('open')) el.dataset.userClosed = '1'; });
+    <div class="tool-body">${isTodo ? todosHtml(p.input && p.input.todos) : drawn ? toolBody(p) : ''}</div>`;
+  if (!isTodo) el.querySelector('.tool-head').addEventListener('click', () => {
+    el.classList.toggle('open');
+    const body = el.querySelector('.tool-body');
+    if (!el.classList.contains('open')) el.dataset.userClosed = '1';
+    else if (!body.firstChild) body.innerHTML = toolBody(p);
+  });
   // file tools: the path opens the file in the editor
   const fp = p.input && (p.input.file_path || p.input.notebook_path);
   if (fp && ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(p.tool)) {

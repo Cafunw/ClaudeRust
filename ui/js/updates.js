@@ -5,6 +5,7 @@ import { icon } from './icons.js';
 import { call, on as onBackend } from './api.js';
 import { emit } from './store.js';
 import { h, esc, toast, errorToast } from './util.js';
+import { friendlyError } from './neterr.js';
 
 // idle | checking | none | available | downloading | ready | error
 let state = { phase: 'idle', info: null, progress: null, error: '' };
@@ -87,7 +88,9 @@ export function updatesSection() {
       html = `<div class="upd-line">${icon('check', 14)} ${esc(t('upd_ready', { v: (info && info.version) || '' }))}</div>
         <div class="row-btns"><button class="btn sm primary" data-a="restart">${icon('refreshCw', 13)} ${esc(t('upd_restart'))}</button></div>`;
     } else if (phase === 'error') {
-      html = `<div class="upd-line upd-err">${icon('alert', 14)} ${esc(error)}</div>
+      const plain = friendlyError(error);
+      html = `<div class="upd-line upd-err">${icon('alert', 14)} ${esc(plain || error)}</div>
+        ${plain ? `<details class="err-raw"><summary>${esc(t('err_details'))}</summary><div class="mono">${esc(error)}</div></details>` : ''}
         <div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_retry'))}</button>${releases ? `<button class="btn sm ghost" data-a="page">${icon('external', 13)} ${esc(t('upd_page'))}</button>` : ''}</div>`;
     } else {
       html = `<div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_check'))}</button></div>`;

@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# a newer push to the same branch replaces the build
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -30,13 +35,13 @@ jobs:
             bundle: target/release/bundle
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +56,7 @@ jobs:
       # signing key and are made by the Release workflow)
       - name: Build
         run: npx tauri build ${{ matrix.args }} --config src-tauri/tauri.no-updater.conf.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ClaudeRust-${{ matrix.name }}
           path: |

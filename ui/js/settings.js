@@ -9,6 +9,7 @@ import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
 import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.js';
 import { oauthControls } from './mcp_oauth_ui.js';
+import { errorNotice } from './neterr.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -229,15 +230,17 @@ const RENDER = {
     const f = field(t('api_key'), keyInput, t('api_key_help'));
     const actions = h('<div class="row" style="margin-top:10px"></div>');
     actions.appendChild(saveKey);
+    const testOut = h('<div style="margin-top:10px"></div>');
     const test = button(t('test_connection'), '', async () => {
       test.disabled = true;
-      try { const r = await call('test_connection'); toast(t('connection_ok', { n: r.models })); emit('models-refresh'); } catch (e) { errorToast(e); } finally { test.disabled = false; }
+      testOut.replaceChildren();
+      try { const r = await call('test_connection'); toast(t('connection_ok', { n: r.models })); emit('models-refresh'); } catch (e) { testOut.append(errorNotice((e && e.message) || String(e))); } finally { test.disabled = false; }
     });
     actions.appendChild(test);
     if (s.has_api_key) actions.appendChild(button(t('remove_key'), 'ghost', async () => { await call('set_api_key', { key: null }); toast(t('key_removed')); emit('reload-settings'); }));
     const getKey = button(t('get_key'), 'ghost', () => call('open_external', { url: 'https://console.anthropic.com/settings/keys' }));
     actions.appendChild(getKey);
-    f.appendChild(actions);
+    f.append(actions, testOut);
     body.appendChild(f);
     body.appendChild(field(t('base_url'), textField('base_url', { placeholder: 'https://api.anthropic.com' }), t('base_url_help')));
     {
@@ -248,17 +251,19 @@ const RENDER = {
       const st = h('<div class="row-inline" style="gap:10px;align-items:center"></div>');
       const btn = h(`<button class="btn sm">${esc(t('oai_load'))}</button>`);
       const out = h('<span class="muted small"></span>');
+      const err = h('<div style="margin-top:10px"></div>');
       btn.onclick = async () => {
         out.textContent = '…';
+        err.replaceChildren();
         try {
           await new Promise((r) => setTimeout(r, 150)); // let a just-edited field save
           const list = await call('oai_refresh');
           out.textContent = list.length ? t('oai_found', { n: list.length, list: list.slice(0, 6).join(', ') }) : t('oai_off');
           emit('refresh-models');
-        } catch (e) { out.textContent = e.message || String(e); }
+        } catch (e) { out.textContent = ''; err.append(errorNotice((e && e.message) || String(e))); }
       };
       st.append(btn, out);
-      body.appendChild(st);
+      body.append(st, err);
     }
     body.appendChild(h(`<h4>${t('model')}</h4>`));
     body.appendChild(row(t('default_model'), '', select('default_model', modelOptions())));
@@ -493,7 +498,7 @@ function serverCard(s, redraw) {
     save({ disabled_mcp_servers: [...set] });
     setTimeout(redraw, 1500);
   });
-  if (s.error) card.appendChild(h(`<div class="notice error" style="margin:10px 0 0">${icon('alert', 15)}<div class="grow small mono">${esc(s.error)}</div></div>`));
+  if (s.error) card.appendChild(errorNotice(s.error)).style.margin = '10px 0 0';
   card.appendChild(oauthControls(s, redraw));
   if (s.tools.length) {
     const tl = h('<div class="tools-list"></div>');

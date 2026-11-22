@@ -107,6 +107,10 @@ function render() {
   const visible = isOpen();
   const wasHidden = el.classList.contains('hidden');
   el.classList.toggle('hidden', !visible);
+  // only shown in narrow windows (CSS), where the panel is a sheet over the chat
+  let scrim = document.getElementById('workspace-scrim');
+  if (!scrim) { scrim = h('<div class="ws-scrim" id="workspace-scrim"></div>'); scrim.onclick = close; el.before(scrim); }
+  scrim.classList.toggle('hidden', !visible);
   // one side panel at a time: the artifact panel closes when this opens
   if (visible && wasHidden) window.dispatchEvent(new Event('workspace-opened'));
   document.querySelectorAll('.ws-toggle').forEach((b) => b.classList.toggle('on', visible));

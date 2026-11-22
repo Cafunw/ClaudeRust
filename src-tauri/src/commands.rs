@@ -14,7 +14,7 @@ use crate::view;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
 type St<'a> = State<'a, Arc<AppState>>;
@@ -376,10 +376,10 @@ pub async fn create_conversation(state: St<'_>, req: NewConversation) -> AppResu
 }
 
 #[tauri::command]
-pub async fn get_conversation(state: St<'_>, id: String) -> AppResult<Value> {
+pub async fn get_conversation(state: St<'_>, id: String, limit: Option<usize>, since: Option<String>, before: Option<String>) -> AppResult<Value> {
     let st = state.inner().clone();
-    // rendering a long conversation (Markdown, highlighting) can take seconds
-    off_runtime(async move { view::conversation_view(&st, &id).await }).await
+    // rendering a long conversation (Markdown, highlighting) can take seconds: the UI asks for the last turns, and older ones as you scroll up
+    off_runtime(async move { view::conversation_window(&st, &id, &view::Window { limit, since, before }).await }).await
 }
 
 /// A conversation's stored record (title, options…) without rendering its
@@ -408,7 +408,7 @@ pub async fn send_message(app: AppHandle, state: St<'_>, req: SendReq) -> AppRes
     send_message_inner(&app, state.inner().clone(), req).await
 }
 
-pub async fn send_message_inner(app: &AppHandle, st: Arc<AppState>, req: SendReq) -> AppResult<Value> {
+pub async fn send_message_inner<R: Runtime>(app: &AppHandle<R>, st: Arc<AppState>, req: SendReq) -> AppResult<Value> {
     let (conv, created) = match (&req.conversation_id, &req.new_conversation) {
         (Some(id), _) => (st.db.conv_get(id)?, false),
         (None, Some(nc)) => (
@@ -445,7 +445,7 @@ fn discard_new_conversation(st: &Arc<AppState>, conv: &crate::db::Conversation) 
 
 /// A message typed while a Claude Code turn is idle on a workflow goes straight to that CLI (the workflow
 /// keeps running), as a turn of its own. None when the conversation isn't in that state.
-fn say_to_running_cli(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> Option<AppResult<Value>> {
+fn say_to_running_cli<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> Option<AppResult<Value>> {
     if conv.options["engine"] != crate::claudecode::ENGINE || req.edit {
         return None;
     }
@@ -493,7 +493,7 @@ fn say_to_running_cli(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Con
     })())
 }
 
-async fn send_into(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> AppResult<Value> {
+async fn send_into<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &crate::db::Conversation, req: &SendReq) -> AppResult<Value> {
     if let Some(r) = say_to_running_cli(app, st, conv, req) {
         return r;
     }
@@ -628,18 +628,18 @@ async fn send_into(app: &AppHandle, st: &Arc<AppState>, conv: &crate::db::Conver
 }
 
 #[tauri::command]
-pub async fn regenerate(app: AppHandle, state: St<'_>, conversation_id: String, user_message_id: String, model: Option<String>) -> AppResult<()> {
+pub async fn regenerate<R: Runtime>(app: AppHandle<R>, state: St<'_>, conversation_id: String, user_message_id: String, model: Option<String>) -> AppResult<()> {
     let st = state.inner().clone();
     let slot = engine::RunSlot::reserve(&st, &conversation_id, "Claude is still responding. Stop the response or wait for it to finish.")?;
     let msg = st.db.msg_get(&user_message_id)?;
     if msg.conversation_id != conversation_id {
         return Err(AppError::msg("Message not found in this conversation."));
     }
-    if let Some(m) = model.filter(|m| !m.is_empty()) {
-        st.db.conv_set_model(&conversation_id, &m)?;
-    }
     if msg.role != "user" {
         return Err(AppError::msg("Can only regenerate from a user message."));
+    }
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
+        st.db.conv_set_model(&conversation_id, &m)?;
     }
     st.db.conv_set_leaf(&conversation_id, Some(&user_message_id))?;
     engine::start_reserved(&app, slot, &user_message_id);
@@ -647,17 +647,15 @@ pub async fn regenerate(app: AppHandle, state: St<'_>, conversation_id: String, 
 }
 
 #[tauri::command]
-pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: String) -> AppResult<Value> {
+pub async fn switch_branch(state: St<'_>, conversation_id: String, message_id: String) -> AppResult<()> {
     let st = state.inner().clone();
-    let slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the response to finish before switching versions.")?;
+    let _slot = engine::RunSlot::reserve(&st, &conversation_id, "Wait for the response to finish before switching versions.")?;
     let nodes = st.db.tree_nodes(&conversation_id)?;
     if !nodes.iter().any(|n| n.id == message_id) {
         return Err(AppError::msg("Message not found in this conversation."));
     }
-    let leaf = view::latest_leaf(&nodes, &message_id);
-    st.db.conv_set_leaf(&conversation_id, Some(&leaf))?;
-    drop(slot);
-    off_runtime(async move { view::conversation_view(&st, &conversation_id).await }).await
+    // the UI then asks for the turns it shows (get_conversation): a long conversation isn't rendered whole here
+    st.db.conv_set_leaf(&conversation_id, Some(&view::latest_leaf(&nodes, &message_id)))
 }
 
 #[tauri::command]
@@ -1095,15 +1093,38 @@ pub async fn delete_artifact(state: St<'_>, conversation_id: String, identifier:
 /// `artifact://` protocol.
 #[tauri::command]
 pub async fn serve_artifact(state: St<'_>, kind: String, content: String, dark: bool) -> AppResult<String> {
-    let st = state.inner().clone();
     let doc = crate::artifacts::build_document(&kind, &content, dark);
-    let token = new_id();
-    let mut served = st.served.lock();
-    if served.len() > 64 {
-        served.clear();
+    Ok(serve(&mut state.served.lock(), doc.into_bytes()))
+}
+
+/// Documents kept for the `artifact://` protocol: past this, the oldest goes
+/// (an open frame that reloads still finds the newer ones).
+const SERVED_MAX: usize = 64;
+
+/// Keep `doc` under a new token, which sorts after every earlier one (the
+/// random part keeps it unguessable to other documents).
+fn serve(served: &mut std::collections::HashMap<String, (String, Vec<u8>)>, doc: Vec<u8>) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let token = format!("{:016x}-{}", SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed), new_id());
+    while served.len() >= SERVED_MAX {
+        let Some(oldest) = served.keys().min().cloned() else { break };
+        served.remove(&oldest);
     }
-    served.insert(token.clone(), ("text/html; charset=utf-8".into(), doc.into_bytes()));
-    Ok(token)
+    served.insert(token.clone(), ("text/html; charset=utf-8".into(), doc));
+    token
+}
+
+#[cfg(test)]
+mod served_tests {
+    #[test]
+    fn the_oldest_document_goes_first() {
+        let mut served = std::collections::HashMap::new();
+        let tokens: Vec<String> = (0..70u8).map(|i| super::serve(&mut served, vec![i])).collect();
+        assert_eq!(served.len(), super::SERVED_MAX);
+        assert!(tokens[..6].iter().all(|t| !served.contains_key(t)), "the 6 oldest are gone");
+        // the newer ones, an open frame's among them, still load
+        assert!(tokens[6..].iter().enumerate().all(|(i, t)| served[t].1 == [i as u8 + 6]));
+    }
 }
 
 #[tauri::command]
@@ -1466,6 +1487,46 @@ mod tests {
         assert_eq!(off["turns"].as_array().unwrap().len(), 2, "{off}");
         let e = off_runtime(async move { view::conversation_view(&st, "nope").await }).await.unwrap_err();
         assert_eq!(e.to_string(), "Conversation not found");
+    }
+
+    #[test]
+    fn a_fork_copies_the_branch_up_to_the_message() {
+        let st = test_state();
+        let conv = st.db.conv_create("chat", "claude-opus-5-5", None, None, &json!({"cc_session": "s1", "pending_compact": {}, "instructions": "be brief"})).unwrap();
+        st.db.conv_set_title(&conv.id, "Plan").unwrap();
+        let add = |parent: Option<&str>, role: &str, text: &str, at: i64| {
+            let m = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: parent.map(Into::into), role: role.into(), content: json!([{"type": "text", "text": text}]), meta: json!({}), created_at: at };
+            st.db.msg_insert(&m).unwrap();
+            m.id
+        };
+        let u1 = add(None, "user", "one", 1);
+        let a1 = add(Some(&u1), "assistant", "two", 2);
+        let u2 = add(Some(&a1), "user", "three", 3);
+        let a2 = add(Some(&u2), "assistant", "four", 4);
+        add(None, "user", "an edit of one", 5);
+        st.db.conv_set_leaf(&conv.id, Some(&a2)).unwrap();
+
+        let fork = fork_into_new(&st, &conv.id, &a1).unwrap();
+        let f = st.db.conv_get(&fork).unwrap();
+        assert_eq!((f.title.as_str(), f.kind.as_str(), f.model.as_str()), ("Plan (fork)", "chat", "claude-opus-5-5"));
+        // the session links stay with the original, its instructions come along
+        assert!(f.options["cc_session"].is_null() && f.options["pending_compact"].is_null(), "{}", f.options);
+        assert_eq!(f.options["instructions"], "be brief");
+        let path = st.db.path_to(f.current_leaf.as_deref().unwrap()).unwrap();
+        let texts: Vec<&str> = path.iter().map(|m| m.content[0]["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["one", "two"]);
+        assert!(path.iter().all(|m| m.conversation_id == fork && m.id != u1 && m.id != a1));
+        assert_eq!(path[1].parent_id.as_deref(), Some(path[0].id.as_str()));
+        assert_eq!(st.db.search("two", 10).unwrap().iter().filter(|h| h.conversation_id == fork).count(), 1, "indexed for search");
+        // the original is untouched
+        assert_eq!(st.db.tree_nodes(&conv.id).unwrap().len(), 5);
+        assert_eq!(st.db.conv_get(&conv.id).unwrap().current_leaf.as_deref(), Some(a2.as_str()));
+
+        // a fork of a fork isn't "(fork) (fork)"
+        let again = fork_into_new(&st, &fork, &path[1].id).unwrap();
+        assert_eq!(st.db.conv_get(&again).unwrap().title, "Plan (fork)");
+        // a message of another conversation
+        assert_eq!(fork_into_new(&st, &fork, &a1).unwrap_err().to_string(), "Message not found in this conversation.");
     }
 
     fn test_state() -> Arc<AppState> {

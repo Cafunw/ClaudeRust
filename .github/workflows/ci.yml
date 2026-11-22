@@ -2,10 +2,17 @@ name: CI
 
 on:
   push:
+    # not tags: a release tag points at a commit CI has already run on
+    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
+
+# a newer push to the same branch (or pull request) replaces the run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -16,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -27,15 +34,28 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build tests
-        run: cargo test -p clauderust --lib --no-run
-      - name: Unit tests
-        timeout-minutes: 10
-        run: cargo test -p clauderust --lib -- --test-threads=2
+        run: cargo test -p clauderust --no-default-features --no-run
+      # unit, integration (src-tauri/tests) and doc tests
+      - name: Tests
+        timeout-minutes: 15
+        run: cargo test -p clauderust --no-default-features -- --test-threads=2
       - name: Clippy
-        run: cargo clippy -p clauderust --all-targets -- -D warnings
-      - name: Check UI modules parse
-        if: runner.os == 'Linux'
-        run: for f in ui/js/*.js ui/js/panes/*.js; do node --experimental-default-type=module --check "$f"; done
-      - name: Lint UI (undefined names, duplicate keys)
-        if: runner.os == 'Linux'
-        run: npm ci --ignore-scripts && npx eslint ui/js
+        run: cargo clippy -p clauderust --no-default-features --all-targets -- -D warnings
+
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # what the UI tests are written and run with locally
+          node-version: 26
+          cache: npm
+      - name: Install
+        run: npm ci --ignore-scripts
+      # undefined names, duplicate keys, syntax errors
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm run test:ui

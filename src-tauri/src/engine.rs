@@ -5,7 +5,7 @@
 use crate::anthropic::{Accumulator, Client, StreamOutcome};
 use crate::attachments;
 use crate::codetools::{self, CodeSession, Perm};
-use crate::db::{Conversation, Message};
+use crate::db::{Conversation, Db, Message};
 use crate::error::{AppError, AppResult};
 use crate::models::{self, ModelInfo, Thinking};
 use crate::prompts;
@@ -39,6 +39,51 @@ fn save_due(last: &mut (Instant, usize), now: Instant, blocks: usize) -> bool {
     }
     *last = (now, blocks);
     true
+}
+
+/// The periodic saves of one reply that is streaming in, written by a task
+/// of their own on the blocking pool, so a slow disk or a busy database
+/// connection never holds up the stream. They are written in order; a save
+/// still waiting when a newer one arrives is skipped (the newer has it all).
+/// Dropped without `finish` (a panic), it still writes what was sent.
+pub(crate) struct PartialSaves {
+    tx: std::sync::mpsc::Sender<(Value, Value)>,
+    writer: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl PartialSaves {
+    pub(crate) fn new(mut write: impl FnMut(Value, Value) + Send + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(Value, Value)>();
+        let writer = tauri::async_runtime::spawn_blocking(move || {
+            while let Ok(mut save) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    save = newer;
+                }
+                write(save.0, save.1);
+            }
+        });
+        PartialSaves { tx, writer }
+    }
+
+    /// The saves of message `id`.
+    pub(crate) fn of(db: Arc<Db>, id: String) -> Self {
+        Self::new(move |content, meta| {
+            if let Err(e) = db.msg_update(&id, &content, &meta) {
+                log::warn!("saving the reply so far failed: {e}");
+            }
+        })
+    }
+
+    pub(crate) fn save(&self, content: Value, meta: Value) {
+        // fails only once the writer is gone (it panicked): nothing to save to
+        let _ = self.tx.send((content, meta));
+    }
+
+    /// Waits until every save sent is written, so the reply's final write lands after them.
+    pub(crate) async fn finish(self) {
+        drop(self.tx);
+        let _ = self.writer.await;
+    }
 }
 
 /// The app's own handle, for the engines that take it (the Claude Code CLI
@@ -1078,6 +1123,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
         let mut invalid_json: HashMap<String, String> = HashMap::new();
         let mut error: Option<AppError> = None;
         let mut continuations = 0;
+        let saves = PartialSaves::of(st.db.clone(), am_id.clone());
         loop {
             let base = content.clone();
             let mut last_emit = Instant::now() - Duration::from_secs(1);
@@ -1091,9 +1137,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                 if save_due(&mut saved, Instant::now(), acc.blocks.len()) {
                     let mut c = base.clone();
                     c.extend(acc.content());
-                    if let Err(e) = st2.db.msg_update(&cur.id, &Value::Array(c), &cur.meta) {
-                        log::warn!("saving the reply so far failed: {e}");
-                    }
+                    saves.save(Value::Array(c), cur.meta.clone());
                 }
                 if last_emit.elapsed() < Duration::from_millis(45) {
                     return;
@@ -1171,6 +1215,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                 }
             }
         }
+        saves.finish().await;
 
         // ---- persist
         am.content = Value::Array(content.clone());
@@ -1387,11 +1432,10 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
     let started = Instant::now();
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut saved = (Instant::now(), 1);
+    let saves = PartialSaves::of(st.db.clone(), am_id.clone());
     let res = crate::oai::stream(&settings.oai_base_url, &settings.oai_api_key, &model, messages, settings.max_tokens, cancel, |text| {
         if save_due(&mut saved, Instant::now(), 1) {
-            if let Err(e) = st.db.msg_update(&am_id, &json!([{"type": "text", "text": text}]), &am.meta) {
-                log::warn!("saving the reply so far failed: {e}");
-            }
+            saves.save(json!([{"type": "text", "text": text}]), am.meta.clone());
         }
         if last.elapsed() < Duration::from_millis(45) {
             return;
@@ -1408,6 +1452,7 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
         renderer.give_back(t);
     })
     .await;
+    saves.finish().await;
     am.meta["duration_ms"] = json!(started.elapsed().as_millis() as u64);
     let err = match res {
         Ok(o) => {
@@ -1891,6 +1936,143 @@ mod tests {
         for i in 0..8 {
             assert_eq!(o[format!("k{i}")], 49, "update of k{i} lost: {o}");
         }
+    }
+
+    type Written = Arc<parking_lot::Mutex<Vec<Value>>>;
+
+    fn recording() -> (Written, impl FnMut(Value, Value) + Send + 'static) {
+        let w = Written::default();
+        let w2 = w.clone();
+        (w, move |c, _| w2.lock().push(c))
+    }
+
+    #[test]
+    fn partial_saves_are_written_in_order_and_all_by_finish() {
+        let (written, write) = recording();
+        let saves = PartialSaves::new(write);
+        for n in 0..200 {
+            saves.save(json!(n), json!({}));
+        }
+        tauri::async_runtime::block_on(saves.finish());
+        let w: Vec<i64> = written.lock().iter().map(|v| v.as_i64().unwrap()).collect();
+        assert!(w.windows(2).all(|p| p[0] < p[1]), "out of order: {w:?}");
+        assert_eq!(w.last(), Some(&199), "the last save is written before finish returns");
+    }
+
+    #[test]
+    fn a_partial_save_waiting_behind_a_slow_write_gives_way_to_the_newest() {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let (written, mut record) = recording();
+        let saves = PartialSaves::new(move |c, m| {
+            if c == 1 {
+                // a slow disk: the writer is busy while newer saves arrive
+                entered_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            }
+            record(c, m);
+        });
+        saves.save(json!(1), json!({}));
+        entered.recv().unwrap();
+        for n in 2..=4 {
+            saves.save(json!(n), json!({}));
+        }
+        go.send(()).unwrap();
+        tauri::async_runtime::block_on(saves.finish());
+        assert_eq!(*written.lock(), vec![json!(1), json!(4)]);
+    }
+
+    #[test]
+    fn partial_saves_dropped_without_finish_are_still_written() {
+        // a turn that panicked mid-stream
+        let (written, write) = recording();
+        let saves = PartialSaves::new(write);
+        saves.save(json!("so far"), json!({}));
+        drop(saves);
+        let t0 = Instant::now();
+        while written.lock().last() != Some(&json!("so far")) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "never written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn partial_saves_write_the_message_row() {
+        let st = test_state();
+        let c = st.db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let am = m("a", "assistant", json!([]), json!({}));
+        st.db.msg_insert(&Message { conversation_id: c.id, ..am }).unwrap();
+        let saves = PartialSaves::of(st.db.clone(), "a".into());
+        saves.save(json!([{"type": "text", "text": "Hel"}]), json!({"model": "m"}));
+        saves.save(json!([{"type": "text", "text": "Hello"}]), json!({"model": "m"}));
+        tauri::async_runtime::block_on(saves.finish());
+        let row = st.db.msg_get("a").unwrap();
+        assert_eq!((row.content, row.meta), (json!([{"type": "text", "text": "Hello"}]), json!({"model": "m"})));
+    }
+
+    /// What the stream callback spends on one save of a 20,000-character
+    /// reply (1,000 ticks of 20 characters, a save forced on each), before
+    /// (written in the callback) and after (handed to `PartialSaves`), alone
+    /// and while another conversation stores a 200 KB answer every 5 ms:
+    /// `cargo test --release --no-default-features --lib bench_partial_save -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_partial_save() {
+        let dir = std::env::temp_dir().join(format!("cr-savebench-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(crate::db::Db::open(&dir.join("bench.db")).unwrap());
+        let c = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        for id in ["a", "other"] {
+            db.msg_insert(&Message { conversation_id: c.id.clone(), ..m(id, "assistant", json!([]), json!({"model": "m"})) }).unwrap();
+        }
+        let ticks = |save: &mut dyn FnMut(Value, Value)| -> Vec<Duration> {
+            let mut acc = Accumulator::default();
+            acc.apply(&json!({"type": "message_start", "message": {"id": "x", "model": "m", "content": [], "usage": {}}})).unwrap();
+            acc.apply(&json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})).unwrap();
+            let base: Vec<Value> = vec![];
+            let meta = json!({"model": "m", "fingerprint": "f"});
+            (0..1000)
+                .map(|_| {
+                    acc.apply(&json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "lorem ipsum dolor si"}})).unwrap();
+                    // what on_event does when a save is due
+                    let t = Instant::now();
+                    let mut c = base.clone();
+                    c.extend(acc.content());
+                    save(Value::Array(c), meta.clone());
+                    t.elapsed()
+                })
+                .collect()
+        };
+        let report = |name: &str, mut d: Vec<Duration>| {
+            d.sort();
+            let mean = d.iter().sum::<Duration>() / d.len() as u32;
+            println!("{name:<38} mean {mean:>9.2?}  p50 {:>9.2?}  p99 {:>9.2?}  max {:>9.2?}", d[d.len() / 2], d[d.len() * 99 / 100], d[d.len() - 1]);
+        };
+        for busy in [false, true] {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let other = busy.then(|| {
+                let (db, stop) = (db.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let big = json!([{"type": "text", "text": "y".repeat(200_000)}]);
+                    while !stop.load(Ordering::Relaxed) {
+                        db.msg_update("other", &big, &json!({})).unwrap();
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })
+            });
+            let tag = if busy { ", other writer" } else { "" };
+            report(&format!("before: in the callback{tag}"), ticks(&mut |c, meta| db.msg_update("a", &c, &meta).unwrap()));
+            let saves = PartialSaves::of(db.clone(), "a".into());
+            report(&format!("after: PartialSaves{tag}"), ticks(&mut |c, meta| saves.save(c, meta)));
+            tauri::async_runtime::block_on(saves.finish());
+            stop.store(true, Ordering::Relaxed);
+            if let Some(t) = other {
+                t.join().unwrap();
+            }
+        }
+        assert_eq!(db.msg_get("a").unwrap().content[0]["text"].as_str().unwrap().len(), 20_000);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn rc(fp: &str) -> ReqCtx {

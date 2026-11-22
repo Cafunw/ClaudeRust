@@ -4,7 +4,7 @@ import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit, on, saveLocal, loadLocal } from './store.js';
+import { store, emit, on, saveLocal, loadLocal, newChatModel } from './store.js';
 import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
@@ -100,7 +100,7 @@ export async function renderCode(view, params = {}) {
     mode: 'code',
     placeholder: t('code_placeholder'),
     draftKey: 'code-new',
-    initial: { model: store.settings.code_model || store.settings.default_model, thinking: true, permission_mode: store.settings.code_permission_mode || 'default' },
+    initial: { model: newChatModel('code'), thinking: true, permission_mode: store.settings.code_permission_mode || 'default' },
     context: () => ({ cwd: folder, engine }),
     onSend: async (text, atts, st) => {
       if (!folder) { toast(t('folder_missing'), 'error'); return false; }

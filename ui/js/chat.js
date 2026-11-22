@@ -14,6 +14,7 @@ import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.j
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
+import { PAGE_TURNS, pageStart } from './turnwindow.js';
 
 let cur = null;
 
@@ -39,12 +40,12 @@ function composerInitial(conv) {
 // replace the one opened after it
 let openSeq = 0;
 
-// get_conversation (the whole conversation, rendered) for callers that come
-// within a few milliseconds of each other: the end of a turn brings
-// generation-state and conversation-updated back to back, and a rename the
-// command's reply and its conversation-updated, and each asked for all of
-// it. A caller only ever joins a request that hasn't been sent yet, so it
-// never gets data older than its call.
+// get_conversation (the turns loaded so far and any after them, rendered)
+// for callers that come within a few milliseconds of each other: the end of
+// a turn brings generation-state and conversation-updated back to back, and
+// a rename the command's reply and its conversation-updated, and each asked
+// for all of it. A caller only ever joins a request that hasn't been sent
+// yet, so it never gets data older than its call.
 const JOIN_MS = 10;
 const fetching = new Map(); // id -> promise of a request about to be sent
 export function fetchConversation(id) {
@@ -52,7 +53,8 @@ export function fetchConversation(id) {
   if (!p) {
     p = new Promise((resolve, reject) => setTimeout(() => {
       fetching.delete(id);
-      call('get_conversation', { id }).then(resolve, reject);
+      const since = cur && cur.id === id ? cur.order.find((x) => !String(x).startsWith('pending-')) : null;
+      call('get_conversation', { id, limit: PAGE_TURNS, since }).then(resolve, reject);
     }, JOIN_MS));
     fetching.set(id, p);
   }
@@ -61,7 +63,7 @@ export function fetchConversation(id) {
 
 export async function openConversation(id, { focus = true } = {}) {
   const seq = ++openSeq;
-  const data = await call('get_conversation', { id });
+  const data = await call('get_conversation', { id, limit: PAGE_TURNS });
   if (seq !== openSeq) return;
   const conv = data.conversation;
   store.codeRoot = conv.kind === 'code' ? conv.cwd : null;
@@ -88,6 +90,11 @@ export async function openConversation(id, { focus = true } = {}) {
     running: data.running,
     artifacts: new Map(),
     autoOpened: new Set(),
+    // order[shown..] are drawn; earlier turns are loaded but not drawn, and
+    // with `more` the backend has turns before order[0]
+    shown: 0,
+    more: !!data.more,
+    earlier: data.earlier_artifacts || [],
   };
   const composer = createComposer({
     mode: conv.kind === 'code' ? 'code' : 'chat',
@@ -111,7 +118,11 @@ export async function openConversation(id, { focus = true } = {}) {
   composer.setRunning(!!data.running, !!data.waiting);
 
   renderTopbar();
-  for (const turn of data.turns) upsertTurn(turn, false);
+  cur.order = data.turns.map((x) => x.id);
+  for (const x of data.turns) cur.turns.set(x.id, x);
+  cur.shown = pageStart(data.turns, data.turns.length);
+  for (const turn of data.turns.slice(cur.shown)) upsertTurn(turn, false);
+  drawEarlierButton();
   markLast();
   rebuildArtifacts();
   for (const p of data.pending_permissions || []) showPermission(p);
@@ -306,11 +317,18 @@ export async function reload() {
   const data = await fetchConversation(id);
   if (!cur || cur.id !== id) return;
   cur.conv = data.conversation;
-  const keep = new Set(data.turns.map((x) => x.id));
-  for (const [tid, el] of cur.els) if (!keep.has(tid)) { el.remove(); cur.els.delete(tid); cur.turns.delete(tid); }
-  cur.order = [];
-  for (const turn of data.turns) upsertTurn(turn, false);
+  cur.more = !!data.more;
+  cur.earlier = data.earlier_artifacts || [];
+  // the same turns stay drawn: from the first one drawn, while it's still there
+  const at = data.turns.findIndex((x) => x.id === cur.order[cur.shown]);
+  cur.order = data.turns.map((x) => x.id);
+  cur.turns = new Map(data.turns.map((x) => [x.id, x]));
+  cur.shown = at >= 0 ? at : pageStart(data.turns, data.turns.length);
+  const keep = new Set(cur.order.slice(cur.shown));
+  for (const [tid, el] of cur.els) if (!keep.has(tid)) { el.remove(); cur.els.delete(tid); }
+  for (const turn of data.turns.slice(cur.shown)) upsertTurn(turn, false);
   placeTurns();
+  drawEarlierButton();
   markLast();
   rebuildArtifacts();
   renderTopbar();
@@ -341,6 +359,66 @@ function onScroll() {
   else if (top < (cur.lastTop ?? 0) - 2) cur.stick = false;
   cur.lastTop = top;
   updateScrollButton();
+  if (top < 600 && cur.stick === false) showEarlier();
+}
+
+// ----------------------------------------------------- earlier turns
+
+function hasEarlier() { return !!cur && (cur.shown > 0 || cur.more); }
+
+/** The "Show earlier messages" button at the top while older turns aren't drawn. */
+function drawEarlierButton() {
+  let b = cur.colEl.querySelector(':scope > .show-earlier');
+  if (!hasEarlier()) { if (b) b.remove(); return; }
+  if (b) return;
+  b = h(`<button class="btn sm ghost show-earlier">${icon('history', 14)} ${esc(t('show_earlier'))}</button>`);
+  b.onclick = () => showEarlier();
+  cur.colEl.prepend(b);
+}
+
+/** Draw the page of turns before the first one drawn, loading it first when
+ *  the backend has it, and keep what's on screen where it was. One at a
+ *  time: callers meanwhile wait for the one under way. */
+function showEarlier() {
+  const c = cur;
+  if (!c || !hasEarlier()) return Promise.resolve();
+  c.earlierP ||= drawEarlier(c).catch(errorToast).finally(() => { c.earlierP = null; });
+  return c.earlierP;
+}
+
+async function drawEarlier(c) {
+  if (c.shown === 0) {
+    const first = c.order[0];
+    const data = await call('get_conversation', { id: c.id, limit: PAGE_TURNS, before: first });
+    // (a reload in the meantime that changed the branch: the next scroll asks again)
+    if (cur !== c || c.order[0] !== first) return;
+    const older = data.turns.filter((x) => !c.turns.has(x.id));
+    c.more = !!data.more && older.length > 0;
+    for (const x of older) c.turns.set(x.id, x);
+    c.order = [...older.map((x) => x.id), ...c.order];
+    c.shown = older.length;
+  }
+  const turns = c.order.map((id) => c.turns.get(id));
+  const start = pageStart(turns, c.shown);
+  const anchor = c.els.get(c.order[c.shown]) || null;
+  const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
+  c.stick = false;
+  for (const turn of turns.slice(start, c.shown)) upsertTurn(turn, false, anchor);
+  c.shown = start;
+  if (anchor) c.scrollEl.scrollTop += anchor.getBoundingClientRect().top - y0;
+  drawEarlierButton();
+  rebuildArtifacts();
+  updateScrollButton();
+}
+
+/** Draw every turn (the find bar and the outline look through all of them). */
+export async function showAllEarlier() {
+  const c = cur;
+  while (c && cur === c && hasEarlier()) {
+    const was = [c.shown, c.order.length];
+    await showEarlier();
+    if (c.shown === was[0] && c.order.length === was[1]) return;
+  }
 }
 
 function updateScrollButton() {
@@ -362,7 +440,7 @@ function updateScrollButton() {
  *  in order already: a moved turn is laid out again and loses the scroll
  *  positions inside it, and a reload (after every answer) would move all. */
 function placeTurns() {
-  const want = cur.order.map((tid) => cur.els.get(tid));
+  const want = cur.order.slice(cur.shown).map((tid) => cur.els.get(tid));
   const kids = cur.colEl.children;
   const start = kids.length - want.length;
   if (start >= 0 && want.every((el, j) => kids[start + j] === el)) return;
@@ -390,7 +468,21 @@ function markLast() {
   });
 }
 
-function upsertTurn(turn, live = true) {
+// A new turn is laid out once, so its real size is known and remembered
+// (contain-intrinsic-size: auto); after that it's skipped while off screen.
+// Skipped from the start, it would take a guessed size and the view would
+// jump as you scroll onto it.
+const unsettled = new Set();
+function settleLater(el) {
+  if (!unsettled.size) requestAnimationFrame(() => requestAnimationFrame(() => {
+    for (const e of unsettled) e.classList.add('settled');
+    unsettled.clear();
+  }));
+  unsettled.add(el);
+}
+
+/** Draw a turn: anew, or what changed in it. A new one goes at the end, or before `before`. */
+function upsertTurn(turn, live = true, before = null) {
   if (!cur) return;
   // remove optimistic placeholders once real user turns arrive
   if (turn.role === 'user' && !String(turn.id).startsWith('pending-')) {
@@ -401,7 +493,8 @@ function upsertTurn(turn, live = true) {
   if (!el) {
     el = h(`<div class="turn ${turn.role}" data-id="${esc(turn.id)}"></div>`);
     cur.els.set(turn.id, el);
-    cur.colEl.appendChild(el);
+    cur.colEl.insertBefore(el, before);
+    settleLater(el);
   }
   cur.turns.set(turn.id, turn);
   if (!cur.order.includes(turn.id)) cur.order.push(turn.id);
@@ -448,6 +541,7 @@ function showOutline(anchor) {
   if (!els.length) { toast(t('outline_empty')); return; }
   showMenu(anchor, [
     { header: t('outline_title') },
+    ...(hasEarlier() ? [{ label: t('show_earlier'), icon: 'history', onClick: () => showAllEarlier().then(() => showOutline(anchor)) }] : []),
     ...els.map((e, i) => {
       const text = e.querySelector('.user-text').textContent.trim().replace(/\s+/g, ' ');
       return { label: text.length > 90 ? `${text.slice(0, 90)}…` : text, right: String(i + 1), onClick: () => jumpTo(e) };
@@ -725,13 +819,12 @@ async function retry(turn, model) {
 function rebuildArtifacts() {
   if (!cur) return;
   const map = new Map();
-  for (const id of cur.order) {
-    const turn = cur.turns.get(id);
-    for (const a of (turn && turn.artifacts) || []) {
-      if (!map.has(a.identifier)) map.set(a.identifier, []);
-      const list = map.get(a.identifier);
-      list[a.version - 1] = a;
-    }
+  // those of turns not loaded yet first (the backend lists them), then the loaded turns'
+  const all = [cur.earlier, ...cur.order.map((id) => (cur.turns.get(id) || {}).artifacts || [])];
+  for (const a of all.flat()) {
+    if (!map.has(a.identifier)) map.set(a.identifier, []);
+    const list = map.get(a.identifier);
+    list[a.version - 1] = a;
   }
   for (const [k, v] of map) map.set(k, v.filter(Boolean));
   const hadNone = cur.artifacts.size === 0;

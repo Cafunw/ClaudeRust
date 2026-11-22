@@ -271,6 +271,7 @@ pub fn run() {
         )
         .register_uri_scheme_protocol("artifact", |ctx, req| artifact_protocol(ctx.app_handle(), &req))
         .setup(|app| {
+            settings::set_app_identifier(&app.config().identifier);
             let handle = app.handle().clone();
             let data_dir = app.path().app_data_dir()?;
             applog::init(&data_dir.join("logs"));
@@ -281,9 +282,11 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 // also for a copy that no installer registered (portable, AppImage); a dev build must not take the links over
-                #[cfg(all(not(debug_assertions), any(windows, target_os = "linux")))]
-                if let Err(e) = app.deep_link().register_all() {
-                    log::warn!("registering clauderust:// failed: {e}");
+                #[cfg(any(windows, target_os = "linux"))]
+                if !cfg!(debug_assertions) && deeplink::should_register(&app.config().identifier, deeplink::registered_command().as_deref()) {
+                    if let Err(e) = app.deep_link().register_all() {
+                        log::warn!("registering clauderust:// failed: {e}");
+                    }
                 }
                 let h = handle.clone();
                 app.deep_link().on_open_url(move |e| {
@@ -439,6 +442,8 @@ pub fn run() {
             commands::mcp_read_resource,
             mcp_oauth::mcp_oauth_sign_in,
             mcp_oauth::mcp_oauth_sign_out,
+            mcp::elicit::mcp_elicit_pending,
+            mcp::elicit::mcp_elicit_respond,
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,

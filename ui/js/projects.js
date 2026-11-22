@@ -2,7 +2,7 @@
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit } from './store.js';
+import { store, emit, newChatModel } from './store.js';
 import { $, esc, h, modal, button, relTime, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
@@ -92,7 +92,7 @@ export async function renderProject(view, id) {
 
   const composer = createComposer({
     mode: 'chat', placeholder: t('start_in_project'), draftKey: 'project-' + id,
-    initial: { model: store.settings.default_model },
+    initial: { model: newChatModel('chat') },
     onSend: (text, atts, st) => startConversation({ text, atts, st, projectId: id }),
   });
   $('.composer-slot', view).appendChild(composer.el);

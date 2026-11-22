@@ -77,6 +77,45 @@ pub fn deep_link_take() -> Option<Value> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
+/// The command line the OS runs for `clauderust://` links, if one is registered.
+#[cfg(windows)]
+pub fn registered_command() -> Option<String> {
+    windows_registry::CLASSES_ROOT.open(format!(r"{SCHEME}\shell\open\command")).ok()?.get_string("").ok()
+}
+
+/// The `Exec` line of the desktop file that handles `clauderust://` links.
+#[cfg(target_os = "linux")]
+pub fn registered_command() -> Option<String> {
+    let out = std::process::Command::new("xdg-mime").args(["query", "default", &format!("x-scheme-handler/{SCHEME}")]).output().ok()?;
+    let file = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
+    let xdg = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    let text = dirs::data_dir()
+        .into_iter()
+        .chain(xdg.split(':').map(std::path::PathBuf::from))
+        .find_map(|d| std::fs::read_to_string(d.join("applications").join(&file)).ok())?;
+    text.lines().find_map(|l| l.strip_prefix("Exec=")).map(String::from)
+}
+
+/// Should this copy register itself for `clauderust://` links? Only with the
+/// installed app's identifier (never a dev or test copy), and only when no
+/// handler works (none is registered, or its program is gone): starting
+/// another copy doesn't take the links over.
+#[cfg(any(windows, target_os = "linux", test))]
+pub fn should_register(identifier: &str, registered: Option<&str>) -> bool {
+    identifier == crate::settings::PRODUCTION_ID && registered.and_then(program_of).is_none_or(|p| which::which(p).is_err())
+}
+
+/// The program of a command line: `"C:\a b\x.exe" "%1"`, `/usr/bin/x %u`.
+#[cfg(any(windows, target_os = "linux", test))]
+fn program_of(cmd: &str) -> Option<std::path::PathBuf> {
+    let cmd = cmd.trim();
+    let p = match cmd.strip_prefix('"') {
+        Some(rest) => rest.split('"').next()?,
+        None => cmd.split_whitespace().next()?,
+    };
+    (!p.is_empty()).then(|| std::path::PathBuf::from(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +172,19 @@ mod tests {
     fn the_scheme_is_the_one_registered() {
         let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["plugins"]["deep-link"]["desktop"]["schemes"], json!([SCHEME]));
+    }
+
+    #[test]
+    fn only_the_installed_app_takes_links_no_program_handles() {
+        let id = crate::settings::PRODUCTION_ID;
+        let working = format!("\"{}\" \"%1\"", std::env::current_exe().unwrap().display());
+        let gone = format!("\"{}\" \"%1\"", std::env::temp_dir().join("no-such-folder").join("clauderust.exe").display());
+        assert!(should_register(id, None) && should_register(id, Some(gone.as_str())) && should_register(id, Some("  ")));
+        assert!(!should_register(id, Some(working.as_str())), "another copy that works keeps the links");
+        assert!(!should_register("dev.clauderust.designdev", None), "never a dev or test copy");
+        assert_eq!(program_of("\"C:\\Program Files\\ClaudeRust\\clauderust.exe\" \"%1\""), Some("C:\\Program Files\\ClaudeRust\\clauderust.exe".into()));
+        assert_eq!(program_of("/opt/clauderust/clauderust %u"), Some("/opt/clauderust/clauderust".into()));
+        assert_eq!(program_of("\"\" %u"), None);
     }
 
     #[test]

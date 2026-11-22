@@ -72,6 +72,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 # the job object that ends child processes with the app (jobobject.rs); 0.59 is in the tree already
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# which program handles clauderust:// links (deeplink.rs); in the tree already through tauri-plugin-deep-link
+windows-registry = "0.6"
 
 [dev-dependencies]
 # MockRuntime for tests of code that emits events

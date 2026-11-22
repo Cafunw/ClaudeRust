@@ -86,6 +86,25 @@ export function saveLocal(patch) {
   try { localStorage.setItem(LS, JSON.stringify({ ...loadLocal(), ...patch })); } catch { /* ignore */ }
 }
 
+function defaultModel(mode) {
+  const s = store.settings;
+  return mode === 'code' ? s.code_model || s.default_model : s.default_model;
+}
+
+/** The model a new chat (mode 'chat') or code session starts on: the one
+ *  last picked in that mode, unless the default in Settings has changed
+ *  since that pick or the model is no longer offered. */
+export function newChatModel(mode) {
+  const def = defaultModel(mode);
+  const last = loadLocal()[`lastModel_${mode}`];
+  const offered = last && store.models.some((m) => m.id === last.model && m.available !== false);
+  return offered && last.def === def ? last.model : def;
+}
+
+export function rememberModel(mode, model) {
+  saveLocal({ [`lastModel_${mode}`]: { model, def: defaultModel(mode) } });
+}
+
 // a pending draft write must not be lost when the window closes
 window.addEventListener('pagehide', () => store.drafts.flush());
 window.addEventListener('beforeunload', () => store.drafts.flush());

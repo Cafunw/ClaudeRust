@@ -182,8 +182,26 @@ const NOT_EXPORTED: &[&str] = &[
     "code_permission_mode",
     "tool_policies",
 ];
+/// The installed app's identifier (`tauri.conf.json`).
+pub const PRODUCTION_ID: &str = "dev.clauderust.desktop";
+
+/// The app's identifier, the secret store's service name: a copy with
+/// another one (dev, portable, test) keeps its own API key and MCP sign-ins
+/// instead of reading and overwriting the installed app's. The installed
+/// app's identifier is the name every earlier version used, so its entries
+/// stay where they are.
+static SECRET_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Called once at start, before any secret is read.
+pub fn set_app_identifier(identifier: &str) {
+    let _ = SECRET_SERVICE.set(identifier.to_string());
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const KEYRING_SERVICE: &str = "dev.clauderust.desktop";
+pub(crate) fn secret_service() -> &'static str {
+    // unset only where the app never started (tests): never the installed app's entries
+    SECRET_SERVICE.get().map_or("dev.clauderust.tests", String::as_str)
+}
 
 impl Settings {
     pub fn load(db: &Db) -> Settings {
@@ -302,7 +320,7 @@ pub fn load_api_key(db: &Db) -> Option<String> {
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEY_API) {
+        if let Ok(entry) = keyring::Entry::new(secret_service(), KEY_API) {
             if let Ok(k) = entry.get_password() {
                 if !k.is_empty() {
                     return Some(k);
@@ -316,7 +334,7 @@ pub fn load_api_key(db: &Db) -> Option<String> {
 pub fn store_api_key(db: &Db, key: Option<&str>) -> AppResult<()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEY_API) {
+        if let Ok(entry) = keyring::Entry::new(secret_service(), KEY_API) {
             match key {
                 Some(k) => {
                     if entry.set_password(k).is_ok() {
@@ -399,6 +417,17 @@ mod tests {
         assert_eq!(s.tool_policies["srv__t"], "allow");
         assert_eq!(s.max_tokens, Settings::default().max_tokens);
         assert_eq!(db.setting_get(KEY_SETTINGS_BACKUP).unwrap().as_deref(), Some(raw), "the original is kept");
+    }
+
+    #[test]
+    fn the_installed_app_keeps_its_secret_store_entries() {
+        // the service name is the identifier: the installed app's is the name its earlier
+        // versions used (a new one would need its entries moved), another copy's is its own
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], PRODUCTION_ID);
+        // tests never start the app: they must not read or write its entries
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_ne!(secret_service(), PRODUCTION_ID);
     }
 
     #[test]

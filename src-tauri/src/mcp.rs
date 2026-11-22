@@ -1,6 +1,11 @@
 //! Model Context Protocol client. Reads the same `mcpServers` format as
 //! Claude Desktop's `claude_desktop_config.json` and connects to local
-//! (stdio) and remote (streamable HTTP) servers.
+//! (stdio) and remote (streamable HTTP, or the older HTTP+SSE) servers.
+
+#[path = "mcp_elicit.rs"]
+pub mod elicit;
+#[path = "mcp_sse.rs"]
+mod sse;
 
 use crate::error::{AppError, AppResult};
 use crate::util::{sha256_hex, truncate_middle};
@@ -15,7 +20,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc::{UnboundedSender, WeakUnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -97,6 +102,9 @@ enum Transport {
         renewing: tokio::sync::Mutex<()>,
         // boxed like `child`: the tokens are large (clippy::large_enum_variant)
         oauth: Option<Box<OAuth>>,
+        /// The event stream of a server on the old HTTP+SSE transport (MCP
+        /// 2024-11-05), which carries everything that server sends.
+        sse: Mutex<Option<Arc<sse::Stream>>>,
     },
 }
 
@@ -112,6 +120,8 @@ pub struct McpServer {
     changed: Arc<Notify>,
     /// The server said its tool list changed (`notifications/tools/list_changed`).
     tools_changed: UnboundedSender<()>,
+    /// Requests the server sent us, to be answered (see `connect`).
+    requests: UnboundedSender<Value>,
 }
 
 fn push_log(logs: &Mutex<VecDeque<String>>, line: String) {
@@ -330,10 +340,11 @@ fn http_post(
 
 const TOOLS_CHANGED: &str = "notifications/tools/list_changed";
 
-/// Read a `text/event-stream` answer until the reply to `id` arrives.
-/// Events are delimited by blank lines with LF or CRLF line endings (the
-/// official Python SDK sends CRLF).
-async fn read_sse_reply(resp: reqwest::Response, id: i64, tools_changed: &UnboundedSender<()>) -> Result<Option<Value>, reqwest::Error> {
+/// Read a `text/event-stream` answer until the reply to `id` arrives; the
+/// server's requests on the way (an elicitation during a tool call) go to
+/// `requests`. Events are delimited by blank lines with LF or CRLF line
+/// endings (the official Python SDK sends CRLF).
+async fn read_sse_reply(resp: reqwest::Response, id: i64, tools_changed: &UnboundedSender<()>, requests: &UnboundedSender<Value>) -> Result<Option<Value>, reqwest::Error> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut parser = crate::anthropic::SseParser::default();
@@ -345,6 +356,9 @@ async fn read_sse_reply(resp: reqwest::Response, id: i64, tools_changed: &Unboun
             .find_map(|v| {
                 if v["method"] == TOOLS_CHANGED {
                     let _ = tools_changed.send(());
+                } else if v["method"].is_string() && !v["id"].is_null() {
+                    let _ = requests.send(v);
+                    return None;
                 }
                 find_reply(v, id)
             })
@@ -407,18 +421,7 @@ impl McpServer {
                     flight.finished = true;
                     return Err(self.not_running());
                 }
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(answer) => {
-                        flight.finished = true;
-                        match answer {
-                            Ok(Ok(v)) => Ok(Reply::Done(v)),
-                            Ok(Err(e)) => Err(rpc_error(&e)),
-                            Err(_) => Err(AppError::msg(format!("MCP server '{}' disconnected", self.name))),
-                        }
-                    }
-                    // the guard withdraws the request
-                    Err(_) => Err(AppError::msg(format!("MCP server '{}' timed out on {method}", self.name))),
-                }
+                self.answer(rx, method, tokio::time::Instant::now() + timeout, &mut flight).await
             }
             Transport::Http {
                 client,
@@ -426,8 +429,13 @@ impl McpServer {
                 headers,
                 session,
                 oauth,
+                sse,
                 ..
             } => {
+                let stream = sse.lock().clone();
+                if stream.is_some() {
+                    return self.request_sse(stream, method, &msg, bearer, timeout, &mut flight).await;
+                }
                 let sent_session = session.lock().clone();
                 let resp = match http_post(client, url, headers, bearer.as_deref(), sent_session.as_deref(), msg.to_string(), timeout).send().await {
                     Ok(r) => r,
@@ -452,6 +460,12 @@ impl McpServer {
                     flight.finished = true;
                     return Ok(Reply::Unauthorized(bearer));
                 }
+                // how a server on the old HTTP+SSE transport turns down this POST
+                // (the spec's backwards-compatibility procedure)
+                if method == "initialize" && matches!(status.as_u16(), 400 | 404 | 405) {
+                    push_log(&self.logs, format!("[HTTP {} to initialize: trying the older HTTP+SSE transport]", status.as_u16()));
+                    return self.request_sse(None, method, &msg, bearer, timeout, &mut flight).await;
+                }
                 if !status.is_success() {
                     flight.finished = true;
                     let t = resp.text().await.unwrap_or_default();
@@ -464,7 +478,7 @@ impl McpServer {
                     .unwrap_or("")
                     .to_string();
                 let found = if ctype.contains("text/event-stream") {
-                    read_sse_reply(resp, id, &self.tools_changed).await
+                    read_sse_reply(resp, id, &self.tools_changed, &self.requests).await
                 } else {
                     resp.text().await.map(|body| serde_json::from_str::<Value>(&body).ok().and_then(|v| find_reply(v, id)))
                 };
@@ -496,20 +510,13 @@ impl McpServer {
                     }
                 }
             }
-            Transport::Http {
-                client,
-                url,
-                headers,
-                session,
-                oauth,
-                ..
-            } => {
-                if !notify {
-                    return;
-                }
+            Transport::Http { client, headers, oauth, sse, .. } => {
+                // on the old transport the answer would come on the stream
+                let answered = sse.lock().as_ref().is_some_and(|s| s.pending.lock().remove(&id).is_none());
+                let Some((to, session)) = self.post_target().filter(|_| notify && !answered) else { return };
                 // no refresh here: a token being refreshed is skipped
                 let bearer = oauth.as_ref().and_then(|o| o.tokens.try_lock().ok()?.as_ref().map(|t| t.access_token.clone()));
-                let req = http_post(client, url, headers, bearer.as_deref(), session.lock().as_deref(), note.to_string(), Duration::from_secs(15));
+                let req = http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), note.to_string(), Duration::from_secs(15));
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     rt.spawn(async move {
                         let _ = req.send().await;
@@ -631,24 +638,46 @@ impl McpServer {
             .map_err(|e| AppError::msg(format!("MCP server '{}' ended its session, and starting a new one failed: {e}", self.name)))
     }
 
-    async fn notify(&self, method: &str, params: Value) {
-        let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
+    /// The answer `rx` brings by `until` (stdio, and the old HTTP+SSE transport).
+    async fn answer(&self, rx: oneshot::Receiver<Result<Value, Value>>, method: &str, until: tokio::time::Instant, flight: &mut InFlight<'_>) -> AppResult<Reply> {
+        match tokio::time::timeout_at(until, rx).await {
+            Ok(answer) => {
+                flight.finished = true;
+                match answer {
+                    Ok(Ok(v)) => Ok(Reply::Done(v)),
+                    Ok(Err(e)) => Err(rpc_error(&e)),
+                    Err(_) => Err(AppError::msg(format!("MCP server '{}' disconnected", self.name))),
+                }
+            }
+            // the guard withdraws the request
+            Err(_) => Err(AppError::msg(format!("MCP server '{}' timed out on {method}", self.name))),
+        }
+    }
+
+    /// Where messages to an HTTP server are POSTed, and the session id they
+    /// carry: the endpoint the old transport's stream named (its URL holds the
+    /// session), or the server's URL.
+    fn post_target(&self) -> Option<(String, Option<String>)> {
+        let Transport::Http { url, session, sse, .. } = &self.transport else { return None };
+        if let Some(s) = sse.lock().as_ref() {
+            return Some((s.endpoint.clone(), None));
+        }
+        Some((url.clone(), session.lock().clone()))
+    }
+
+    /// Send a message nothing answers: a notification, or our answer to a
+    /// request of the server's.
+    async fn send(&self, msg: Value) {
         match &self.transport {
             Transport::Stdio { tx, .. } => {
                 if let Some(t) = tx.lock().as_ref() {
                     let _ = t.send(format!("{msg}\n"));
                 }
             }
-            Transport::Http {
-                client,
-                url,
-                headers,
-                session,
-                ..
-            } => {
+            Transport::Http { client, headers, .. } => {
                 let bearer = self.bearer().await;
-                let s = session.lock().clone();
-                let _ = http_post(client, url, headers, bearer.as_deref(), s.as_deref(), msg.to_string(), Duration::from_secs(15)).send().await;
+                let Some((to, session)) = self.post_target() else { return };
+                let _ = http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), msg.to_string(), Duration::from_secs(15)).send().await;
             }
         }
     }
@@ -657,7 +686,7 @@ impl McpServer {
     async fn handshake(&self) -> AppResult<()> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"roots": {"listChanged": false}},
+            "capabilities": {"roots": {"listChanged": false}, "elicitation": {}},
             "clientInfo": {"name": "ClaudeRust", "version": env!("CARGO_PKG_VERSION")}
         });
         let r = match self.request_authorized("initialize", &params, Duration::from_secs(60)).await? {
@@ -667,7 +696,7 @@ impl McpServer {
             Reply::Unauthorized(_) => return Err(self.sign_in_needed()),
         };
         *self.info.lock() = json!({"serverInfo": r["serverInfo"], "capabilities": r["capabilities"], "instructions": r["instructions"]});
-        self.notify("notifications/initialized", json!({})).await;
+        self.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})).await;
         Ok(())
     }
 
@@ -1214,28 +1243,23 @@ pub fn convert_result(r: &Value) -> (Vec<Value>, bool) {
 }
 
 
-/// One line of a stdio server's stdout: an answer to one of our requests, a
-/// request from the server (answered through `replies`), a notification, or
-/// log output.
-fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>, replies: &WeakUnboundedSender<String>, tools_changed: &UnboundedSender<()>) {
-    let Ok(v) = serde_json::from_str::<Value>(l) else {
-        push_log(logs, format!("[stdout] {}", truncate_middle(l, MAX_LOG_LINE_BYTES)));
-        return;
-    };
+/// One line of a stdio server's stdout: a message (see `route`) or log output.
+fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>, tools_changed: &UnboundedSender<()>, requests: &UnboundedSender<Value>) {
+    match serde_json::from_str::<Value>(l) {
+        Ok(v) => route(v, pending, tools_changed, requests),
+        Err(_) => push_log(logs, format!("[stdout] {}", truncate_middle(l, MAX_LOG_LINE_BYTES))),
+    }
+}
+
+/// A message from a server that sends everything on one stream (stdio, the
+/// old HTTP+SSE transport): an answer goes to the request waiting for it, a
+/// request for us to `requests`, a tool-list change to `tools_changed`.
+fn route(v: Value, pending: &Pending, tools_changed: &UnboundedSender<()>, requests: &UnboundedSender<Value>) {
     if let Some(method) = v["method"].as_str() {
-        // A request from the server (has an id) needs an answer.
-        if !v["id"].is_null() {
-            let reply = match method {
-                "ping" => json!({"jsonrpc": "2.0", "id": v["id"], "result": {}}),
-                "roots/list" => json!({"jsonrpc": "2.0", "id": v["id"], "result": {"roots": []}}),
-                _ => json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32601, "message": format!("Method not supported: {method}")}}),
-            };
-            // a weak sender: this task must not keep stdin open on its own
-            if let Some(tx) = replies.upgrade() {
-                let _ = tx.send(format!("{reply}\n"));
-            }
-        } else if method == TOOLS_CHANGED {
+        if method == TOOLS_CHANGED {
             let _ = tools_changed.send(());
+        } else if !v["id"].is_null() {
+            let _ = requests.send(v);
         }
         return;
     }
@@ -1251,6 +1275,19 @@ fn handle_stdout_line(l: &str, pending: &Pending, logs: &Mutex<VecDeque<String>>
     }
 }
 
+/// Our answer to request `v` that server `server` sent us.
+async fn answer_request(server: &str, v: &Value) -> Value {
+    let result = match v["method"].as_str().unwrap_or("") {
+        "ping" => json!({}),
+        // One connection serves every chat and code session at once, so there
+        // is no single folder to offer.
+        "roots/list" => json!({"roots": []}),
+        "elicitation/create" => elicit::ask(server, &v["params"]).await,
+        m => return json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32601, "message": format!("Method not supported: {m}")}}),
+    };
+    json!({"jsonrpc": "2.0", "id": v["id"], "result": result})
+}
+
 fn transport_of(conf: &Value) -> &'static str {
     if conf["url"].is_string() {
         "http"
@@ -1262,6 +1299,7 @@ fn transport_of(conf: &Value) -> &'static str {
 async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> Result<Arc<McpServer>, (AppError, Vec<String>)> {
     let state: State = Arc::new(Mutex::new(("starting".into(), None)));
     let (tools_changed, mut tools_changed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let transport = if let Some(url) = conf["url"].as_str() {
         let headers: Vec<(String, String)> = conf["headers"]
             .as_object()
@@ -1272,6 +1310,7 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
             })
             .unwrap_or_default();
         let client = reqwest::Client::builder()
+            .redirect(crate::mcp_oauth::same_origin_redirects())
             .connect_timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| (AppError::Http(e), vec![]))?;
@@ -1286,6 +1325,7 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
             session: Mutex::new(None),
             renewing: tokio::sync::Mutex::new(()),
             oauth,
+            sse: Mutex::new(None),
         }
     } else {
         let command = conf["command"]
@@ -1348,29 +1388,33 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
                 }
             });
         }
-        // stdout -> responses, and replies to requests the server sends us
+        // stdout -> responses, and requests the server sends us
         {
             let pending = pending.clone();
             let logs = logs.clone();
-            let replies = tx.downgrade();
             let state = state.clone();
             let closed = closed.clone();
             let tools_changed = tools_changed.clone();
+            let requests = requests.clone();
             tokio::spawn(async move {
                 let mut r = BufReader::new(stdout);
                 let why = loop {
                     match read_line_lossy(&mut r, MAX_MESSAGE_BYTES).await {
                         Ok(Some((_, true))) => push_log(&logs, format!("[stdout] dropped a message over {} MB", MAX_MESSAGE_BYTES >> 20)),
-                        Ok(Some((l, false))) => handle_stdout_line(&l, &pending, &logs, &replies, &tools_changed),
+                        Ok(Some((l, false))) => handle_stdout_line(&l, &pending, &logs, &tools_changed, &requests),
                         Ok(None) => break "the server process exited".to_string(),
                         Err(e) => break format!("reading the server's output failed: {e}"),
                     }
                 };
                 push_log(&logs, "[server process exited]".into());
+                // Not "failed": a registered stdio server has a supervisor,
+                // which restarts it or gives up, and only giving up is final.
+                // (One that exits while connecting is never shown.) Set before
+                // `closed`, which wakes the supervisor, so it reads this why.
+                *state.lock() = ("reconnecting".into(), Some(why));
                 // in this order: a request registered after `pending` was
                 // emptied sees `closed` (see request_raw)
                 closed.cancel();
-                *state.lock() = ("failed".into(), Some(why));
                 pending.lock().clear();
             });
         }
@@ -1391,7 +1435,26 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
         logs: logs.clone(),
         changed,
         tools_changed,
+        requests,
     });
+    // Answer what the server asks, from the handshake on, each request in a
+    // task of its own: an elicitation waits for the user. Weak, so it ends
+    // with the server.
+    {
+        let weak = Arc::downgrade(&server);
+        let name = name.to_string();
+        tokio::spawn(async move {
+            while let Some(req) = requests_rx.recv().await {
+                let (weak, name) = (weak.clone(), name.clone());
+                tokio::spawn(async move {
+                    let answer = answer_request(&name, &req).await;
+                    if let Some(s) = weak.upgrade() {
+                        s.send(answer).await;
+                    }
+                });
+            }
+        });
+    }
     match server.initialize().await {
         Ok(()) => {
             let mut st = server.state.lock();
@@ -1446,8 +1509,9 @@ async fn supervise(servers: Servers, name: String, conf: Value, mut server: Arc<
         if up.elapsed() >= RESTART_RESET {
             tries = 0;
         }
+        // kept here, not in the state: "failed" is shown only once given up
+        let mut why = server.state.lock().1.clone().unwrap_or_default();
         let new = loop {
-            let why = server.state.lock().1.clone().unwrap_or_default();
             if tries == RESTART_TRIES {
                 *server.state.lock() = ("failed".into(), Some(format!("{why} (gave up after {RESTART_TRIES} restarts)")));
                 server.changed.notify_one();
@@ -1464,7 +1528,7 @@ async fn supervise(servers: Servers, name: String, conf: Value, mut server: Arc<
             push_log(&server.logs, format!("[restarting: try {tries} of {RESTART_TRIES}]"));
             match connect(&name, &conf, server.changed.clone(), server.logs.clone()).await {
                 Ok(new) => break new,
-                Err((e, _)) => *server.state.lock() = ("failed".into(), Some(e.to_string())),
+                Err((e, _)) => why = e.to_string(),
             }
         };
         let mut map = servers.write().await;
@@ -1853,7 +1917,15 @@ for line in sys.stdin:
         conf["env"] = json!({"MCP_TEST_ONCE": dir.join("started")});
         let m = manager(&dir, json!({"x": conf})).await;
         assert_eq!(m.statuses().await[0].status, "connected");
-        let _ = m.call("x__exit", &json!({})).await;
+        let server = m.servers.read().await["x"].clone();
+        {
+            // The supervisor can't take over while this lock is held (as it
+            // couldn't on Linux while it reaped the process): what the exit
+            // alone leaves must not read as given up.
+            let _held = m.servers.write().await;
+            let _ = server.request("tools/call", json!({"name": "exit", "arguments": {}}), Duration::from_secs(10)).await;
+            assert_eq!(server.state.lock().0, "reconnecting");
+        }
         let mr = &m;
         eventually("it is given up", || async move { mr.statuses().await[0].status == "failed" }).await;
         let st = m.statuses().await;

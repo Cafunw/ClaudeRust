@@ -493,6 +493,54 @@ fn a_reply_cut_off_by_a_crash_is_kept_and_shown_stopped() {
     });
 }
 
+/// Block `i` of a long reply: 20,000 characters, so each save of the reply so
+/// far takes a while to write.
+fn long_text(i: usize) -> String {
+    format!("{i:02}{}", "x".repeat(20_000))
+}
+
+/// The 40 blocks of a long reply: each new one makes a save due, so saves are
+/// still being written as the reply ends.
+fn forty_blocks() -> Vec<Vec<Value>> {
+    (0..40).map(|i| text_block(i, &[long_text(i).as_str()])).collect()
+}
+
+#[test]
+fn the_final_write_lands_after_the_saves_made_while_streaming() {
+    for how in ["end", "drop", "stop"] {
+        block_on(async {
+            let api = api(move |b| {
+                let start = || std::iter::once(message_start(b)).chain(forty_blocks().into_iter().flatten()).collect();
+                match how {
+                    "end" => Reply::Stream(reply(b, forty_blocks(), "end_turn")),
+                    "drop" => Reply::Drop(start()),
+                    _ => Reply::Stall(start()),
+                }
+            })
+            .await;
+            let h = chat(&api);
+            h.send("Hi");
+            if how == "stop" {
+                until("the reply to stream", || h.path().get(1).filter(|m| m.content.as_array().unwrap().len() == 40).map(|_| ())).await;
+                engine::stop(&h.st, &h.conv);
+            }
+            let end = h.ended().await;
+            // the saves' writer is the only other holder of the database
+            assert_eq!(Arc::strong_count(&h.st.db), 1, "{how}: a save is still being written after the turn ended");
+            h.assert_reset();
+            let a = &h.path()[1];
+            let texts: Vec<&str> = a.content.as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
+            let last = texts.last().map_or(0, |t| t.len());
+            assert!(texts == (0..40).map(long_text).collect::<Vec<_>>(), "{how}: {} blocks stored, the last {last} characters long", texts.len());
+            match how {
+                "end" => assert_eq!(a.meta["stop_reason"], "end_turn"),
+                "drop" => assert_eq!(a.meta["error"]["message"], end["error"]["message"]),
+                _ => assert_eq!(a.meta["stopped"], true),
+            }
+        });
+    }
+}
+
 #[test]
 fn a_rate_limited_request_is_retried() {
     block_on(async {

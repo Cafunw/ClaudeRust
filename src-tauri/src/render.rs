@@ -45,7 +45,7 @@ impl ArtifactTracker {
         self.next(id);
     }
 
-    fn next(&mut self, id: &str) -> u32 {
+    pub fn next(&mut self, id: &str) -> u32 {
         let v = self.versions.entry(id.to_string()).or_insert(0);
         *v += 1;
         *v
@@ -182,6 +182,24 @@ impl TextAcc {
     }
 }
 
+/// An artifact version as a turn lists it (`artifacts`).
+pub fn artifact_json(a: artifacts::ArtifactSpec, version: u32) -> Value {
+    let mut v = json!({
+        "identifier": a.identifier,
+        "version": version,
+        "type": a.kind,
+        "title": a.title,
+        "language": a.language,
+        "complete": a.complete,
+        "label": artifacts::kind_label(&a.kind, a.language.as_deref()),
+        "previewable": artifacts::is_previewable(&a.kind),
+        "ext": artifacts::extension(&a.kind, a.language.as_deref()),
+    });
+    // moved in: `json!` would copy it, and it is most of the artifact
+    v["content"] = Value::String(a.content);
+    v
+}
+
 fn artifact_card(a: &artifacts::ArtifactSpec, version: u32) -> String {
     format!(
         "<div class=\"artifact-card\" role=\"button\" tabindex=\"0\" data-identifier=\"{id}\" data-version=\"{v}\" data-kind=\"{k}\" data-complete=\"{c}\"><div class=\"artifact-card-icon\"></div><div class=\"artifact-card-text\"><div class=\"artifact-card-title\">{t}</div><div class=\"artifact-card-sub\">{label}</div></div></div>",
@@ -219,18 +237,7 @@ fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, art
             Segment::Artifact(a) => {
                 let v = tracker.next(&a.identifier);
                 add(artifact_card(&a, v));
-                artifacts_out.push(json!({
-                    "identifier": a.identifier,
-                    "version": v,
-                    "type": a.kind,
-                    "title": a.title,
-                    "language": a.language,
-                    "content": a.content,
-                    "complete": a.complete,
-                    "label": artifacts::kind_label(&a.kind, a.language.as_deref()),
-                    "previewable": artifacts::is_previewable(&a.kind),
-                    "ext": artifacts::extension(&a.kind, a.language.as_deref()),
-                }));
+                artifacts_out.push(artifact_json(a, v));
             }
         }
     }
@@ -413,7 +420,22 @@ fn user_parts(m: &Message) -> Vec<Value> {
 }
 
 /// Group a root-to-leaf path into UI turns.
+#[cfg(test)]
 pub fn build_turns(path: &[Message], ctx: &RenderCtx, tracker: &mut ArtifactTracker) -> Vec<Value> {
+    turn_groups(path).iter().map(|g| build_turn(g, ctx, tracker)).collect()
+}
+
+/// The UI turn of a group of `turn_groups`; its id is the group's first message's.
+pub fn build_turn(g: &[&Message], ctx: &RenderCtx, tracker: &mut ArtifactTracker) -> Value {
+    if g[0].role == "user" {
+        user_turn(g[0])
+    } else {
+        assistant_turn(g, ctx, tracker)
+    }
+}
+
+/// The messages of a root-to-leaf path, by UI turn.
+pub fn turn_groups(path: &[Message]) -> Vec<Vec<&Message>> {
     let mut groups: Vec<Vec<&Message>> = vec![];
     for m in path {
         let is_user_turn = m.role == "user" && !is_tool_result_msg(m);
@@ -435,15 +457,6 @@ pub fn build_turns(path: &[Message], ctx: &RenderCtx, tracker: &mut ArtifactTrac
         }
     }
     groups
-        .into_iter()
-        .map(|g| {
-            if g[0].role == "user" {
-                user_turn(g[0])
-            } else {
-                assistant_turn(&g, ctx, tracker)
-            }
-        })
-        .collect()
 }
 
 fn user_turn(m: &Message) -> Value {

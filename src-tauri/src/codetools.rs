@@ -36,6 +36,9 @@ pub struct CodeSession {
     /// Bash commands run in Windows PowerShell (this app's Bash tool on
     /// Windows); the Claude Code CLI's Bash is bash there too (Git Bash).
     pub powershell: bool,
+    /// Files changed after this count as written in the session: Auto mode
+    /// asks before running them (`runs_unchanged`).
+    pub started: SystemTime,
 }
 
 /// A file as it was before a session first changed it.
@@ -63,6 +66,7 @@ impl CodeSession {
             shells: None,
             originals: Arc::new(Mutex::new(std::collections::HashMap::new())),
             powershell: POWERSHELL,
+            started: SystemTime::now(),
         }
     }
 
@@ -97,7 +101,13 @@ impl CodeSession {
             shells: self.shells.clone(),
             originals: self.originals.clone(),
             powershell: self.powershell,
+            started: self.started,
         }
+    }
+
+    /// A `started` for a conversation created at `created_ms`.
+    pub fn conversation_start(created_ms: i64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(created_ms).unwrap_or(0))
     }
 
     pub fn for_conversation(root: PathBuf, conv_id: &str, shells: Arc<crate::shells::Shells>) -> Self {
@@ -331,14 +341,25 @@ pub fn auto_bash_ok(cmd: &str, s: Option<&CodeSession>) -> bool {
         let args = &w[1..];
         // every path-like argument (or option value) must stay inside the
         // project, and out of git internals, hooks and settings (as Write's do)
+        let moves = matches!(prog, "cp" | "mv" | "touch") || (prog == "git" && args.first().is_some_and(|a| a == "mv"));
         for a in args {
-            let val = if a.starts_with('-') { a.split_once('=').map(|(_, v)| v).unwrap_or("") } else { a.as_str() };
+            // an option's value: after `=`, or a path glued to a short option (`-f/dev/stdin`)
+            let val = match a.split_once('=') {
+                Some((_, v)) if a.starts_with('-') => v,
+                _ if a.starts_with("--") => "",
+                _ => a.strip_prefix('-').map_or(a.as_str(), |f| f.get(1..).filter(|v| v.contains('/')).unwrap_or("")),
+            };
             let path_like = val.contains('/') || val == "." || val == ".." || val.starts_with("..");
-            if (path_like && !s.is_inside(&resolve(&cwd, val))) || (!val.is_empty() && in_protected_dir(&resolve(&cwd, val))) {
+            if (path_like && (s.foreign_drive(val) || !s.is_inside(&resolve(&cwd, val)))) || (!val.is_empty() && in_protected_dir(&resolve(&cwd, val))) {
+                return false;
+            }
+            // copying, moving or touching a script or build file is writing it
+            if moves && !val.is_empty() && s.runs_code(&resolve(&cwd, val)) {
                 return false;
             }
         }
         let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        let sub = positional.first().map(|x| x.as_str()).unwrap_or("");
         let ok = match prog {
             "cd" => match positional.first() {
                 Some(d) => {
@@ -355,9 +376,15 @@ pub fn auto_bash_ok(cmd: &str, s: Option<&CodeSession>) -> bool {
             "true" | "false" | "test" | "[" | "printf" | "mkdir" | "touch" | "cp" | "mv" | "jq" | "tsc" | "eslint" | "prettier" | "jest" | "vitest"
             | "pytest" | "mypy" | "ruff" | "black" | "flake8" | "pylint" | "rustc" | "rustfmt" | "gcc" | "g++" | "cc" | "c++" | "clang" | "clang++"
             | "javac" | "mvn" | "gradle" | "gradlew" | "dotnet" | "swift" | "zig" | "make" | "cmake" | "ninja" | "meson" | "go" | "tree" => {
-                !(prog == "go" && matches!(positional.first().map(|x| x.as_str()), Some("install")))
-                    && !(prog == "dotnet" && matches!(positional.first().map(|x| x.as_str()), Some("nuget")))
-                    && !(prog == "mvn" && positional.iter().any(|x| x.as_str() == "deploy"))
+                // `go generate` runs the commands written in the sources; `touch -d` would hide a change; `go env -w`,
+                // make's `VAR=value`, an MSBuild property or logger and a Maven plugin goal (`exec:exec`) say what runs
+                !(prog == "go" && (matches!(sub, "install" | "generate") || (sub == "env" && args.iter().any(|a| a == "-w" || a == "-u"))))
+                    && !(prog == "dotnet"
+                        && (matches!(sub, "nuget" | "tool") || args.iter().any(|a| a.starts_with('-') && (a.contains(':') || matches!(a.trim_start_matches('-'), "p" | "property")))))
+                    && !(prog == "mvn" && positional.iter().any(|x| x.as_str() == "deploy" || x.contains(':')))
+                    && !(prog == "make" && positional.iter().any(|x| x.contains('=')))
+                    && !(prog == "meson" && sub == "devenv")
+                    && !(prog == "touch" && args.iter().any(|a| long_opt(a, "--date") || long_opt(a, "--reference") || short_opts(a, "dtr")))
             }
             "chmod" => !args.iter().any(|a| a == "-R" || a == "--recursive"),
             "rm" | "rmdir" => {
@@ -370,16 +397,26 @@ pub fn auto_bash_ok(cmd: &str, s: Option<&CodeSession>) -> bool {
             }
             "cargo" => !matches!(positional.first().map(|x| x.as_str()), Some("publish" | "login" | "logout" | "owner" | "yank" | "install" | "uninstall")),
             "npm" | "pnpm" | "yarn" | "bun" => {
-                let sub = positional.first().map(|x| x.as_str()).unwrap_or("");
-                !matches!(sub, "publish" | "unpublish" | "login" | "logout" | "adduser" | "owner" | "deprecate" | "token" | "access" | "dist-tag" | "exec" | "x" | "dlx" | "link" | "config")
+                // a package named to install (or to create a project from) runs its own scripts
+                let installs = (sub == "add" || sub == "isntall" || (!sub.is_empty() && "install".starts_with(sub)) || sub == "init") && positional.len() > 1;
+                !installs
+                    && !matches!(sub, "publish" | "unpublish" | "login" | "logout" | "adduser" | "owner" | "deprecate" | "token" | "access" | "dist-tag" | "exec" | "x" | "dlx" | "link" | "config" | "create" | "explore" | "edit" | "global" | "node")
                     && !args.iter().any(|a| a == "-g" || a == "--global" || a.starts_with("--prefix") || a.starts_with("--registry"))
             }
-            "poetry" => !matches!(positional.first().map(|x| x.as_str()), Some("publish" | "config")),
+            // `poetry run` runs any command
+            "poetry" => !matches!(sub, "publish" | "config" | "run" | "shell"),
             "python" | "python3" | "node" | "deno" | "ruby" | "perl" | "php" | "bash" | "sh" | "zsh" => {
-                if args.iter().any(|a| matches!(a.as_str(), "-c" | "-e" | "-p" | "--eval" | "--print" | "-" | "-E" | "-r" | "-i")) {
-                    false
-                } else if (prog == "python" || prog == "python3") && args.first().map(|a| a == "-m").unwrap_or(false) {
+                // code, modules or settings given on the command line, also glued (`-cprint(1)`, `-mmod`, `--eval=…`);
+                // a shell's `-s` reads its commands from stdin, node's `--run` runs a package script
+                let inline = |a: &String| {
+                    a == "-"
+                        || ["--eval", "--print", "--import", "--loader", "--experimental-loader", "--run"].iter().any(|o| long_opt(a, o))
+                        || a.strip_prefix('-').is_some_and(|f| f.starts_with(['B', 'c', 'd', 'e', 'E', 'i', 'I', 'm', 'M', 'p', 'r', 'R', 's']))
+                };
+                if (prog == "python" || prog == "python3") && args.first().map(|a| a == "-m").unwrap_or(false) {
                     matches!(args.get(1).map(|x| x.as_str()), Some("pytest" | "unittest" | "mypy" | "ruff" | "black" | "flake8" | "pylint" | "compileall" | "py_compile" | "http.server" | "venv"))
+                } else if args.iter().any(inline) {
+                    false
                 } else if prog == "deno" {
                     matches!(positional.first().map(|x| x.as_str()), Some("test" | "check" | "fmt" | "lint" | "task"))
                 } else {
@@ -405,8 +442,178 @@ pub fn auto_bash_ok(cmd: &str, s: Option<&CodeSession>) -> bool {
         if !ok {
             return false;
         }
+        let runner = RUNNERS.iter().find(|(progs, _)| progs.contains(&prog)).map(|(_, files)| *files);
+        // a command or code handed over on the command line, or on stdin (`make -f -`)
+        let module = if matches!(prog, "python" | "python3") && args.first().is_some_and(|a| a == "-m") { args.get(1).map(String::as_str) } else { None };
+        let code_opt = CODE_OPTS.iter().any(|(progs, opts)| (progs.contains(&prog) || module.is_some_and(|m| progs.contains(&m))) && args.iter().any(|a| opts.iter().any(|o| a.starts_with(o))));
+        if code_opt || (runner.is_some() && args.iter().any(|a| a == "-" || a.ends_with("=-") || a.contains("data:"))) {
+            return false;
+        }
+        if (runner.is_some() || prog_path.contains('/')) && !s.runs_unchanged(&cwd, w, runner.unwrap_or(&[])) {
+            return false;
+        }
+        // git runs hooks: those of a hook manager that changed, and what the session wrote that they may run
+        if prog == "git" && !matches!(sub, "add" | "mv" | "rm") && s.hooks_changed(&cwd) {
+            return false;
+        }
     }
     true
+}
+
+/// Options that hand a program a command, or code, to run (`@file`: more
+/// options from a file). Prefixes: `-B` is also `-B./bin`.
+const CODE_OPTS: &[(&[&str], &[&str])] = &[
+    (&["make"], &["--eval", "-E"]),
+    (&["cargo"], &["--config", "-Z"]),
+    (&["go"], &["-exec", "--exec", "-toolexec", "--toolexec", "-vettool", "--vettool"]),
+    (&["cmake"], &["-E"]),
+    (&["meson"], &["--wrap"]),
+    (&["npm", "pnpm", "yarn", "bun"], &["--node-options", "--script-shell", "--userconfig", "--globalconfig", "--init-module"]),
+    (&["bun"], &["-e", "--eval", "-p", "--print", "-r", "--preload"]),
+    (&["pylint"], &["--init-hook", "--load-plugins"]),
+    (&["gcc", "g++", "cc", "c++", "clang", "clang++"], &["@", "-wrapper", "-B", "-fplugin", "-fpass-plugin", "-specs", "--specs", "-Xclang", "-Xlinker", "-Wl,", "-fuse-ld", "--ld-path"]),
+    (&["rustc"], &["@", "-C", "--codegen", "-Z"]),
+    (&["javac"], &["@", "-J"]),
+];
+
+/// Files git runs as hooks through a hook manager (husky, pre-commit,
+/// lefthook); `.git/hooks` itself is never written without asking.
+const GIT_HOOKS: &[&str] = &[
+    ".husky/pre-commit", ".husky/prepare-commit-msg", ".husky/commit-msg", ".husky/post-commit", ".husky/post-checkout", ".husky/post-merge", ".husky/pre-push",
+    ".husky/pre-rebase", ".husky/post-rewrite", ".husky/pre-merge-commit", ".husky/_/h", ".pre-commit-config.yaml", "lefthook.yml", ".lefthook.yml", "lefthook-local.yml",
+];
+
+/// Programs that run the project's code, and the files that tell them what
+/// to run (`*.x`: a name ending in `.x`; `a/b`: the file `b` in a folder `a`).
+const RUNNERS: &[(&[&str], &[&str])] = &[
+    (&["make"], &["makefile", "gnumakefile", "*.mk"]),
+    (&["cmake", "ninja", "meson"], &["cmakelists.txt", "cmakepresets.json", "cmakeuserpresets.json", "*.cmake", "build.ninja", "meson.build", "meson_options.txt", "meson.options"]),
+    (&["cargo"], &["cargo.toml", "build.rs", ".cargo/config", ".cargo/config.toml", "rust-toolchain", "rust-toolchain.toml"]),
+    (
+        &["npm", "pnpm", "yarn", "bun", "eslint", "prettier", "jest", "vitest"],
+        &["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".pnpmfile.cjs", ".yarnrc", ".yarnrc.yml", "bunfig.toml",
+          "bun.lock", "bun.lockb", "*.config.js", "*.config.cjs", "*.config.mjs", "*.config.ts", "*.config.cts", "*.config.mts", ".eslintrc.js", ".eslintrc.cjs", ".prettierrc.js",
+          ".prettierrc.cjs", ".prettierrc.mjs"],
+    ),
+    (
+        &["python", "python3", "pytest", "mypy", "flake8", "pylint", "poetry"],
+        &["pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini", "conftest.py", "mypy.ini", ".mypy.ini", ".pylintrc", "pylintrc", ".flake8", "noxfile.py", "poetry.lock"],
+    ),
+    (&["go"], &["go.mod", "go.work"]),
+    (
+        &["gradle", "gradlew", "mvn"],
+        &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.properties",
+          "pom.xml", ".mvn/maven.config", ".mvn/jvm.config", ".mvn/extensions.xml", ".mvn/wrapper/maven-wrapper.properties"],
+    ),
+    (&["dotnet"], &["*.csproj", "*.fsproj", "*.vbproj", "*.sln", "*.props", "*.targets", "global.json", "nuget.config"]),
+    (&["swift"], &["package.swift"]),
+    (&["zig"], &["build.zig", "build.zig.zon"]),
+    (&["deno"], &["deno.json", "deno.jsonc"]),
+    // they run the file they are given
+    (&["node", "ruby", "perl", "php", "bash", "sh", "zsh"], &[]),
+];
+
+/// Do a path's last names (`normalized_names`) match a `RUNNERS` pattern?
+fn names_match(names: &[String], pat: &str) -> bool {
+    if let Some(ext) = pat.strip_prefix('*') {
+        return names.last().is_some_and(|n| n.ends_with(ext));
+    }
+    let want: Vec<&str> = pat.split('/').collect();
+    names.len() >= want.len() && names[names.len() - want.len()..].iter().zip(&want).all(|(a, b)| a == b)
+}
+
+fn is_script(names: &[String]) -> bool {
+    names.last().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, e)| matches!(e, "sh" | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "psd1" | "bat" | "cmd"))
+}
+
+impl CodeSession {
+    /// Did this session write `p`, or has it changed since the session
+    /// started? Besides the mtime, which `touch -d` can set back: the
+    /// creation time (a copy or a new file) and Unix's ctime, which nothing
+    /// sets back.
+    fn changed_in_session(&self, p: &Path) -> bool {
+        if self.originals.lock().contains_key(p) {
+            return true;
+        }
+        let Ok(m) = std::fs::metadata(p) else { return false };
+        #[cfg(unix)]
+        let ctime = {
+            use std::os::unix::fs::MetadataExt;
+            u64::try_from(m.ctime()).ok().map(|s| SystemTime::UNIX_EPOCH + Duration::new(s, u32::try_from(m.ctime_nsec()).unwrap_or(0)))
+        };
+        #[cfg(not(unix))]
+        let ctime = None;
+        [m.modified().ok(), m.created().ok(), ctime].into_iter().flatten().any(|t| t >= self.started)
+    }
+
+    /// Does writing `p` make code run: a script, a `RUNNERS` build file, a CI
+    /// workflow, editor tasks, a hook manager's files or installed packages?
+    fn runs_code(&self, p: &Path) -> bool {
+        // (below the project folder: a project kept under a `.vscode` folder is still a project)
+        let names = normalized_names(p.strip_prefix(&self.root).unwrap_or(p));
+        let name = names.last().map_or("", String::as_str);
+        is_script(&names)
+            || RUNNERS.iter().any(|(_, files)| files.iter().any(|f| names_match(&names, f)))
+            || names.iter().any(|c| matches!(c.as_str(), ".github" | ".husky" | ".vscode" | ".yarn" | "node_modules"))
+            || matches!(name, ".envrc" | ".pre-commit-config.yaml" | ".gitlab-ci.yml" | "lefthook.yml" | ".lefthook.yml")
+    }
+
+    /// Auto mode runs a program (`w`, in `cwd`) on the project's code only
+    /// when what it runs was there before the session and is unchanged: the
+    /// files it is given, its build `files` in `cwd`, the folders above it
+    /// and those it is given, and the scripts and build files written in
+    /// this session anywhere. Code the model wrote, or a prompt injection
+    /// planted, asks first.
+    fn runs_unchanged(&self, cwd: &Path, w: &[String], files: &[&str]) -> bool {
+        let build_file = |p: &Path| {
+            let names = normalized_names(p);
+            files.iter().any(|f| names_match(&names, f))
+        };
+        if self.originals.lock().keys().any(|k| build_file(k) || is_script(&normalized_names(k))) {
+            return false;
+        }
+        let mut dirs: Vec<PathBuf> = cwd.ancestors().take_while(|d| d.starts_with(&self.root)).map(Path::to_path_buf).collect();
+        dirs.push(cwd.to_path_buf());
+        for a in w {
+            // the word, an option's value (`--manifest-path=x`, `CC=./x`) and a short option's glued one (`-fx.mk`)
+            let glued = a.strip_prefix('-').filter(|f| !f.starts_with('-')).and_then(|f| f.get(1..));
+            for v in [Some(a.as_str()), a.split_once('=').map(|(_, v)| v), glued].into_iter().flatten().filter(|v| !v.is_empty()) {
+                let p = if Path::new(v).is_absolute() { PathBuf::from(v) } else { cwd.join(v) };
+                // programs outside (`/usr/bin/make`) can't have been written without asking
+                if !p.exists() || !self.is_inside(&p) {
+                    continue;
+                }
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if self.changed_in_session(&p) {
+                    return false;
+                } else {
+                    dirs.extend(p.parent().map(Path::to_path_buf));
+                }
+            }
+        }
+        dirs.sort();
+        dirs.dedup();
+        !dirs.iter().any(|d| {
+            let listed = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path());
+            let nested = files.iter().filter(|f| f.contains('/')).map(|f| d.join(f));
+            listed.chain(nested).any(|p| build_file(&p) && self.changed_in_session(&p))
+        })
+    }
+
+    /// Did a hook manager's file (in `cwd` or a folder above it in the
+    /// project) change in this session, or did the session write a script or
+    /// build file, which a hook may run?
+    fn hooks_changed(&self, cwd: &Path) -> bool {
+        let wrote = self.originals.lock().keys().any(|k| self.runs_code(k));
+        wrote || cwd.ancestors().take_while(|d| d.starts_with(&self.root)).any(|d| GIT_HOOKS.iter().any(|f| self.changed_in_session(&d.join(f))))
+    }
+
+    /// A PowerShell drive path (`C:/x`: the only `:` PowerShell words keep)
+    /// on a host whose paths have no drives: outside every folder here.
+    fn foreign_drive(&self, a: &str) -> bool {
+        self.powershell && !cfg!(windows) && a.contains(':')
+    }
 }
 
 /// git in Auto mode: read-only commands, plus everyday local writes.
@@ -415,7 +622,8 @@ fn git_auto_ok(args: &[String]) -> bool {
     if sub.starts_with('-') {
         return false; // -C, -c, --git-dir, …
     }
-    if args.iter().any(|a| a == "--force" || a == "-f" && sub != "add" || a.starts_with("--exec") || a.starts_with("--upload-pack") || a.starts_with("--receive-pack")) {
+    // (`--template` copies a folder's hooks into .git)
+    if args.iter().any(|a| a == "--force" || a == "-f" && sub != "add" || a.starts_with("--exec") || a.starts_with("--upload-pack") || a.starts_with("--receive-pack") || long_opt(a, "--template")) {
         return false;
     }
     let rest: Vec<&str> = args[1..].iter().map(|x| x.as_str()).collect();
@@ -622,8 +830,9 @@ fn args_inside(w: &[String], s: Option<&CodeSession>) -> bool {
         if expands(a) || val.starts_with('~') {
             return false; // can't tell where it points
         }
-        let looks_like_path = val.starts_with('/') || val.contains("..") || (cfg!(windows) && val.contains(':'));
-        !looks_like_path || (!glued && s.is_inside(&s.resolve(val)))
+        // a path as the session's shell reads it: `C:/x` is one in PowerShell whatever the host
+        let looks_like_path = val.starts_with('/') || val.contains("..") || ((cfg!(windows) || s.powershell) && val.contains(':'));
+        !looks_like_path || (!glued && !s.foreign_drive(val) && s.is_inside(&s.resolve(val)))
     })
 }
 
@@ -763,8 +972,11 @@ pub fn check_permission(mode: &str, name: &str, input: &Value, rules: &[String],
                 return Perm::Ask;
             }
             if mode == "auto" {
-                let sensitive = s.map(|s| sensitive_path(&input_path(s, input, key))).unwrap_or(true);
-                return if sensitive { Perm::Ask } else { Perm::Allow };
+                let ask = s.map(|s| {
+                    let p = input_path(s, input, key);
+                    sensitive_path(&p) || s.runs_code(&p)
+                });
+                return if ask.unwrap_or(true) { Perm::Ask } else { Perm::Allow };
             }
             // hooks, settings and git internals always ask before an edit
             if let Some(sess) = s {
@@ -1829,7 +2041,9 @@ mod tests {
     fn powershell_code_is_never_a_safe_command() {
         let d = tmp();
         std::fs::create_dir_all(d.join("src")).unwrap();
-        let s = CodeSession::new(d.clone());
+        // PowerShell's rules on every host: its paths too (`C:/x` is absolute off Windows as well)
+        let mut s = CodeSession::new(d.clone());
+        s.powershell = true;
         let safe = |c: &str| split_for_shell(c, true).is_some_and(|p| !p.is_empty() && p.iter().all(|w| simple_is_safe(w) && args_inside(w, Some(&s))));
         // the audit's payloads, then other ways PowerShell runs code, reads
         // other drives or splits arguments differently from a POSIX shell
@@ -2144,6 +2358,190 @@ mod tests {
         assert_eq!(check_permission("default", "WebFetch", &json!({}), &[], Some(&s)), Perm::Ask);
         assert!(matches!(check_permission("plan", "Write", &json!({"file_path": f}), &[], Some(&s)), Perm::Deny(_)));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn tool(s: &Arc<CodeSession>, name: &str, input: Value) {
+        let o = execute(s.clone(), name, &input, &CancellationToken::new(), Duration::from_secs(20), None).await;
+        assert!(!o.is_error, "{name} {input}: {:?}", o.content);
+    }
+
+    /// `p` as a command (or the Claude Code CLI) leaves it after the session started.
+    fn change_later(p: &Path) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(3600)).unwrap();
+    }
+
+    /// A folder with a small project in it, and a session that started after.
+    fn project_session(powershell: bool) -> (PathBuf, Arc<CodeSession>) {
+        let d = tmp();
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("crates/a")).unwrap();
+        for (f, text) in [("Makefile", "all:\n\ttrue\n"), ("package.json", "{\"scripts\": {\"test\": \"node t.js\"}}\n"), ("Cargo.toml", "[package]\nname = \"x\"\n"),
+                          ("tool.py", "print(1)\n"), ("run.sh", "true\n"), ("src/lib.rs", "pub fn a() {}\n"), ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n")] {
+            std::fs::write(d.join(f), text).unwrap();
+        }
+        let mut s = CodeSession::new(d.clone());
+        s.powershell = powershell;
+        s.started = SystemTime::now() + Duration::from_secs(60);
+        (d, Arc::new(s))
+    }
+
+    #[tokio::test]
+    async fn auto_mode_asks_before_running_what_the_session_wrote() {
+        for ps in [false, true] {
+            let (d, s) = project_session(ps);
+            let run = |cmd: &str| check_permission("auto", "Bash", &json!({"command": cmd}), &[], Some(&s));
+            let edit = |f: &str| check_permission("auto", "Edit", &json!({"file_path": f, "old_string": "a", "new_string": "b"}), &[], Some(&s));
+            let write = |f: &str| check_permission("auto", "Write", &json!({"file_path": f, "content": "x"}), &[], Some(&s));
+            let fine = ["cargo build", "cargo test", "npm test", "npm run build", "npm ci", "make", "make all", "python3 tool.py", "python3 -m pytest -q", "bash run.sh", "./run.sh"];
+            for cmd in fine {
+                assert_eq!(run(cmd), Perm::Allow, "{cmd} ({ps})");
+            }
+            // editing ordinary source, then running the tests the project had, stays automatic
+            assert_eq!((edit("src/lib.rs"), write("src/new.rs")), (Perm::Allow, Perm::Allow));
+            tool(&s, "Read", json!({"file_path": "src/lib.rs"})).await;
+            tool(&s, "Edit", json!({"file_path": "src/lib.rs", "old_string": "a()", "new_string": "b()"})).await;
+            tool(&s, "Write", json!({"file_path": "src/new.rs", "content": "pub fn n() {}\n"})).await;
+            for cmd in fine {
+                assert_eq!(run(cmd), Perm::Allow, "{cmd} ({ps})");
+            }
+            assert_eq!(run("git commit -m x"), Perm::Allow);
+            // a script written, then run
+            assert_eq!(write("gen.py"), Perm::Allow);
+            tool(&s, "Write", json!({"file_path": "gen.py", "content": "import os\n"})).await;
+            for cmd in ["python3 gen.py", "python3 -u gen.py", "node --require=./gen.py src/new.rs"] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            assert_eq!(run("python3 tool.py"), Perm::Allow);
+            // package.json edited, then a package script
+            assert_eq!(edit("package.json"), Perm::Ask);
+            tool(&s, "Read", json!({"file_path": "package.json"})).await;
+            tool(&s, "Edit", json!({"file_path": "package.json", "old_string": "node t.js", "new_string": "node gen.py"})).await;
+            for cmd in ["npm test", "npm run build", "npm ci", "yarn test", "pnpm install"] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            assert_eq!((run("cargo test"), run("make")), (Perm::Allow, Perm::Allow), "other tools' files are unchanged");
+            // a commit's hooks may run it too
+            assert_eq!((run("git commit -m x"), run("git add src/lib.rs")), (Perm::Ask, Perm::Allow));
+            // a Makefile edited, then make
+            assert_eq!(edit("Makefile"), Perm::Ask);
+            tool(&s, "Read", json!({"file_path": "Makefile"})).await;
+            tool(&s, "Edit", json!({"file_path": "Makefile", "old_string": "true", "new_string": "python3 gen.py"})).await;
+            for cmd in ["make", "make all", "make -C .", "cd src && make -C .."] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            // build.rs written, then cargo
+            assert_eq!(write("build.rs"), Perm::Ask);
+            tool(&s, "Write", json!({"file_path": "build.rs", "content": "fn main() {}\n"})).await;
+            for cmd in ["cargo build", "cargo test", "cargo check"] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            // a shell script written, then run (directly, or by anything that may call it)
+            assert_eq!(write("deploy.sh"), Perm::Ask);
+            tool(&s, "Write", json!({"file_path": "deploy.sh", "content": "true\n"})).await;
+            for cmd in ["bash deploy.sh", "./deploy.sh", "bash run.sh", "python3 tool.py"] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            assert_eq!((run("git status"), run("ls src")), (Perm::Allow, Perm::Allow), "read-only commands stay automatic");
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_mode_sees_changes_it_did_not_make() {
+        for ps in [false, true] {
+            // the Claude Code CLI writes files itself, and commands change them: their times tell
+            let (d, s) = project_session(ps);
+            let run = |cmd: &str| check_permission("auto", "Bash", &json!({"command": cmd}), &[], Some(&s));
+            change_later(&d.join("tool.py"));
+            change_later(&d.join("crates/a/Cargo.toml"));
+            assert_eq!((run("python3 tool.py"), run("make")), (Perm::Ask, Perm::Allow));
+            for cmd in ["cargo build --manifest-path crates/a/Cargo.toml", "cargo build --manifest-path=crates/a/Cargo.toml", "cd crates/a && cargo build"] {
+                assert_eq!(run(cmd), Perm::Ask, "{cmd} ({ps})");
+            }
+            change_later(&d.join("Makefile"));
+            assert_eq!((run("make"), run("make -fMakefile")), (Perm::Ask, Perm::Ask));
+            let _ = std::fs::remove_dir_all(d);
+            // a workspace member's build script written by the tools: anywhere in the project
+            let (d, s) = project_session(ps);
+            tool(&s, "Write", json!({"file_path": "crates/a/build.rs", "content": "fn main() {}\n"})).await;
+            let run = |cmd: &str| check_permission("auto", "Bash", &json!({"command": cmd}), &[], Some(&s));
+            assert_eq!((run("cargo build"), run("npm test")), (Perm::Ask, Perm::Allow));
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn auto_mode_asks_to_write_what_runs() {
+        let (d, s) = project_session(POWERSHELL);
+        let p = |name: &str, input: Value| check_permission("auto", name, &input, &[], Some(&s));
+        for f in ["deploy.sh", "scripts/x.ps1", "x.bat", "x.CMD", "Makefile", "GNUmakefile", "rules.mk", "build.rs", "Cargo.toml", "crates/a/Cargo.toml", ".cargo/config.toml",
+                  "package.json", "package-lock.json", "eslint.config.js", "vite.config.ts", "conftest.py", "pyproject.toml", "setup.py", "go.mod", "pom.xml", "app.csproj",
+                  ".github/workflows/ci.yml", ".vscode/tasks.json", ".vscode/launch.json", ".husky/pre-commit", ".pre-commit-config.yaml", ".envrc",
+                  "node_modules/jest/bin/jest.js", "CMakeLists.txt", "gradle/wrapper/gradle-wrapper.properties"] {
+            assert_eq!(p("Write", json!({"file_path": f, "content": "x"})), Perm::Ask, "{f}");
+            assert_eq!(p("Edit", json!({"file_path": f, "old_string": "a", "new_string": "b"})), Perm::Ask, "{f}");
+        }
+        for f in ["src/main.rs", "README.md", "src/app.py", "tests/test_app.py", "src/config.rs", "docs/build.md", "src/package_json.rs", "config.toml", "src/shell.rs"] {
+            assert_eq!(p("Write", json!({"file_path": f, "content": "x"})), Perm::Allow, "{f}");
+        }
+        // the same through a command
+        for cmd in ["cp src/lib.rs Makefile", "mv tool.py build.rs", "cp tool.py .husky/pre-commit", "touch deploy.sh", "cp -t scripts run.sh", "cp a --target-directory=.github",
+                    "touch -d 2000-01-01 tool.py", "touch -r run.sh tool.py", "touch -mt 200001010000 tool.py", "touch --date=yesterday tool.py"] {
+            assert_eq!(p("Bash", json!({"command": cmd})), Perm::Ask, "{cmd}");
+        }
+        for cmd in ["touch src/new.rs", "cp src/lib.rs src/b.rs", "mv tool.py tool2.py", "touch -c src/lib.rs"] {
+            assert_eq!(p("Bash", json!({"command": cmd})), Perm::Allow, "{cmd}");
+        }
+        // code given on the command line, and packages that run their install scripts
+        for cmd in ["python3 -cprint(1) tool.py", "python3 -mevil tool.py", "python3 -X dev -m evil", "node --eval=1 tool.py", "node -e1 tool.py", "perl -Mstrict tool.py",
+                    "php -dauto_prepend_file=tool.py tool.py", "npm install left-pad", "npm i -D left-pad", "yarn add left-pad", "pnpm add left-pad", "bun add left-pad",
+                    "npm create vite", "npm init react-app", "npm explore x", "go generate", "go generate ./...", "poetry run pytest", "dotnet tool install x"] {
+            assert_eq!(p("Bash", json!({"command": cmd})), Perm::Ask, "{cmd}");
+        }
+        for cmd in ["npm install", "npm i", "npm ci", "yarn", "npm init -y", "python3 -u tool.py", "go test ./..."] {
+            assert_eq!(p("Bash", json!({"command": cmd})), Perm::Allow, "{cmd}");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn auto_mode_asks_for_commands_and_code_given_in_options() {
+        for ps in [false, true] {
+            let (d, s) = project_session(ps);
+            std::fs::write(d.join(".pre-commit-config.yaml"), "repos: []\n").unwrap();
+            let run = |cmd: &str| check_permission("auto", "Bash", &json!({"command": cmd}), &[], Some(&s));
+            let ask = [
+                // a makefile, commands or variables given on the command line
+                "echo x | make -f -", "echo x | make -f/dev/stdin", "make --eval=x", "make -E x", "make CC=evil", "make SHELL=evil all",
+                "cargo --config target.x.runner=evil run", "cargo run --config=build.rustc-wrapper=evil", "cargo -Zscript tool.py",
+                "go test -exec evil ./...", "go build -toolexec=evil .", "go vet -vettool=evil ./...", "go env -w GOFLAGS=x",
+                "cmake -E env evil", "meson test --wrapper=evil", "meson devenv evil",
+                "npm test --node-options=--import=x", "npm test --script-shell=evil", "yarn node -e evil", "bun -e evil", "echo x | bun run -",
+                "bun --print evil", "node --import=data:x tool.py", "node --run test", "node --experimental-loader=./x.mjs tool.py",
+                "echo evil | bash -s run.sh", "echo evil | sh -s run.sh", "pylint --init-hook=evil src", "python3 -m pylint --init-hook=evil src",
+                "gcc -wrapper evil x.c", "gcc @opts x.c", "gcc -B./bin x.c", "gcc -fplugin=./p.so x.c", "clang -Xclang -load x.c", "cc -fuse-ld=./ld x.c",
+                "gcc -Wl,-plugin x.c", "rustc -C linker=evil x.rs", "rustc -Clinker=evil x.rs", "javac -J-javaagent x.java",
+                "dotnet build -p:PreBuildEvent=evil", "dotnet build -property:PreBuildEvent=evil", "dotnet build -p PreBuildEvent=evil",
+                "mvn exec:exec -Dexec.executable=evil",
+                // a hook file made with git, hooks copied from a folder of the session's
+                "git mv tool.py .husky/pre-commit", "git mv tool.py Makefile", "git init --template=src", "git init --template src sub",
+            ];
+            let allowed: Vec<&str> = ask.iter().copied().filter(|c| run(c) == Perm::Allow).collect();
+            assert!(allowed.is_empty(), "ran without asking ({ps}): {allowed:?}");
+            let fine = [
+                "make", "make all", "make -j4", "make -C src", "cargo build --release", "cargo test -- --nocapture", "go test ./...", "go build ./...",
+                "go vet ./...", "npm test", "npm run build", "pnpm -r test", "yarn test", "bun test", "python3 -m pytest -q", "python3 -m pylint src",
+                "pylint src", "gcc -O2 -Isrc -c src/x.c", "clang -Wall -c x.c", "rustc -O x.rs", "dotnet build -c Release", "dotnet test", "mvn test",
+                "mvn -q package", "cmake -S . -B build", "cmake --build build", "meson test -C build", "git add src/lib.rs", "git commit -m fix",
+                "git mv src/lib.rs src/core.rs",
+            ];
+            let asked: Vec<&str> = fine.iter().copied().filter(|c| run(c) != Perm::Allow).collect();
+            assert!(asked.is_empty(), "asked about a safe command ({ps}): {asked:?}");
+            change_later(&d.join(".pre-commit-config.yaml"));
+            assert_eq!((run("git commit -m fix"), run("git pull"), run("git add src/lib.rs")), (Perm::Ask, Perm::Ask, Perm::Allow), "({ps})");
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     #[tokio::test]
