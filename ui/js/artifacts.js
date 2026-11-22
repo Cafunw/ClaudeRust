@@ -4,10 +4,11 @@ import { t } from './i18n.js';
 import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
 import { $, esc, h, showMenu, errorToast, relTime, searchToggle, modal, button } from './util.js';
+import { openLink } from './artifact_link.js';
 import { copyText, decorate } from './parts.js';
 import { storageCall } from './artifact_storage.js';
 import { resolveVersions } from './artifact_update.js';
-import { createConsent, fixMessage } from './artifact_bridge.js';
+import { createConsent, createComplete, fixMessage } from './artifact_bridge.js';
 
 let panel = null;
 let renderTimer = null;
@@ -160,7 +161,8 @@ async function render() {
       if (stale()) return;
       body.innerHTML = '';
       const frame = document.createElement('iframe');
-      frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals allow-downloads allow-popups-to-escape-sandbox');
+      // no modals and no popups: links ask the app (openLink), alert and confirm do nothing (artifact_guard.js)
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-downloads');
       frame.setAttribute('referrerpolicy', 'no-referrer');
       // whose window.storage and window.claude this frame's calls use (not the panel's: it may show another artifact by then)
       frame.dataset.scope = `${panel.convId}/${myId}`;
@@ -244,15 +246,12 @@ function askConsent(scope, title) {
   });
 }
 
-const consented = createConsent(askConsent);
-
-/** window.claude.complete of a frame: the prompt is all it chooses (artifact_ai.rs). */
-async function complete(frame, args) {
-  const [prompt] = Array.isArray(args) ? args : [];
-  if (typeof prompt !== 'string') throw new Error('window.claude.complete takes a prompt string.');
-  if (!(await consented(frame.dataset.scope, frame.dataset.title))) throw new Error('The user did not allow this artifact to ask Claude.');
-  return call('artifact_complete', { conversationId: frame.dataset.conv, artifactId: frame.dataset.artifact, prompt });
-}
+/** window.claude.complete of a frame (its dataset): the prompt is all it chooses (artifact_ai.rs). */
+const complete = createComplete({
+  check: (f) => call('artifact_complete_check', { conversationId: f.conv }),
+  allowed: createConsent(askConsent),
+  run: (f, prompt) => call('artifact_complete', { conversationId: f.conv, artifactId: f.artifact, prompt }),
+});
 
 function bindResizer(r) {
   r.addEventListener('mousedown', (e) => {
@@ -321,15 +320,16 @@ export { store };
 window.addEventListener('workspace-opened', () => { if (panel) close(); });
 
 // what the previewed artifact asks of the app (only from our own frame):
-// window.storage and window.claude.complete calls, and its errors
+// window.storage and window.claude.complete calls, its errors and links
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || (d.__artifact !== 'call' && d.__artifact !== 'error')) return;
+  if (!d || (d.__artifact !== 'call' && d.__artifact !== 'error' && d.__artifact !== 'link')) return;
   const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
   if (!frame || !panel) return;
   if (d.__artifact === 'error') { frameError(frame, d); return; }
+  if (d.__artifact === 'link') { openLink(d.url); return; }
   const reply = (r) => e.source.postMessage({ __artifact: 'reply', id: d.id, ...r }, '*');
   const fail = (err) => reply({ error: String((err && err.message) || err) });
-  if (d.op === 'complete') { complete(frame, d.args).then((result) => reply({ result }), fail); return; }
+  if (d.op === 'complete') { complete(frame.dataset, d.args).then((result) => reply({ result }), fail); return; }
   try { reply({ result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }); } catch (err) { fail(err); }
 });

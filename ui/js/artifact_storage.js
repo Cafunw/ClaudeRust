@@ -54,3 +54,13 @@ export function storageCall(ls, scope, op, args) {
       throw new Error(`Unknown storage call: ${op}`);
   }
 }
+
+/** Remove what the artifacts of conversation `convId` keep in `ls` (an incognito chat closing). */
+export function forgetConversation(ls, convId) {
+  const keys = [];
+  for (let i = 0; i < ls.length; i++) {
+    const k = ls.key(i);
+    if (k && k.startsWith(PREFIX) && k.slice(PREFIX.length).replace(/^(own|shared):/, '').startsWith(`${convId}/`)) keys.push(k);
+  }
+  keys.forEach((k) => ls.removeItem(k));
+}

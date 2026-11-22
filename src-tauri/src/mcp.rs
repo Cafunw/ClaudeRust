@@ -2,6 +2,8 @@
 //! Claude Desktop's `claude_desktop_config.json` and connects to local
 //! (stdio) and remote (streamable HTTP, or the older HTTP+SSE) servers.
 
+#[path = "mcp_apps.rs"]
+pub mod apps;
 #[path = "mcp_elicit.rs"]
 pub mod elicit;
 #[path = "mcp_sse.rs"]
@@ -73,6 +75,8 @@ type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>>;
 type State = Arc<Mutex<(String, Option<String>)>>;
 type Logs = Arc<Mutex<VecDeque<String>>>;
 type Servers = Arc<tokio::sync::RwLock<HashMap<String, Arc<McpServer>>>>;
+/// The folders offered to servers as roots (see McpManager::set_roots).
+type Roots = Arc<Mutex<Vec<PathBuf>>>;
 
 /// The OAuth sign-in of a remote server (none when its config sets an
 /// Authorization header of its own).
@@ -122,6 +126,9 @@ pub struct McpServer {
     tools_changed: UnboundedSender<()>,
     /// Requests the server sent us, to be answered (see `connect`).
     requests: UnboundedSender<Value>,
+    roots: Roots,
+    /// Tool name -> its MCP Apps metadata, for tools that declare some.
+    apps: Mutex<HashMap<String, apps::ToolUi>>,
 }
 
 fn push_log(logs: &Mutex<VecDeque<String>>, line: String) {
@@ -686,7 +693,7 @@ impl McpServer {
     async fn handshake(&self) -> AppResult<()> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"roots": {"listChanged": false}, "elicitation": {}},
+            "capabilities": {"roots": {"listChanged": true}, "elicitation": {}},
             "clientInfo": {"name": "ClaudeRust", "version": env!("CARGO_PKG_VERSION")}
         });
         let r = match self.request_authorized("initialize", &params, Duration::from_secs(60)).await? {
@@ -731,6 +738,16 @@ impl McpServer {
                     }
                     if schema["type"].is_null() {
                         schema["type"] = json!("object");
+                    }
+                    let ui = apps::ToolUi::of(t);
+                    let model_sees = ui.as_ref().is_none_or(|u| u.model);
+                    match ui {
+                        Some(u) => self.apps.lock().insert(name.clone(), u),
+                        None => self.apps.lock().remove(&name),
+                    };
+                    // a tool only for its app's own buttons (MCP Apps) isn't the model's
+                    if !model_sees {
+                        continue;
                     }
                     all.push(McpTool {
                         server: self.name.clone(),
@@ -805,6 +822,35 @@ pub struct McpManager {
     /// Bumped by every start_all; connections from an older run are dropped.
     generation: std::sync::atomic::AtomicU64,
     pub config_path: PathBuf,
+    roots: Roots,
+    /// The whole results of the latest calls of tools with an app (MCP Apps),
+    /// which get them with `structuredContent` (convert_result keeps text).
+    app_results: Mutex<VecDeque<(String, Value)>>,
+}
+
+/// The folders of `conv` to offer servers as roots: a Code session's folder
+/// and those it was given more of; a chat has none.
+pub fn session_roots(conv: &crate::db::Conversation) -> Vec<PathBuf> {
+    if conv.kind != "code" {
+        return vec![];
+    }
+    let extra = conv.options["cc_add_dirs"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    let mut out: Vec<PathBuf> = conv.cwd.as_deref().into_iter().chain(extra).map(PathBuf::from).collect();
+    out.dedup();
+    out
+}
+
+/// `roots/list`'s answer for `dirs`: file URIs (absolute paths only) and their folder names.
+fn roots_list(dirs: &[PathBuf]) -> Value {
+    let roots: Vec<Value> = dirs
+        .iter()
+        .filter_map(|d| {
+            let uri = url::Url::from_file_path(d).ok()?;
+            let name = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| d.display().to_string());
+            Some(json!({"uri": uri.as_str(), "name": name}))
+        })
+        .collect();
+    json!({"roots": roots})
 }
 
 /// Paths where the official Claude Desktop app keeps its config, for import.
@@ -901,14 +947,122 @@ pub fn read_config_for_update(path: &Path) -> AppResult<Value> {
     }
 }
 
+/// A header value kept in the system's credential store: the config holds
+/// this prefix and the value's key there instead (see `write_config`).
+pub const SECRET_REF: &str = "clauderust-secret:";
+
+/// A reference to a secret kept for the MCP config. Only keys this app made:
+/// a config written elsewhere can't name another secret of the store (an
+/// OAuth token) to have it sent.
+static SECRET_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("clauderust-secret:(mcp-secret-[0-9a-f]{32})").unwrap());
+
+/// Keep `value` in the credential store; the reference that stands for it.
+fn store_secret(value: &str) -> Option<String> {
+    let key = format!("mcp-secret-{}", uuid::Uuid::new_v4().simple());
+    match crate::mcp_oauth::secret_set(&key, value) {
+        Ok(()) => Some(format!("{SECRET_REF}{key}")),
+        Err(e) => {
+            log::warn!("keeping an MCP secret in the credential store failed, so it stays in the config: {e}");
+            None
+        }
+    }
+}
+
+/// The reference to put in the config instead of `value`, where the store
+/// keeps secrets across restarts; `None`: the config keeps the value itself.
+pub fn keep_secret(value: &str) -> Option<String> {
+    (crate::mcp_oauth::STORE_PERSISTS && !value.is_empty() && !value.starts_with(SECRET_REF)).then(|| store_secret(value)).flatten()
+}
+
+/// `s` with each secret reference in it replaced by the secret; `what` says whose in the error.
+fn resolve_secrets(s: &str, what: &str) -> AppResult<String> {
+    if !s.contains(SECRET_REF) {
+        return Ok(s.to_string());
+    }
+    let mut missing = false;
+    let out = SECRET_RE.replace_all(s, |c: &regex::Captures| {
+        crate::mcp_oauth::secret_get(&c[1]).unwrap_or_else(|| {
+            missing = true;
+            String::new()
+        })
+    });
+    // a reference that isn't one of ours is never looked up
+    if missing || out.contains(SECRET_REF) {
+        return Err(AppError::msg(format!("The saved {what} of this server isn't in the system's credential store any more: enter it again in its settings.")));
+    }
+    Ok(out.into_owned())
+}
+
+fn collect_secret_refs(v: &Value, out: &mut HashSet<String>) {
+    match v {
+        Value::String(s) => out.extend(SECRET_RE.captures_iter(s).map(|c| c[1].to_string())),
+        Value::Array(a) => a.iter().for_each(|x| collect_secret_refs(x, out)),
+        Value::Object(o) => o.values().for_each(|x| collect_secret_refs(x, out)),
+        _ => {}
+    }
+}
+
+fn secret_refs(cfg: &Value) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_secret_refs(cfg, &mut out);
+    out
+}
+
+/// The Authorization header values of the remote servers in `cfg`.
+fn auth_headers(cfg: &mut Value) -> impl Iterator<Item = &mut Value> {
+    cfg.get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .into_iter()
+        .flat_map(|m| m.values_mut())
+        .filter(|s| s["url"].is_string())
+        .filter_map(|s| s.get_mut("headers").and_then(Value::as_object_mut))
+        .flat_map(|h| h.iter_mut().filter(|(k, _)| k.eq_ignore_ascii_case("authorization")).map(|(_, v)| v))
+}
+
+fn is_plain_secret(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| !s.is_empty() && !s.starts_with(SECRET_REF))
+}
+
+/// Move each remote server's Authorization header into the credential store,
+/// leaving a reference in `cfg`. One the store refuses stays as it is.
+fn move_header_secrets(cfg: &mut Value) {
+    for v in auth_headers(cfg).filter(|v| is_plain_secret(v)) {
+        if let Some(r) = store_secret(v.as_str().unwrap_or_default()) {
+            *v = json!(r);
+        }
+    }
+}
+
+/// A remote server's headers, those kept in the credential store read back.
+fn resolve_headers(conf: &Value) -> AppResult<Vec<(String, String)>> {
+    let mut out = vec![];
+    for (k, v) in conf["headers"].as_object().into_iter().flatten() {
+        if let Some(s) = v.as_str() {
+            out.push((k.clone(), resolve_secrets(s, &format!("{k} header"))?));
+        }
+    }
+    Ok(out)
+}
+
 /// Write the config through a temporary file so a crash can't truncate it.
+/// Tokens go into the credential store first, where it keeps them across
+/// restarts (on Linux here it doesn't: they stay in the file, and Settings
+/// says so); a secret the new config no longer refers to is deleted there.
 pub fn write_config(path: &Path, v: &Value) -> AppResult<()> {
+    let mut v = v.clone();
+    if crate::mcp_oauth::STORE_PERSISTS {
+        move_header_secrets(&mut v);
+    }
+    let gone: Vec<String> = secret_refs(&read_config(path)).difference(&secret_refs(&v)).cloned().collect();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(v)?)?;
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
     std::fs::rename(&tmp, path)?;
+    for key in gone {
+        crate::mcp_oauth::secret_delete(&key);
+    }
     Ok(())
 }
 
@@ -931,6 +1085,8 @@ impl McpManager {
             starting: Mutex::new(vec![]),
             generation: std::sync::atomic::AtomicU64::new(0),
             config_path,
+            roots: Roots::default(),
+            app_results: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -940,11 +1096,33 @@ impl McpManager {
         self.changed.notified().await
     }
 
+    /// Offer `dirs` (session_roots of the conversation whose turn runs now)
+    /// to the servers as roots, and tell them when that changes.
+    /// shortcut: one set for all servers, so two Code sessions running at once share the latest one's; upgrade: a connection per session.
+    pub async fn set_roots(&self, dirs: Vec<PathBuf>) {
+        {
+            let mut roots = self.roots.lock();
+            if *roots == dirs {
+                return;
+            }
+            *roots = dirs;
+        }
+        let servers: Vec<Arc<McpServer>> = self.servers.read().await.values().cloned().collect();
+        let note = json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"});
+        futures_util::future::join_all(servers.iter().map(|s| s.send(note.clone()))).await;
+    }
+
     /// (Re)start every configured server that is not disabled.
     pub async fn start_all(&self, disabled: &[String]) {
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_all().await;
-        let cfg = read_config(&self.config_path);
+        let mut cfg = read_config(&self.config_path);
+        // tokens an older version, an import or a hand edit left in the clear
+        if crate::mcp_oauth::STORE_PERSISTS && auth_headers(&mut cfg).any(|v| is_plain_secret(v)) {
+            if let Err(e) = write_config(&self.config_path, &cfg) {
+                log::warn!("moving MCP tokens into the credential store failed: {e}");
+            }
+        }
         let servers = cfg["mcpServers"].as_object().cloned().unwrap_or_default();
         let mut tasks = vec![];
         let mut starting = vec![];
@@ -964,9 +1142,9 @@ impl McpManager {
                 continue;
             }
             starting.push((name.clone(), transport_of(&conf).to_string()));
-            let changed = self.changed.clone();
+            let (changed, roots) = (self.changed.clone(), self.roots.clone());
             tasks.push(async move {
-                let res = connect(&name, &conf, changed, Logs::default()).await;
+                let res = connect(&name, &conf, changed, Logs::default(), roots).await;
                 (name, conf, res)
             });
         }
@@ -1036,7 +1214,7 @@ impl McpManager {
         }
         self.starting.lock().push((name.to_string(), transport_of(&conf).into()));
         self.changed.notify_one();
-        let res = connect(name, &conf, self.changed.clone(), Logs::default()).await;
+        let res = connect(name, &conf, self.changed.clone(), Logs::default(), self.roots.clone()).await;
         self.starting.lock().retain(|(n, _)| n != name);
         self.register(gen, name.to_string(), conf, res).await;
         self.changed.notify_one();
@@ -1109,12 +1287,61 @@ impl McpManager {
                 Duration::from_secs(600),
             )
             .await?;
+        if server.apps.lock().get(&tool.name).is_some_and(|u| u.resource_uri.is_some()) && r.to_string().len() <= apps::MAX_RESULT_BYTES {
+            let mut kept = self.app_results.lock();
+            if kept.len() >= 32 {
+                kept.pop_front();
+            }
+            kept.push_back((apps::result_key(api_name, args), r.clone()));
+        }
         // images are decoded, and a large one scaled down and encoded again
         // (a screenshot tool's): off the async runtime
         if r["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "image")) {
             return tokio::task::spawn_blocking(move || convert_result(&r)).await.map_err(|e| AppError::msg(e.to_string()));
         }
         Ok(convert_result(&r))
+    }
+
+    async fn server(&self, name: &str) -> AppResult<Arc<McpServer>> {
+        self.servers.read().await.get(name).cloned().ok_or_else(|| AppError::msg("MCP server not connected"))
+    }
+
+    /// The app of tool `api_name` (MCP Apps): (server, tool, its ui:// resource), and the
+    /// whole result of its latest call with `args` while it is kept.
+    pub async fn app_of(&self, api_name: &str, args: &Value) -> Option<(String, String, String, Option<Value>)> {
+        let tool = self.find_tool(api_name).await?;
+        let uri = self.server(&tool.server).await.ok()?.apps.lock().get(&tool.name)?.resource_uri.clone()?;
+        let key = apps::result_key(api_name, args);
+        let result = self.app_results.lock().iter().rev().find(|(k, _)| *k == key).map(|(_, r)| r.clone());
+        Some((tool.server, tool.name, uri, result))
+    }
+
+    /// `resources/read` of `uri` on `server`: its first content, as sent.
+    pub async fn read_resource_raw(&self, server: &str, uri: &str) -> AppResult<Value> {
+        let r = self.server(server).await?.request("resources/read", json!({"uri": uri}), Duration::from_secs(60)).await?;
+        Ok(r["contents"][0].clone())
+    }
+
+    /// `server`, when it has `tool` and lets its apps call it (asked before
+    /// anyone is asked to allow the call).
+    pub async fn app_callable(&self, server: &str, tool: &str) -> AppResult<Arc<McpServer>> {
+        let s = self.server(server).await?;
+        let callable = match s.apps.lock().get(tool) {
+            Some(u) => u.app,
+            None => s.tools.lock().iter().any(|t| t.name == tool),
+        };
+        if !callable {
+            return Err(AppError::msg(format!("{server} doesn't let its app call {tool}.")));
+        }
+        Ok(s)
+    }
+
+    /// `tools/call` of `tool` on `server` from that server's app: only a
+    /// tool the server lets its apps call; the whole result.
+    pub async fn app_call(&self, server: &str, tool: &str, args: &Value) -> AppResult<Value> {
+        let s = self.app_callable(server, tool).await?;
+        let args = if args.is_object() { args.clone() } else { json!({}) };
+        s.request("tools/call", json!({"name": tool, "arguments": args}), Duration::from_secs(120)).await
     }
 
     /// List resources and prompts of a server (for the attach menu).
@@ -1276,12 +1503,10 @@ fn route(v: Value, pending: &Pending, tools_changed: &UnboundedSender<()>, reque
 }
 
 /// Our answer to request `v` that server `server` sent us.
-async fn answer_request(server: &str, v: &Value) -> Value {
+async fn answer_request(server: &str, roots: &Roots, v: &Value) -> Value {
     let result = match v["method"].as_str().unwrap_or("") {
         "ping" => json!({}),
-        // One connection serves every chat and code session at once, so there
-        // is no single folder to offer.
-        "roots/list" => json!({"roots": []}),
+        "roots/list" => roots_list(&roots.lock()),
         "elicitation/create" => elicit::ask(server, &v["params"]).await,
         m => return json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32601, "message": format!("Method not supported: {m}")}}),
     };
@@ -1296,19 +1521,12 @@ fn transport_of(conf: &Value) -> &'static str {
     }
 }
 
-async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> Result<Arc<McpServer>, (AppError, Vec<String>)> {
+async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs, roots: Roots) -> Result<Arc<McpServer>, (AppError, Vec<String>)> {
     let state: State = Arc::new(Mutex::new(("starting".into(), None)));
     let (tools_changed, mut tools_changed_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (requests, mut requests_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let transport = if let Some(url) = conf["url"].as_str() {
-        let headers: Vec<(String, String)> = conf["headers"]
-            .as_object()
-            .map(|h| {
-                h.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let headers = resolve_headers(conf).map_err(|e| (e, vec![]))?;
         let client = reqwest::Client::builder()
             .redirect(crate::mcp_oauth::same_origin_redirects())
             .connect_timeout(Duration::from_secs(20))
@@ -1331,17 +1549,14 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
         let command = conf["command"]
             .as_str()
             .ok_or_else(|| (AppError::msg("Missing \"command\" (or \"url\") in server config"), vec![]))?;
-        let args: Vec<String> = conf["args"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_default();
+        // an extension's secret settings are references to the credential store (extensions.rs)
+        let args = conf["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| resolve_secrets(s, "setting"));
+        let args: Vec<String> = args.collect::<AppResult<_>>().map_err(|e| (e, vec![]))?;
         crate::shellenv::ready().await;
         let mut cmd = crate::shellenv::command(command, &args);
-        if let Some(env) = conf["env"].as_object() {
-            for (k, v) in env {
-                if let Some(s) = v.as_str() {
-                    cmd.env(k, s);
-                }
+        for (k, v) in conf["env"].as_object().into_iter().flatten() {
+            if let Some(s) = v.as_str() {
+                cmd.env(k, resolve_secrets(s, k).map_err(|e| (e, vec![]))?);
             }
         }
         if let Some(cwd) = conf["cwd"].as_str() {
@@ -1436,6 +1651,8 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
         changed,
         tools_changed,
         requests,
+        roots: roots.clone(),
+        apps: Mutex::new(HashMap::new()),
     });
     // Answer what the server asks, from the handshake on, each request in a
     // task of its own: an elicitation waits for the user. Weak, so it ends
@@ -1445,9 +1662,9 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs) -> 
         let name = name.to_string();
         tokio::spawn(async move {
             while let Some(req) = requests_rx.recv().await {
-                let (weak, name) = (weak.clone(), name.clone());
+                let (weak, name, roots) = (weak.clone(), name.clone(), roots.clone());
                 tokio::spawn(async move {
-                    let answer = answer_request(&name, &req).await;
+                    let answer = answer_request(&name, &roots, &req).await;
                     if let Some(s) = weak.upgrade() {
                         s.send(answer).await;
                     }
@@ -1526,7 +1743,7 @@ async fn supervise(servers: Servers, name: String, conf: Value, mut server: Arc<
                 return;
             }
             push_log(&server.logs, format!("[restarting: try {tries} of {RESTART_TRIES}]"));
-            match connect(&name, &conf, server.changed.clone(), server.logs.clone()).await {
+            match connect(&name, &conf, server.changed.clone(), server.logs.clone(), server.roots.clone()).await {
                 Ok(new) => break new,
                 Err((e, _)) => why = e.to_string(),
             }
@@ -2119,7 +2336,7 @@ for line in sys.stdin:
             (200, Some("s1".into()), "text/event-stream", sse)
         })
         .await;
-        let s = connect("web", &json!({"url": url}), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
+        let s = connect("web", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
         assert_eq!(s.tools.lock().len(), 1);
         let r = s.request("tools/call", json!({"name": "echo", "arguments": {"text": "hi"}}), Duration::from_secs(10)).await.unwrap();
         assert_eq!(r["content"][0]["text"], "hi");
@@ -2150,7 +2367,7 @@ for line in sys.stdin:
             (200, None, "application/json", json!({"jsonrpc": "2.0", "id": req.body["id"], "result": http_result(&method, &req.body)}).to_string())
         })
         .await;
-        let s = connect("web", &json!({"url": url}), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
+        let s = connect("web", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
         assert_eq!(sessions.load(Ordering::SeqCst), 1);
         // the server restarts and forgets the session
         expired.store(true, Ordering::SeqCst);
@@ -2159,5 +2376,135 @@ for line in sys.stdin:
         assert_eq!(sessions.load(Ordering::SeqCst), 2);
         let Transport::Http { session, .. } = &s.transport else { unreachable!() };
         assert_eq!(session.lock().as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn a_code_session_offers_its_folders_as_roots_and_a_chat_none() {
+        let dir = std::env::temp_dir().join("proj");
+        let code = crate::db::Conversation {
+            kind: "code".into(),
+            cwd: Some(dir.display().to_string()),
+            options: json!({"cc_add_dirs": [dir.join("docs").display().to_string()]}),
+            ..Default::default()
+        };
+        assert_eq!(session_roots(&code), vec![dir.clone(), dir.join("docs")]);
+        assert!(session_roots(&crate::db::Conversation { kind: "chat".into(), cwd: code.cwd.clone(), ..Default::default() }).is_empty());
+        let list = roots_list(&session_roots(&code));
+        assert_eq!(list["roots"][0]["name"], "proj");
+        let uri = list["roots"][0]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("file:///"), "{uri}");
+        assert_eq!(url::Url::parse(uri).unwrap().to_file_path().unwrap(), dir);
+        // a relative path is no root
+        assert_eq!(roots_list(&[PathBuf::from("relative")]), json!({"roots": []}));
+    }
+
+    #[tokio::test]
+    async fn servers_are_told_when_the_roots_change_and_get_them() {
+        let Some(py) = python() else { return };
+        let script = r#"
+import sys, json
+roots = None
+caps = None
+def send(o):
+    print(json.dumps(o), flush=True)
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get('method') == 'notifications/roots/list_changed':
+        send({'jsonrpc': '2.0', 'id': 'r', 'method': 'roots/list'})
+        continue
+    if 'method' not in m:
+        if m.get('id') == 'r': roots = m.get('result')
+        continue
+    if 'id' not in m: continue
+    if m['method'] == 'initialize':
+        caps = m['params']['capabilities']
+        r = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake', 'version': '1'}}
+    elif m['method'] == 'tools/list':
+        r = {'tools': [{'name': 'roots', 'inputSchema': {'type': 'object'}}]}
+    else:
+        r = {'content': [{'type': 'text', 'text': json.dumps({'roots': roots, 'caps': caps})}]}
+    send({'jsonrpc': '2.0', 'id': m['id'], 'result': r})
+"#;
+        let dir = temp_dir("roots");
+        let m = manager(&dir, json!({"fs": {"command": py, "args": ["-c", script]}})).await;
+        let folder = dir.join("project");
+        m.set_roots(vec![folder.clone()]).await;
+        let want = json!({"roots": [{"uri": url::Url::from_file_path(&folder).unwrap().as_str(), "name": "project"}]});
+        let mr = &m;
+        let seen = || async move {
+            let (b, _) = mr.call("fs__roots", &json!({})).await.unwrap();
+            serde_json::from_str::<Value>(b[0]["text"].as_str().unwrap()).unwrap()
+        };
+        let wr = &want;
+        eventually("the server asked for the new roots", || async move { seen().await["roots"] == *wr }).await;
+        assert_eq!(seen().await["caps"]["roots"], json!({"listChanged": true}));
+        m.stop_all().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn auth(cfg: &Value, server: &str) -> String {
+        cfg["mcpServers"][server]["headers"]["Authorization"].as_str().unwrap_or_default().to_string()
+    }
+
+    /// The store key a whole-value reference names.
+    fn secret_key(s: &str) -> Option<String> {
+        SECRET_RE.captures(s).filter(|c| c[0].len() == s.len()).map(|c| c[1].to_string())
+    }
+
+    #[test]
+    fn tokens_move_to_the_credential_store_and_are_read_back_to_connect() {
+        let mut cfg = json!({"mcpServers": {
+            "remote": {"url": "https://x.example/mcp", "headers": {"Authorization": "Bearer t0ken", "X-Other": "kept"}},
+            "local": {"command": "x", "headers": {"Authorization": "not a remote server's"}},
+            "blank": {"url": "https://y.example/mcp", "headers": {"authorization": ""}},
+        }});
+        move_header_secrets(&mut cfg);
+        assert!(secret_key(&auth(&cfg, "remote")).is_some(), "{cfg}");
+        assert!(!cfg.to_string().contains("t0ken"));
+        assert_eq!(cfg["mcpServers"]["remote"]["headers"]["X-Other"], "kept");
+        assert_eq!(auth(&cfg, "local"), "not a remote server's");
+        assert_eq!(cfg["mcpServers"]["blank"]["headers"]["authorization"], "");
+        let moved = cfg.clone();
+        move_header_secrets(&mut cfg);
+        assert_eq!(cfg, moved, "a reference isn't moved again");
+        let headers = resolve_headers(&cfg["mcpServers"]["remote"]).unwrap();
+        assert!(headers.contains(&("Authorization".into(), "Bearer t0ken".into())), "{headers:?}");
+        assert!(headers.contains(&("X-Other".into(), "kept".into())));
+        // a reference to a deleted secret, or to one this app didn't keep for the config, is an error, never that secret
+        crate::mcp_oauth::secret_set("mcp-oauth-someone-else", "{\"access_token\":\"x\"}").unwrap();
+        let gone = format!("{SECRET_REF}mcp-secret-{}", "0".repeat(32));
+        for bad in [gone.as_str(), "clauderust-secret:mcp-oauth-someone-else", "clauderust-secret:mcp-secret-../x"] {
+            let e = resolve_headers(&json!({"headers": {"Authorization": bad}})).unwrap_err().to_string();
+            assert!(e.contains("enter it again"), "{bad}: {e}");
+        }
+        // inside a longer value (an extension's argument) too; plain text passes as it is
+        let r = store_secret("s3cret").unwrap();
+        assert_eq!(resolve_secrets(&format!("--token={r} --x"), "arg").unwrap(), "--token=s3cret --x");
+        assert_eq!(resolve_secrets("plain", "arg").unwrap(), "plain");
+        // where the store doesn't keep secrets across restarts, nothing is moved
+        assert_eq!(keep_secret("v"), None);
+    }
+
+    #[test]
+    fn a_token_the_config_no_longer_refers_to_is_deleted_from_the_store() {
+        let p = temp_dir("secrets").join("claude_desktop_config.json");
+        let mut cfg = json!({"mcpServers": {"r": {"url": "https://x.example/mcp", "headers": {"Authorization": "Bearer abc"}}}});
+        move_header_secrets(&mut cfg);
+        let key = secret_key(&auth(&cfg, "r")).unwrap().to_string();
+        write_config(&p, &cfg).unwrap();
+        cfg["mcpServers"]["l"] = json!({"command": "x"});
+        write_config(&p, &cfg).unwrap();
+        assert_eq!(crate::mcp_oauth::secret_get(&key).as_deref(), Some("Bearer abc"), "other edits keep it");
+        cfg["mcpServers"].as_object_mut().unwrap().remove("r");
+        write_config(&p, &cfg).unwrap();
+        assert_eq!(crate::mcp_oauth::secret_get(&key), None, "the removed server's token went with it");
+    }
+
+    #[test]
+    fn where_the_store_forgets_at_quit_a_token_stays_in_the_file() {
+        // tests use the in-memory store, as Linux does (STORE_PERSISTS is false): moving the token there would lose it
+        let p = temp_dir("secrets-mem").join("claude_desktop_config.json");
+        write_config(&p, &json!({"mcpServers": {"r": {"url": "https://x.example/mcp", "headers": {"Authorization": "Bearer abc"}}}})).unwrap();
+        assert_eq!(auth(&read_config(&p), "r"), "Bearer abc");
     }
 }

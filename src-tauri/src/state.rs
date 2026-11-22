@@ -54,6 +54,8 @@ pub struct AppState {
     pub watches: crate::watch::Watches,
     pub oai_models: Mutex<Vec<String>>,
     pub models: Mutex<Option<Vec<Value>>>,
+    /// The plan's usage limits as the account engine last reported them (usage.rs); null until then.
+    pub usage_limits: Mutex<Value>,
     /// Set when the configured endpoint rejected optional request features.
     pub degraded: AtomicBool,
     pub data_dir: PathBuf,
@@ -63,6 +65,7 @@ impl AppState {
     pub fn new(db: Db, data_dir: PathBuf, mcp_config: PathBuf) -> Self {
         let db = Arc::new(db);
         let settings = Settings::load(&db);
+        crate::keepawake::apply(&settings);
         let key = crate::settings::load_api_key(&db);
         AppState {
             db,
@@ -84,6 +87,7 @@ impl AppState {
             watches: crate::watch::Watches::default(),
             oai_models: Mutex::new(Vec::new()),
             models: Mutex::new(None),
+            usage_limits: Mutex::new(Value::Null),
             degraded: AtomicBool::new(false),
             data_dir,
         }

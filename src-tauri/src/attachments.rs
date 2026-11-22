@@ -13,8 +13,12 @@ const MAX_IMAGE_BYTES: usize = 3_700_000;
 /// The API takes 32 MB a request, and a PDF goes base64-encoded (a third
 /// larger) with the rest of the message.
 const MAX_PDF_BYTES: usize = 22 * 1024 * 1024;
-/// The API's page limit for a PDF (100 on the 200K-context models).
+/// The API's page limit for a PDF (`check_message`: 100 on the 200K-context models).
 const MAX_PDF_PAGES: u32 = 600;
+const MAX_PDF_PAGES_200K: u32 = 100;
+/// What one message's attachments may add up to, base64-encoded: the API
+/// takes 32 MB a request, the system prompt and the conversation go too.
+const MAX_MESSAGE_BYTES: usize = 30 * 1024 * 1024;
 /// The most inflated of a PDF's object streams while counting its pages.
 const MAX_PDF_INFLATE: u64 = 64 * 1024 * 1024;
 /// Text over ~1 MB is digested (see `logdigest`), so this only bounds memory.
@@ -72,7 +76,7 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn downscale(bytes: &[u8], mime: &str) -> AppResult<(Vec<u8>, String)> {
-    let img = image::load_from_memory(bytes).map_err(|e| AppError::msg(format!("Could not read image: {e}")))?;
+    let img = image::load_from_memory(bytes).map_err(|e| refuse("image_unreadable", format!("Could not read image: {e}")))?;
     let (w, h) = (img.width(), img.height());
     let needs_resize = w.max(h) > MAX_IMAGE_SIDE;
     if !needs_resize && bytes.len() <= MAX_IMAGE_BYTES {
@@ -147,13 +151,13 @@ fn docx_text(bytes: &[u8]) -> AppResult<String> {
 }
 
 fn docx_text_limited(bytes: &[u8], limit: u64) -> AppResult<String> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| AppError::msg(format!("Not a valid Word document: {e}")))?;
-    let entry = zip.by_name("word/document.xml").map_err(|e| AppError::msg(format!("Not a valid Word document: {e}")))?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| refuse("office_invalid", format!("Not a valid Word document: {e}")))?;
+    let entry = zip.by_name("word/document.xml").map_err(|e| refuse("office_invalid", format!("Not a valid Word document: {e}")))?;
     let declared = entry.size();
     let xml = crate::util::read_capped(entry, declared, limit)?.ok_or_else(|| {
-        AppError::msg(format!("This Word document's text is too large to attach (over {} uncompressed).", crate::util::human_size(limit)))
+        refuse("office_too_large", format!("This Word document's text is too large to attach (over {} uncompressed).", crate::util::human_size(limit)))
     })?;
-    let xml = String::from_utf8(xml).map_err(|_| AppError::msg("This Word document's text isn't valid UTF-8."))?;
+    let xml = String::from_utf8(xml).map_err(|_| refuse("office_damaged", "This Word document's text isn't valid UTF-8.".into()))?;
     let mut out = String::new();
     let mut i = 0;
     let b = xml.as_bytes();
@@ -205,7 +209,7 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
         });
     }
     if ext == "pdf" && !bytes.starts_with(b"%PDF") {
-        return Err(AppError::msg(format!("“{name}” is not a valid PDF file.")));
+        return Err(refuse("pdf_invalid", format!("“{name}” is not a valid PDF file.")));
     }
     if bytes.starts_with(b"%PDF") {
         if bytes.len() > MAX_PDF_BYTES {
@@ -239,7 +243,7 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
         return Ok(text_attachment(name, "text/plain".into(), size, text?, path));
     }
     if bytes.len() > MAX_TEXT_BYTES {
-        return Err(AppError::msg("This file is too large to attach (40 MB maximum)."));
+        return Err(refuse("file_too_large", "This file is too large to attach (40 MB maximum).".into()));
     }
     let text_ext = TEXT_EXTS.contains(&ext.as_str());
     let (text, mime) = match decode_text_file(bytes, text_ext) {
@@ -256,8 +260,33 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
     Ok(text_attachment(name, mime, size, text, path))
 }
 
-/// A refusal the UI can tell apart by its `kind`.
-fn refuse(kind: &str, message: String) -> AppError {
+/// Refuse a message to `model` the API would refuse for its attachments
+/// together: over `MAX_MESSAGE_BYTES`, or a PDF of more pages than the
+/// model reads. Each one alone passed `from_bytes`.
+// shortcut: the conversation's earlier attachments are sent again with each turn and aren't counted; count them if 413s show up.
+pub fn check_message(atts: &[Attachment], model: &str) -> AppResult<()> {
+    let total: usize = atts.iter().map(|a| a.data.len()).sum();
+    if total > MAX_MESSAGE_BYTES {
+        let size = crate::util::human_size(total as u64);
+        return Err(refuse("message_too_large", format!("This message's attachments add up to {size}; one message can carry about {} MB. Send them in separate messages.", MAX_MESSAGE_BYTES >> 20)));
+    }
+    if crate::models::info(model).context > 200_000 {
+        return Ok(());
+    }
+    for a in atts.iter().filter(|a| a.kind == "pdf") {
+        let pages = B64.decode(&a.data).ok().and_then(|pdf| pdf_pages(&pdf, MAX_PDF_INFLATE));
+        if let Some(pages) = pages.filter(|&p| p > MAX_PDF_PAGES_200K) {
+            return Err(refuse(
+                "pdf_too_many_pages_for_model",
+                format!("“{}” has {pages} pages; this model reads PDFs of up to {MAX_PDF_PAGES_200K} pages. Choose a newer model, or attach fewer pages.", a.name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A refusal the UI can tell apart by its `kind` (and show in the person's language).
+pub(crate) fn refuse(kind: &str, message: String) -> AppError {
     AppError::Api { status: 0, kind: kind.into(), message }
 }
 
@@ -415,10 +444,10 @@ fn text_attachment(name: &str, mime: String, size: u64, text: String, path: Opti
 pub fn from_path(path: &std::path::Path) -> AppResult<Attachment> {
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
-        return Err(AppError::msg(format!("{} is not a regular file.", path.display())));
+        return Err(refuse("not_a_file", format!("{} is not a regular file.", path.display())));
     }
     if meta.len() > 40 * 1024 * 1024 {
-        return Err(AppError::msg("This file is too large to attach (40 MB maximum)."));
+        return Err(refuse("file_too_large", "This file is too large to attach (40 MB maximum).".into()));
     }
     let bytes = std::fs::read(path)?;
     let name = path
@@ -592,9 +621,30 @@ mod tests {
         assert_eq!(kind_of("data.dat", &utf16), Err("unsupported_file".into()));
         assert!(from_bytes("photo.heic", &heic).unwrap_err().to_string().contains("Excel and PowerPoint"));
         // a JPEG that doesn't decode, a damaged workbook, a fake PDF
-        assert_eq!(kind_of("a.jpg", &jpg), Err("error".into()));
-        assert_eq!(kind_of("a.xlsx", b"PK\x03\x04"), Err("error".into()));
-        assert_eq!(kind_of("a.pdf", b"<html>"), Err("error".into()));
+        assert_eq!(kind_of("a.jpg", &jpg), Err("image_unreadable".into()));
+        assert_eq!(kind_of("a.xlsx", b"PK\x03\x04"), Err("office_invalid".into()));
+        assert_eq!(kind_of("a.docx", b"PK\x03\x04"), Err("office_invalid".into()));
+        assert_eq!(kind_of("a.pdf", b"<html>"), Err("pdf_invalid".into()));
+        assert_eq!(kind_of("a.txt", &b"a".repeat(MAX_TEXT_BYTES + 1)), Err("file_too_large".into()));
+        assert_eq!(from_path(&std::env::temp_dir()).unwrap_err().kind(), "not_a_file");
+    }
+
+    #[test]
+    fn a_message_is_refused_for_what_its_attachments_add_up_to() {
+        let pdf_of = |pages: u32| from_bytes("a.pdf", pdf(pages).as_bytes()).unwrap();
+        let (short, long) = (pdf_of(100), pdf_of(101));
+        assert!(check_message(&[short.clone(), long.clone()], "claude-opus-5-5").is_ok(), "1M context: up to 600 pages");
+        assert!(check_message(std::slice::from_ref(&short), "claude-haiku-4-5").is_ok());
+        let e = check_message(&[short.clone(), long.clone()], "claude-haiku-4-5").unwrap_err();
+        assert_eq!(e.kind(), "pdf_too_many_pages_for_model");
+        assert!(e.to_string().contains("101 pages") && e.to_string().contains("100"), "{e}");
+        // two PDFs that each fit, but not in one request
+        let mut big = pdf(1).into_bytes();
+        big.resize(MAX_PDF_BYTES, b' ');
+        let big = from_bytes("big.pdf", &big).unwrap();
+        assert!(check_message(std::slice::from_ref(&big), "claude-opus-5-5").is_ok());
+        assert_eq!(check_message(&[big.clone(), big], "claude-opus-5-5").unwrap_err().kind(), "message_too_large");
+        assert!(check_message(&[], "claude-haiku-4-5").is_ok());
     }
 
     #[test]

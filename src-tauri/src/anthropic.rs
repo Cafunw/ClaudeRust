@@ -359,6 +359,42 @@ impl Client {
         StreamOutcome { acc, error: None }
     }
 
+    /// GET `path` (no retries: the Files API calls it serves are free to ask again).
+    async fn get(&self, path: &str, cancel: &CancellationToken) -> AppResult<reqwest::Response> {
+        let req = self.http.get(format!("{}{path}", self.base_url)).headers(self.headers(&[]));
+        let resp = tokio::select! {
+            _ = cancel.cancelled() => return Err(AppError::Cancelled),
+            r = req.send() => r?,
+        };
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(api_error(status, &resp.text().await.unwrap_or_default()));
+        }
+        Ok(resp)
+    }
+
+    pub async fn get_json(&self, path: &str, cancel: &CancellationToken) -> AppResult<Value> {
+        Ok(self.get(path, cancel).await?.json().await?)
+    }
+
+    /// The bytes at `path`, or None as soon as there are more than `max` of them.
+    pub async fn download(&self, path: &str, max: u64, cancel: &CancellationToken) -> AppResult<Option<Vec<u8>>> {
+        let mut stream = self.get(path, cancel).await?.bytes_stream();
+        let mut out = vec![];
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => return Err(AppError::Cancelled),
+                c = stream.next() => c,
+            };
+            let Some(chunk) = chunk else { return Ok(Some(out)) };
+            let chunk = chunk?;
+            if (out.len() + chunk.len()) as u64 > max {
+                return Ok(None);
+            }
+            out.extend_from_slice(&chunk);
+        }
+    }
+
     /// GET /v1/models (all pages).
     pub async fn list_models(&self) -> AppResult<Vec<Value>> {
         let mut out = vec![];
@@ -500,6 +536,11 @@ impl Accumulator {
         self.message.get("model").and_then(|v| v.as_str()).map(|s| s.to_string())
     }
 
+    /// The code execution container the response ran in (`{id, expires_at, …}`).
+    pub fn container(&self) -> Option<&Value> {
+        self.message.get("container").filter(|c| c["id"].is_string())
+    }
+
     /// Apply one SSE data payload. Returns the index of the block that changed.
     pub fn apply(&mut self, ev: &Value) -> AppResult<Option<usize>> {
         let t = ev["type"].as_str().unwrap_or("");
@@ -610,6 +651,9 @@ impl Accumulator {
                 }
                 if !ev["delta"]["stop_details"].is_null() {
                     self.stop_details = ev["delta"]["stop_details"].clone();
+                }
+                if ev["delta"]["container"].is_object() {
+                    self.message.insert("container".into(), ev["delta"]["container"].clone());
                 }
                 if let Some(u) = ev["usage"].as_object() {
                     for (k, v) in u {
@@ -851,6 +895,26 @@ mod tests {
             }
         });
         (format!("http://{addr}"), conns)
+    }
+
+    #[test]
+    fn the_container_comes_with_the_message_delta() {
+        let mut acc = Accumulator::default();
+        acc.apply(&json!({"type": "message_start", "message": {"id": "m", "content": [], "container": null}})).unwrap();
+        assert!(acc.container().is_none());
+        acc.apply(&json!({"type": "message_delta", "delta": {"stop_reason": "end_turn", "container": {"id": "container_1", "expires_at": "2026-11-22T10:00:00Z"}}})).unwrap();
+        assert_eq!(acc.container().unwrap()["id"], "container_1");
+    }
+
+    #[tokio::test]
+    async fn a_download_stops_at_its_cap() {
+        let (base, _) = keep_alive_server().await;
+        let c = Client::new(&base, "k").unwrap();
+        let none = CancellationToken::new();
+        let body = br#"{"data":[],"has_more":false}"#;
+        assert_eq!(c.download("/v1/files/file_a/content", body.len() as u64, &none).await.unwrap().as_deref(), Some(&body[..]));
+        assert_eq!(c.download("/v1/files/file_a/content", body.len() as u64 - 1, &none).await.unwrap(), None);
+        assert_eq!(c.get_json("/v1/files/file_a", &none).await.unwrap()["has_more"], false);
     }
 
     #[tokio::test]

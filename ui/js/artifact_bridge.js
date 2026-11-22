@@ -23,6 +23,19 @@ export function createConsent(ask) {
   };
 }
 
+/** window.claude.complete for a frame `info` ({ scope, title, ... }):
+ *  `check(info)` rejects where it can't work (the account's engine, other
+ *  providers), before `allowed(scope, title)` asks anyone; then `run(info, prompt)`. */
+export function createComplete({ check, allowed, run }) {
+  return async (info, args) => {
+    const [prompt] = Array.isArray(args) ? args : [];
+    if (typeof prompt !== 'string') throw new Error('window.claude.complete takes a prompt string.');
+    await check(info);
+    if (!(await allowed(info.scope, info.title))) throw new Error('The user did not allow this artifact to ask Claude.');
+    return run(info, prompt);
+  };
+}
+
 const MAX_ERROR = 1500;
 
 /** The i18n key and values of the message that asks Claude to fix

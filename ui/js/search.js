@@ -7,6 +7,8 @@ import { store, emit } from './store.js';
 import { $, esc, h, relTime } from './util.js';
 import * as workspace from './workspace.js';
 import { allCommands, handle as runSlash } from './slash.js';
+import { incognitoSupported, newIncognitoChat } from './home.js';
+import * as keymap from './keymap.js';
 
 let open = null;
 // result filters; "actions" is the ">" mode
@@ -67,7 +69,8 @@ export function openSearch() {
       draw();
       return;
     }
-    const hits = await call('search', { query: q }).catch(() => []);
+    // archived chats are out of the sidebar, not out of reach
+    const hits = await call('search_conversations', { query: q, includeArchived: true }).catch(() => []);
     items = hits.map((x) => ({
       title: x.title || t('untitled'),
       snippet: x.snippet ? esc(x.snippet).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>') : '',
@@ -140,6 +143,7 @@ async function actionItems(ctx) {
   const a = [
     { title: t('new_chat'), icon: 'plus', meta: 'Ctrl+Shift+O', run: () => emit('navigate', { name: 'new' }) },
     { title: t('pal_new_code'), icon: 'code', run: () => emit('navigate', { name: 'code' }) },
+    ...(incognitoSupported() ? [{ title: t('incog_new'), icon: 'eyeOff', meta: keymap.shown('incognito'), run: newIncognitoChat }] : []),
     { title: t('chats'), icon: 'chat', run: () => emit('navigate', { name: 'chats' }) },
     { title: t('projects'), icon: 'folder', run: () => emit('navigate', { name: 'projects' }) },
     { title: t('artifacts'), icon: 'layers', run: () => emit('navigate', { name: 'artifacts' }) },

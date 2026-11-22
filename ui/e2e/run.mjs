@@ -16,8 +16,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const config = path.resolve(process.argv[2] || path.join(root, 'dev', 'e2e.conf.json'));
 const CDP = 'http://127.0.0.1:9333';
-// a first build of the dev copy takes minutes
-const START_MS = 25 * 60_000;
+// a first build of the dev copy takes minutes; the CI job's own limit is 30
+const START_MS = 20 * 60_000;
 const logs = path.join(root, 'target', 'e2e');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -63,13 +63,26 @@ function stop() {
 }
 process.on('SIGINT', () => { stop(); process.exit(130); });
 
+/** The last `n` characters of the dev copy's output (CI shows nothing but this job's own log). */
+function tail(n) {
+  const text = fs.readFileSync(devLog, 'utf8');
+  return text.slice(-n).trim();
+}
+
 let code = 1;
 try {
   const t0 = Date.now();
+  let beat = t0;
   // the app's page (from the Tauri CLI's dev server), not the blank one the window starts with
   while (!(await targets())?.some((t) => t.type === 'page' && /^(https?|tauri):/.test(t.url))) {
     if (exited !== null) throw new Error(`the dev copy exited (${exited}) before its window was up; see ${devLog}`);
     if (Date.now() - t0 > START_MS) throw new Error(`the dev copy's window was not up after ${START_MS / 60_000} minutes; see ${devLog}`);
+    // a heartbeat, so a slow build can be told from a stuck start in the job's log
+    if (Date.now() - beat > 60_000) {
+      beat = Date.now();
+      const last = tail(300).split(/\r?\n/).pop();
+      console.log(`[${Math.round((beat - t0) / 1000)} s] waiting for the window; the dev copy's last line: ${last}`);
+    }
     await sleep(1000);
   }
   console.log(`The dev copy is up after ${Math.round((Date.now() - t0) / 1000)} s; running the tests.`);
@@ -78,6 +91,7 @@ try {
   code = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit', env: { ...process.env, CLAUDERUST_E2E_REQUIRED: '1' } }).status ?? 1;
 } catch (e) {
   console.error(e.message);
+  console.error(`--- the dev copy's output, last lines ---\n${tail(6000)}`);
 } finally {
   stop();
 }

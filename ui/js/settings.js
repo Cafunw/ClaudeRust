@@ -11,6 +11,11 @@ import { accountStatus, signInButton, planName, CC_SETUP_URL } from './account.j
 import { oauthControls } from './mcp_oauth_ui.js';
 import { errorNotice } from './neterr.js';
 import { connectorDialog, removeConnector } from './mcp_connector.js';
+import { diagnosticsReport } from './diagnostics.js';
+import { openDirectory } from './connector_directory.js';
+import { installExtension, installedExtension, extensionControls } from './extensions_page.js';
+import { renderSkills } from './skills_page.js';
+import { renderMemory } from './memory_page.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -18,6 +23,8 @@ const TABS = [
   ['account', 'key', 's_account'],
   ['import', 'download', 's_import'],
   ['features', 'sparkle', 's_features'],
+  ['memory', 'bulb', 'mem_title'],
+  ['skills', 'book', 'sk_title'],
   ['developer', 'plug', 's_developer'],
   ['code', 'terminal', 's_code'],
   ['desktop', 'monitor', 's_desktop'],
@@ -60,7 +67,7 @@ export function openSettings(tab = 'general') {
     nav.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
     body.innerHTML = '';
     body.scrollTop = 0;
-    (RENDER[id] || RENDER.general)(body, { onLeave: (f) => leaving.push(f) });
+    (RENDER[id] || RENDER.general)(body, { onLeave: (f) => leaving.push(f), close: () => m.close() });
   }
   // redraw for changes made elsewhere, but not under the user's cursor: a
   // field being typed in would lose its text
@@ -280,6 +287,9 @@ const RENDER = {
     body.appendChild(row(t('latex_toggle'), t('latex_toggle_d'), toggle('latex_enabled')));
     body.appendChild(row(t('websearch_default'), t('websearch_default_d'), toggle('web_search_default')));
     body.appendChild(row(t('thinking_default'), t('thinking_default_d'), toggle('thinking_default')));
+    // settings this build's backend may not have yet
+    if ('fast_mode' in store.settings) body.appendChild(row(t('set_fast_default'), t('set_fast_default_d'), toggle('fast_mode')));
+    if ('code_execution' in store.settings) body.appendChild(row(t('set_code_exec'), t('set_code_exec_d'), toggle('code_execution')));
     // past-chat search runs only in the API engine (claudecode.rs leaves it off)
     const onAccount = store.settings.chat_engine === 'claude-code' || (store.settings.chat_engine !== 'api' && !store.settings.has_api_key);
     body.appendChild(row(t('chat_search_toggle'), onAccount ? `${t('chat_search_toggle_d')} ${t('chat_search_cc_note')}` : t('chat_search_toggle_d'), toggle('chat_search')));
@@ -307,9 +317,15 @@ const RENDER = {
       // a config that can't be used starts no servers: say why
       if (status.config_problem) servers.appendChild(h(`<div class="notice error" style="margin:0 0 14px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
       if (!status.servers.length) servers.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('plug', 28)}<div style="margin-top:8px">${t('no_servers')}</div></div>`));
-      for (const s of status.servers) servers.appendChild(serverCard(s, draw, status));
+      for (const s of status.servers) {
+        const card = serverCard(s, draw, status);
+        const ext = installedExtension(status, s.name);
+        if (ext) card.querySelector('.head').after(extensionControls(ext, draw));
+        servers.appendChild(card);
+      }
       actions.innerHTML = '';
       actions.appendChild(button(t('cc_title'), 'primary', () => connectorDialog(status, draw)));
+      actions.appendChild(button(t('cd_title'), '', () => openDirectory(status, draw)));
       actions.appendChild(button(t('edit_config'), '', () => editConfig(status, draw)));
       actions.appendChild(button(t('open_file'), '', () => call('open_path', { path: status.config_path }).catch(errorToast)));
       actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
@@ -369,6 +385,10 @@ const RENDER = {
 
   import(body) { renderImport(body); },
 
+  memory: renderMemory,
+
+  skills: renderSkills,
+
   desktop(body) {
     body.appendChild(h(`<h3>${t('s_desktop')}</h3>`));
     body.appendChild(row(t('quick_entry'), t('quick_entry_d'), toggle('quick_entry_enabled')));
@@ -378,6 +398,8 @@ const RENDER = {
     body.appendChild(row(t('keep_tray'), t('keep_tray_d'), toggle('keep_in_tray')));
     body.appendChild(row(t('launch_login'), '', toggle('launch_at_login')));
     body.appendChild(row(t('notifications_toggle'), t('notifications_toggle_d'), toggle('notifications')));
+    // settings this build's backend may not have yet
+    if ('keep_awake' in store.settings) body.appendChild(row(t('set_keep_awake'), t('set_keep_awake_d'), toggle('keep_awake')));
 
     // Rendering: matters for Remote Desktop, VNC, VMs and some GPU drivers.
     const r = store.render || {};
@@ -397,7 +419,7 @@ const RENDER = {
     const mod = isMac ? '⌘' : 'Ctrl';
     body.appendChild(h(`<h3>${t('shortcuts_list')}</h3>`));
     body.appendChild(h(`<p class="muted small">${esc(t('kb_help'))}</p>`));
-    const names = { new_chat: t('sc_new'), palette: t('sc_search'), sidebar: t('sc_sidebar'), settings: t('sc_settings'), workspace: t('ws_toggle'), find: t('sc_find'), history: t('sc_history'), shortcuts: t('sc_sheet') };
+    const names = { new_chat: t('sc_new'), palette: t('sc_search'), sidebar: t('sc_sidebar'), settings: t('sc_settings'), workspace: t('ws_toggle'), find: t('sc_find'), history: t('sc_history'), shortcuts: t('sc_sheet'), incognito: t('sc_incognito') };
     const user = () => ({ ...(store.settings.keybindings || {}) });
     const draw = () => {
       stopRecording();
@@ -458,6 +480,16 @@ const RENDER = {
     const dl = h(`<button class="btn sm">${t('reveal')}</button>`);
     dl.onclick = () => call('open_path', { path: store.dataDir }).catch(errorToast);
     body.appendChild(row(t('data_location'), store.dataDir, dl));
+    const diag = h(`<div class="row-btns"><button class="btn sm" data-a="logs">${esc(t('diag_show_logs'))}</button><button class="btn sm" data-a="copy">${esc(t('diag_copy'))}</button></div>`);
+    const sep = store.dataDir.includes('\\') ? '\\' : '/';
+    diag.querySelector('[data-a=logs]').onclick = () => call('open_path', { path: `${store.dataDir}${sep}logs` }).catch(errorToast);
+    diag.querySelector('[data-a=copy]').onclick = async () => {
+      // the log is best effort: an empty one still gives the rest of the report
+      const log = await call('log_tail', { lines: 100 }).catch(() => '');
+      const text = diagnosticsReport({ version: store.version, platform: store.platform, userAgent: navigator.userAgent, settings: store.settings, servers: store.mcpServers, log });
+      try { await call('copy_text', { text }); toast(t('diag_copied')); } catch (e) { errorToast(e); }
+    };
+    body.appendChild(row(t('diag_title'), t('diag_d'), diag));
     const backup = h(`<div class="row-btns"><button class="btn sm" data-a="exp">${esc(t('settings_backup'))}</button><button class="btn sm" data-a="imp">${esc(t('settings_restore'))}</button></div>`);
     backup.querySelector('[data-a=exp]').onclick = async () => {
       try { await call('save_text_file', { name: 'clauderust-settings.json', content: await call('settings_export') }); } catch (e) { errorToast(e); }
@@ -533,55 +565,6 @@ function serverCard(s, redraw, status) {
     card.append(lb, logs);
   }
   return card;
-}
-
-async function installExtension(redraw) {
-  let path;
-  try { path = await call('pick_extension'); } catch (e) { errorToast(e); return; }
-  if (!path) return;
-  let info;
-  try { info = await call('extension_inspect', { path }); } catch (e) { errorToast(e); return; }
-  const spec = info.user_config || {};
-  const body = h(`<div><p style="margin:0 0 4px;font-weight:600">${esc(info.display_name || info.name)} <span class="muted small">${esc(info.version || '')}</span></p>
-    ${info.author ? `<p class="small muted" style="margin:0 0 10px">${esc(info.author)}</p>` : ''}
-    ${info.description ? `<p class="small" style="margin:0 0 14px">${esc(info.description)}</p>` : ''}</div>`);
-  const inputs = {};
-  for (const [key, def] of Object.entries(spec)) {
-    const type = def.type || 'string';
-    let el;
-    if (type === 'boolean') {
-      el = h(`<label class="switch"><input type="checkbox" ${def.default ? 'checked' : ''}><span class="track"></span></label>`);
-      inputs[key] = () => el.querySelector('input').checked;
-    } else {
-      const dflt = Array.isArray(def.default) ? def.default.join('\n') : (def.default ?? '');
-      el = def.multiple
-        ? h(`<textarea class="textarea mono" rows="3" placeholder="one per line"></textarea>`)
-        : h(`<input class="input ${def.sensitive ? 'mono' : ''}" type="${def.sensitive ? 'password' : type === 'number' ? 'number' : 'text'}">`);
-      el.value = dflt;
-      inputs[key] = () => {
-        const v = el.value.trim();
-        if (def.multiple) return v ? v.split('\n').map((x) => x.trim()).filter(Boolean) : null;
-        if (type === 'number') return v === '' ? null : Number(v);
-        return v === '' ? null : v;
-      };
-    }
-    const f = h(`<div class="field"><label class="label">${esc(def.title || key)}${def.required ? ' *' : ''}</label></div>`);
-    f.appendChild(el);
-    if (def.description) f.appendChild(h(`<div class="help">${esc(def.description)}</div>`));
-    body.appendChild(f);
-  }
-  const install = button(t('install'), 'primary', async () => {
-    const values = {};
-    for (const [k, get] of Object.entries(inputs)) values[k] = get();
-    install.disabled = true;
-    try {
-      const r = await call('extension_install', { path, values });
-      toast(t('extension_installed', { name: r.installed }));
-      m.close();
-      redraw(r);
-    } catch (e) { errorToast(e); install.disabled = false; }
-  });
-  const m = modal({ title: t('install_extension'), body, footer: [button(t('cancel'), '', () => m.close()), install] });
 }
 
 function editConfig(status, redraw) {

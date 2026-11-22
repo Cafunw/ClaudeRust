@@ -64,8 +64,46 @@ function promptArgs(p) {
   });
 }
 
-export function thinkingSupported(m) {
-  return ['disableable', 'between_tools', 'explicit', 'budget'].includes(m.thinking);
+// the refusals attachments.rs and office.rs name by kind (their English text is the fallback)
+const ATT_ERRORS = new Set(['image_unreadable', 'office_invalid', 'office_too_large', 'office_damaged', 'office_too_many_parts', 'office_empty', 'pdf_invalid',
+  'pdf_too_large', 'pdf_too_many_pages', 'pdf_too_many_pages_for_model', 'file_too_large', 'unsupported_file', 'message_too_large', 'not_a_file']);
+
+/** A refused attachment in the UI's language: `e` an error (or `{kind, message, name}`) for the file `name`; null when it isn't one. */
+export function attachmentError(e, name) {
+  const kind = e && e.kind;
+  if (!ATT_ERRORS.has(kind)) return null;
+  // (an Error's own name is "Error": only a plain {kind, message, name} carries the file's)
+  const n = name || (!(e instanceof Error) && e.name);
+  return t(`atterr_${kind}`, { name: n ? `“${n}”` : t('atterr_file') });
+}
+
+/** Say a failure: a refused attachment in the UI's language, anything else as before. */
+function attError(e, name) {
+  const said = typeof e === 'string' ? e : attachmentError(e, name);
+  if (said) toast(said, 'error'); else errorToast(e);
+}
+
+/** Whether the thinking switch can turn thinking off for `m`: in chats as `thinking_switch` says for their
+ *  engine; in a code session (`codeEngine`) the account's CLI only where `thinking_switch_cli` says it can. */
+export function thinkingSupported(m, codeEngine = null) {
+  const engineCan = codeEngine ? codeEngine !== 'claude-code' || m.thinking_switch_cli !== false : m.thinking_switch !== false;
+  return ['disableable', 'between_tools', 'explicit', 'budget'].includes(m.thinking) && engineCan;
+}
+
+/** Research mode runs in chats on the API engine (research.rs), as commands.rs picks the engine. */
+export function researchOffered(s = store.settings) {
+  return s.chat_engine === 'api' || (s.chat_engine !== 'claude-code' && !!s.has_api_key);
+}
+
+/** Fast mode's price, for a model that offers it ([input, output] per million, or just true); null otherwise. */
+const fastOf = (m) => m.fast_price || m.fast || null;
+
+/** The note beside the Fast switch: how much more it costs. */
+export function fastNote(m) {
+  const f = fastOf(m);
+  if (!f) return '';
+  const x = Array.isArray(f) && Array.isArray(m.price) && m.price[1] > 0 ? Math.round((f[1] / m.price[1]) * 10) / 10 : null;
+  return x ? t('fast_d', { x }) : t('fast_d_plain');
 }
 
 export function createComposer(opts) {
@@ -77,6 +115,8 @@ export function createComposer(opts) {
     // null until chosen: the CLI's settings decide
     ultracode: null,
     web_search: !!store.settings.web_search_default,
+    // Settings → "Fast mode for new chats"
+    fast: !!store.settings.fast_mode,
     style: 'normal',
     disabled_servers: [],
     permission_mode: store.settings.code_permission_mode || 'default',
@@ -123,6 +163,7 @@ export function createComposer(opts) {
   };
   // Ultracode is a Claude Code CLI option, for models that support it and while the CLI says it can be on
   // (it can't with Dynamic workflows off)
+  const canThink = (m) => thinkingSupported(m, mode === 'code' ? ((opts.context && opts.context()) || {}).engine || 'builtin' : null);
   const ultracodeOffered = (m) => mode === 'code' && ((opts.context && opts.context()) || {}).engine === 'claude-code' && !!m.ultracode && (ccInfoNow(m) || {}).ultracode_available !== false;
   // the choice made here, else whether the CLI's settings turn it on for every session
   const ultracodeOn = (m) => (st.ultracode ?? (ccInfoNow(m) || {}).ultracode) === true;
@@ -137,23 +178,23 @@ export function createComposer(opts) {
   function refreshBar() {
     const m = modelInfo(st.model);
     ccInfoNow(m); // asks the CLI now, so the model menu has its answer when it opens
-    const thinkOn = m.thinking === 'always_on' || (thinkingSupported(m) && st.thinking);
+    const thinkOn = m.thinking === 'always_on' || (canThink(m) && st.thinking);
     const ucOn = ultracodeOn(m) && ultracodeOffered(m);
     $('[data-act=model]', el).innerHTML = `${esc(m.name)}${thinkOn && m.thinking !== 'always_on' ? ` <span class="think-flag" title="${t('extended_thinking')}">${icon('bulb', 13)}</span>` : ''}${ucOn ? ` <span class="think-flag" title="${esc(t('ultracode_d'))}">${esc(t('ultracode'))}</span>` : ''} ${icon('chevDown', 14)}`;
     const toolsBtn = $('[data-act=tools]', el);
-    const anyOn = (mode === 'chat' && st.web_search) || (st.style && st.style !== 'normal');
+    const research = mode === 'chat' && st.research && researchOffered();
+    const anyOn = (mode === 'chat' && st.web_search) || (st.style && st.style !== 'normal') || research;
     toolsBtn.classList.toggle('on', !!anyOn);
     activeEl.innerHTML = '';
-    if (mode === 'chat' && st.web_search) {
-      const c = h(`<span class="active-tool">${icon('globe', 13)} ${t('web_search')} <button aria-label="off">${icon('x', 12)}</button></span>`);
-      c.querySelector('button').onclick = () => persist({ web_search: false });
+    const chip = (ic, label, off) => {
+      const c = h(`<span class="active-tool">${icon(ic, 13)} ${esc(label)} <button aria-label="${esc(t('turn_off_x', { x: label }))}">${icon('x', 12)}</button></span>`);
+      c.querySelector('button').onclick = () => persist(off);
       activeEl.appendChild(c);
-    }
-    if (st.style && st.style !== 'normal') {
-      const c = h(`<span class="active-tool">${icon('feather', 13)} ${esc(styleName(st.style))} <button aria-label="off">${icon('x', 12)}</button></span>`);
-      c.querySelector('button').onclick = () => persist({ style: 'normal' });
-      activeEl.appendChild(c);
-    }
+    };
+    if (research) chip('compass', t('research'), { research: false });
+    if (mode === 'chat' && st.web_search) chip('globe', t('web_search'), { web_search: false });
+    if (st.style && st.style !== 'normal') chip('feather', styleName(st.style), { style: 'normal' });
+    if (st.fast && fastOf(m)) chip('zap', t('fast_mode'), { fast: false });
     const mb = $('[data-act=mode]', el);
     if (mb) {
       mb.className = `mode-btn ${st.permission_mode}`;
@@ -211,7 +252,7 @@ export function createComposer(opts) {
       const chip = h(`<div class="att ${a.loading ? 'loading' : ''}" title="${esc(a.name)}">
         ${a.preview ? `<img class="thumb" src="${esc(a.preview)}" alt="">` : `<div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc(ext || 'TXT')}</div>`}
         <div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.loading ? '…' : attachmentSub(a)}</div></div>
-        <button class="x" aria-label="remove">${icon('x', 12)}</button></div>`);
+        <button class="x" aria-label="${esc(t('a11y_remove_x', { x: a.name }))}">${icon('x', 12)}</button></div>`);
       chip.querySelector('.x').onclick = () => {
         attachments = attachments.filter((x) => x !== a);
         if (a.id) call('unstage', { id: a.id }).catch(() => {});
@@ -231,10 +272,10 @@ export function createComposer(opts) {
       const r = await call('stage_paths', { paths });
       attachments = attachments.filter((a) => !placeholders.includes(a));
       attachments.push(...r.attachments);
-      for (const e of r.errors) toast(e, 'error');
+      for (const e of r.errors) attError(e);
     } catch (e) {
       attachments = attachments.filter((a) => !placeholders.includes(a));
-      errorToast(e);
+      attError(e, paths.length === 1 ? placeholders[0].name : null);
     }
     renderAttachments();
   }
@@ -257,7 +298,7 @@ export function createComposer(opts) {
       attachments[at] = a;
     } catch (e) {
       attachments = attachments.filter((x) => x !== ph);
-      errorToast(e);
+      attError(e, ph.name);
     }
     renderAttachments();
   }
@@ -315,7 +356,7 @@ export function createComposer(opts) {
       if (opts.draftKey) store.drafts.delete(opts.draftKey);
       return true;
     } catch (e) {
-      errorToast(e);
+      attError(e);
       return false;
     } finally {
       busy = false;
@@ -344,8 +385,8 @@ export function createComposer(opts) {
       });
     }
     const uc = ultracodeOffered(m);
-    if (thinkingSupported(m) || (m.efforts && m.efforts.length) || uc) items.push({ sep: true });
-    if (thinkingSupported(m)) {
+    if (canThink(m) || (m.efforts && m.efforts.length) || uc || fastOf(m)) items.push({ sep: true });
+    if (canThink(m)) {
       const row = h(`<label class="menu-item" style="cursor:pointer">${icon('bulb', 16)}<span class="mtext">${t('extended_thinking')}<span class="sub">${m.thinking === 'budget' ? '' : ''}</span></span><span class="switch"><input type="checkbox" ${st.thinking ? 'checked' : ''}><span class="track"></span></span></label>`);
       row.querySelector('input').addEventListener('change', (e) => { persist({ thinking: e.target.checked }); });
       items.push({ element: row });
@@ -362,6 +403,11 @@ export function createComposer(opts) {
     if (uc) {
       const row = h(`<label class="menu-item" style="cursor:pointer">${icon('sparkle', 16)}<span class="mtext">${esc(t('ultracode'))}<span class="sub">${esc(t('ultracode_d'))}</span></span><span class="switch"><input type="checkbox" ${ultracodeOn(m) ? 'checked' : ''}><span class="track"></span></span></label>`);
       row.querySelector('input').addEventListener('change', (e) => { persist({ ultracode: e.target.checked }); });
+      items.push({ element: row });
+    }
+    if (fastOf(m)) {
+      const row = h(`<label class="menu-item" style="cursor:pointer">${icon('zap', 16)}<span class="mtext">${esc(t('fast_mode'))}<span class="sub">${esc(fastNote(m))}</span></span><span class="switch"><input type="checkbox" ${st.fast ? 'checked' : ''}><span class="track"></span></span></label>`);
+      row.querySelector('input').addEventListener('change', (e) => { persist({ fast: e.target.checked }); });
       items.push({ element: row });
     }
     showMenu(anchor, items, { placement: 'top-end', width: 300 });
@@ -390,6 +436,11 @@ export function createComposer(opts) {
       const row = h(`<label class="menu-item" style="cursor:pointer">${icon('globe', 16)}<span class="mtext">${t('web_search')}</span><span class="switch"><input type="checkbox" ${st.web_search ? 'checked' : ''}><span class="track"></span></span></label>`);
       row.querySelector('input').addEventListener('change', (e) => persist({ web_search: e.target.checked }));
       items.push({ element: row });
+      if (researchOffered()) {
+        const rr = h(`<label class="menu-item" style="cursor:pointer">${icon('compass', 16)}<span class="mtext">${esc(t('research'))}<span class="sub">${esc(t('research_d'))}</span></span><span class="switch"><input type="checkbox" ${st.research ? 'checked' : ''}><span class="track"></span></span></label>`);
+        rr.querySelector('input').addEventListener('change', (e) => persist({ research: e.target.checked }));
+        items.push({ element: rr });
+      }
       items.push({ sep: true }, { header: t('style') });
       const styles = [['normal', t('style_normal')], ['concise', t('style_concise')], ['explanatory', t('style_explanatory')], ['formal', t('style_formal')],
         ...(store.settings.custom_styles || []).map((s) => [s.id, s.name])];
@@ -552,7 +603,7 @@ export function createComposer(opts) {
       if (!q) { q = h('<div class="queued"></div>'); el.insertBefore(q, el.firstChild); }
       q.innerHTML = '';
       list.forEach((item, i) => {
-        const c = h(`<div class="q-item">${icon('clock', 12)}<span class="ellipsis">${esc(item.text)}</span><button aria-label="remove">${icon('x', 11)}</button></div>`);
+        const c = h(`<div class="q-item">${icon('clock', 12)}<span class="ellipsis">${esc(item.text)}</span><button aria-label="${esc(t('a11y_remove_x', { x: item.text.slice(0, 40) }))}">${icon('x', 11)}</button></div>`);
         c.querySelector('button').onclick = () => onRemove(i);
         q.appendChild(c);
       });

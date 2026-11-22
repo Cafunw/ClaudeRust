@@ -386,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn a_server_on_the_old_transport_is_used_through_its_event_stream() {
         let (url, seen) = old_server(None).await;
-        let s = connect("old", &json!({"url": url}), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
+        let s = connect("old", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await.map_err(|(e, _)| e).unwrap();
         assert_eq!(s.info.lock()["serverInfo"]["name"], "old");
         assert_eq!(s.tools.lock().len(), 4);
         assert_eq!(call(&s, "echo", "hi").await.unwrap(), "s1:hi");
@@ -425,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn an_endpoint_on_another_origin_is_refused() {
         let (url, _) = old_server(Some("http://evil.example/messages")).await;
-        let e = connect("old", &json!({"url": url}), Default::default(), Default::default()).await.map(|_| ()).unwrap_err().0;
+        let e = connect("old", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await.map(|_| ()).unwrap_err().0;
         assert!(e.to_string().contains("another origin"), "{e}");
     }
 
@@ -457,7 +457,7 @@ mod tests {
             }
         });
         let conf = json!({"url": url, "headers": {"X-Api-Key": "secret"}});
-        assert!(connect("moved", &conf, Default::default(), Default::default()).await.is_err());
+        assert!(connect("moved", &conf, Default::default(), Default::default(), Default::default()).await.is_err());
         assert_eq!(reached.load(Ordering::SeqCst), 0);
     }
 
@@ -476,7 +476,7 @@ mod tests {
                 });
             }
         });
-        let e = connect("gone", &json!({"url": url}), Default::default(), Default::default()).await.map(|_| ()).unwrap_err().0;
+        let e = connect("gone", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await.map(|_| ()).unwrap_err().0;
         assert_eq!(e.to_string(), "MCP HTTP 404: not found");
     }
 }

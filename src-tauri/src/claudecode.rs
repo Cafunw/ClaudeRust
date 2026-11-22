@@ -660,6 +660,13 @@ fn first_input_line(message: &Value, files: Vec<Value>, history: &str, human: bo
     line
 }
 
+/// The `fast-mode-unavailable` event for a turn that asked for fast mode and runs without it, from the CLI's
+/// `init` line: off, and why (`fast_mode_disabled_reason`: no usage credits on the plan, the organisation
+/// turned it off...). The turn goes on at the standard speed; a cooldown after a rate limit isn't reported.
+fn fast_mode_notice(conv_id: &str, init: &Value) -> Option<Value> {
+    (init["fast_mode_state"] == "off").then(|| json!({"conversation_id": conv_id, "reason": init["fast_mode_disabled_reason"]}))
+}
+
 /// The CLI's `api_retry` line as the `generation-retry` event the API engine sends (engine.rs).
 fn retry_notice(conv_id: &str, ev: &Value) -> Value {
     let reason = match ev["error_status"].as_u64() {
@@ -743,19 +750,32 @@ fn is_resume_lost(text: &str) -> bool {
     text.contains("No conversation found with session ID") || text.contains("No message found with message.uuid")
 }
 
-/// The effort and ultracode flags for a turn. Only a level the model has goes
+/// The effort, ultracode, fast mode and thinking flags for a turn. Only a level the model has goes
 /// through: one left from another model is dropped, as the built-in engine does.
 /// Ultracode lives only as long as the CLI process (`--resume` doesn't bring it
 /// back), so a choice goes with every spawn: on, or off over settings that turn
 /// it on for every session; none leaves the CLI's own. Chats have no Workflow tool.
-pub fn cli_session_flags(options: &Value, model: &str, chat: bool, data_dir: &std::path::Path) -> Vec<String> {
+/// Fast mode is the CLI's only with `fastMode` in these flag settings (it says
+/// `sdk_opt_in_required` otherwise). The thinking switch turned off goes as
+/// `alwaysThinkingEnabled: false`, on the models where the CLI can turn it off.
+pub fn cli_session_flags(options: &Value, model: &str, chat: bool, thinking_default: bool, data_dir: &std::path::Path) -> Vec<String> {
     let m = crate::models::info(model);
     let mut out = vec![];
     if let Some(e) = options["effort"].as_str().filter(|e| m.efforts.contains(e)) {
         out.extend(["--effort".to_string(), e.to_string()]);
     }
+    let mut flags = serde_json::Map::new();
     if let Some(on) = options["ultracode"].as_bool().filter(|_| !chat && m.ultracode) {
-        out.extend(["--settings".to_string(), ultracode_settings_file(data_dir, on).display().to_string()]);
+        flags.insert("ultracode".into(), json!(on));
+    }
+    if options["fast"] == true && m.fast_price.is_some() {
+        flags.insert("fastMode".into(), json!(true));
+    }
+    if !options["thinking"].as_bool().unwrap_or(thinking_default) && m.thinking_switch_cli {
+        flags.insert("alwaysThinkingEnabled".into(), json!(false));
+    }
+    if !flags.is_empty() {
+        out.extend(["--settings".to_string(), flag_settings_file(data_dir, &Value::Object(flags)).display().to_string()]);
     }
     out
 }
@@ -784,8 +804,9 @@ fn chat_tools(tools: Vec<McpTool>) -> ChatTools {
 
 /// What a chat on the account switches on in the CLI besides its prompt: web search and fetch while the
 /// conversation's web search is on, and its MCP tools; none of Claude Code's own tools, skills, MCP servers,
-/// settings or hooks. The second list runs without asking: web search (as on the API), and the MCP tools set to
-/// Allow in Settings or allowed for this chat. Web fetch and the other MCP tools ask; Block ones aren't offered.
+/// settings or hooks. The second list runs without asking: web search and past-chat search (as on the API), and
+/// the MCP tools set to Allow in Settings or allowed for this chat. Web fetch and the other MCP tools ask; Block
+/// ones aren't offered.
 fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, Value>, chat_allowed: &[String]) -> (Vec<String>, Vec<String>) {
     let flags = ["--tools", if web { "WebSearch,WebFetch" } else { "" }, "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""]
         .iter()
@@ -793,7 +814,8 @@ fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, V
         .collect();
     let mut allowed: Vec<String> = if web { vec!["WebSearch".into()] } else { vec![] };
     for (s, n, t) in tools {
-        if policies.get(&format!("{}/{}", t.server, t.name)).and_then(Value::as_str) == Some("allow") || chat_allowed.contains(&t.api_name) {
+        let past_chats = crate::past_chats::NAMES.contains(&t.api_name.as_str());
+        if past_chats || policies.get(&format!("{}/{}", t.server, t.name)).and_then(Value::as_str) == Some("allow") || chat_allowed.contains(&t.api_name) {
             allowed.push(format!("mcp__{s}__{n}"));
         }
     }
@@ -814,12 +836,15 @@ fn sdk_mcp_reply(tools: &ChatTools, server: &str, msg: &Value) -> Option<Value> 
     Some(json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}))
 }
 
-/// A tool call the CLI sent to an SDK-hosted server, run on the app's MCP connection and answered in MCP's terms.
-async fn sdk_mcp_call(st: &AppState, tools: &ChatTools, server: &str, msg: &Value) -> Value {
+/// A tool call the CLI sent to an SDK-hosted server from `conv_id`'s turn, run on the app's MCP connection (past
+/// chats: by the app itself) and answered in MCP's terms.
+async fn sdk_mcp_call(st: &AppState, conv_id: &str, tools: &ChatTools, server: &str, msg: &Value) -> Value {
     let name = msg["params"]["name"].as_str().unwrap_or("");
+    let args = &msg["params"]["arguments"];
     let failed = |text: String| (vec![json!({"type": "text", "text": text})], true);
     let (blocks, is_error) = match tools.iter().find(|(s, n, _)| s == server && n == name) {
-        Some((.., t)) => st.mcp.call(&t.api_name, &msg["params"]["arguments"]).await.unwrap_or_else(|e| failed(format!("Error: {e}"))),
+        Some((.., t)) if crate::past_chats::NAMES.contains(&t.api_name.as_str()) => crate::past_chats::run(st, conv_id, &t.name, args),
+        Some((.., t)) => st.mcp.call(&t.api_name, args).await.unwrap_or_else(|e| failed(format!("Error: {e}"))),
         None => failed(format!("Tool {name} is not available.")),
     };
     json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"content": mcp_content(&blocks), "isError": is_error}})
@@ -840,12 +865,12 @@ fn mcp_response(request_id: &Value, reply: Value) -> Value {
     json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": {"mcp_response": reply}}})
 }
 
-/// The settings file that switches ultracode on or off. `--settings` takes a path or
+/// The settings file for a turn's flag settings, one per set of them (a handful). `--settings` takes a path or
 /// inline JSON; a path survives the quoting of cmd.exe and of a terminal
 /// line, which turn the JSON's quotes into something else.
-fn ultracode_settings_file(data_dir: &std::path::Path, on: bool) -> PathBuf {
-    let body = format!(r#"{{"ultracode":{on}}}"#);
-    let p = data_dir.join(if on { "claude-ultracode.json" } else { "claude-ultracode-off.json" });
+fn flag_settings_file(data_dir: &std::path::Path, flags: &Value) -> PathBuf {
+    let body = flags.to_string();
+    let p = data_dir.join(format!("claude-flags-{}.json", &crate::util::sha256_hex(body.as_bytes())[..12]));
     if std::fs::read_to_string(&p).map_or(true, |s| s.trim() != body) {
         let _ = std::fs::write(&p, body);
     }
@@ -1049,9 +1074,9 @@ async fn run_once(
         args.push("--fallback-model".into());
         args.push(fb);
     }
-    let flags = cli_session_flags(&conv.options, &conv.model, chat, &st.data_dir);
-    let ultracode_asked = conv.options["ultracode"] == true && flags.iter().any(|a| a == "--settings");
-    args.extend(flags);
+    args.extend(cli_session_flags(&conv.options, &conv.model, chat, !chat || settings.thinking_default, &st.data_dir));
+    let ultracode_asked = conv.options["ultracode"] == true && !chat && crate::models::info(&conv.model).ultracode;
+    let fast_asked = conv.options["fast"] == true && crate::models::info(&conv.model).fast_price.is_some();
     let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
     let mut sdk_tools: Arc<ChatTools> = Arc::default();
     let mut chat_allowed: Vec<String> = vec![];
@@ -1059,18 +1084,18 @@ async fn run_once(
     let mut project_files: Vec<Value> = vec![];
     let mut _prompt_file: Option<PromptFile> = None;
     if chat {
-        // our chat prompt (instructions, style, project knowledge) replaces the coding one.
-        // shortcut: no memory search in these chats (the API engine runs it in-process)
-        let mut s = settings.clone();
-        s.chat_search = false;
-        let rc = crate::engine::build_request_context(st, &conv, &s).await?;
+        // our chat prompt (instructions, style, project knowledge) replaces the coding one
+        let rc = crate::engine::build_request_context(st, &conv, &settings).await?;
         let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &rc.system) {
             Ok(f) => f,
             Err(e) => return fail(format!("Could not write the chat prompt (in {cwd}): {e}")),
         };
         project_files = rc.prefix_blocks;
+        // past chats while searching them is on, first (of two tools that end up with one name the first stays), then
         // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
-        let tools = chat_tools(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)).collect());
+        let mut all = if settings.chat_search && !conv.incognito { crate::past_chats::mcp_tools() } else { vec![] };
+        all.extend(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)));
+        let tools = chat_tools(all);
         let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
         let (f, allowed) = chat_flags(web, &tools, &settings.tool_policies, &opt_strs("allowed_tools"));
         args.extend(f);
@@ -1403,6 +1428,9 @@ async fn run_once(
             };
             let Ok(Some(line)) = line else { break };
             let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+            if let Some(info) = crate::usage::info_of(&ev) {
+                crate::usage::record(app, st, info);
+            }
             let top_level = ev["parent_tool_use_id"].is_null();
             match ev["type"].as_str().unwrap_or("") {
                 "system" => {
@@ -1411,6 +1439,9 @@ async fn run_once(
                             session_id = Some(sid.to_string());
                             let sid = sid.to_string();
                             update_conv_options(st, conv_id, |o| o["cc_session"] = json!(sid));
+                        }
+                        if let Some(n) = fast_mode_notice(conv_id, &ev).filter(|_| fast_asked) {
+                            let _ = app.emit("fast-mode-unavailable", n);
                         }
                     }
                     let sub = ev["subtype"].as_str().unwrap_or("");
@@ -1580,10 +1611,10 @@ async fn run_once(
                             Some(r) => write_line(&mut stdin, &mcp_response(&rid, r)).await,
                             // a tool call can take minutes: beside the loop, which keeps answering
                             None => {
-                                let (st, tools, tx, cancel) = (st.clone(), sdk_tools.clone(), out_tx.clone(), cancel.clone());
+                                let (st, tools, tx, cancel, conv_id) = (st.clone(), sdk_tools.clone(), out_tx.clone(), cancel.clone(), conv_id.to_string());
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        r = sdk_mcp_call(&st, &tools, &server, &msg) => { let _ = tx.send(mcp_response(&rid, r)); }
+                                        r = sdk_mcp_call(&st, &conv_id, &tools, &server, &msg) => { let _ = tx.send(mcp_response(&rid, r)); }
                                         _ = cancel.cancelled() => {}
                                     }
                                 });
@@ -1984,13 +2015,22 @@ mod tests {
     }
 
     #[test]
-    fn effort_and_ultracode_flags() {
-        let dir = std::env::temp_dir().join(format!("clauderust-flags-{}", std::process::id()));
+    fn effort_ultracode_fast_and_thinking_flags() {
+        let dir = std::env::temp_dir().join(format!("clauderust-flags-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let f = |o: Value, model: &str, chat: bool| cli_session_flags(&o, model, chat, &dir);
+        // a code session's thinking is on unless switched off, a chat's off (the defaults the engines use)
+        let f = |o: Value, model: &str, chat: bool| cli_session_flags(&o, model, chat, !chat, &dir);
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let (uc, off) = (dir.join("claude-ultracode.json").display().to_string(), dir.join("claude-ultracode-off.json").display().to_string());
-        let (uc, off) = (uc.as_str(), off.as_str());
+        // the flag settings a turn gets: none, or the file `--settings` points at, last
+        let settings = |args: &[String]| -> Value {
+            match args.iter().position(|a| a == "--settings") {
+                Some(i) => {
+                    assert_eq!(i + 2, args.len(), "{args:?}");
+                    serde_json::from_str(&std::fs::read_to_string(&args[i + 1]).unwrap()).unwrap()
+                }
+                None => Value::Null,
+            }
+        };
         assert_eq!(f(json!({"effort": "xhigh"}), "claude-opus-5-5", false), s(&["--effort", "xhigh"]));
         assert_eq!(f(json!({"effort": "low"}), "claude-opus-5-5", true), s(&["--effort", "low"]));
         // stale or unknown levels are dropped
@@ -1999,18 +2039,35 @@ mod tests {
         assert!(f(json!({"effort": "ultracode"}), "claude-opus-5-5", false).is_empty());
         assert!(f(json!({"effort": null}), "claude-opus-5-5", false).is_empty());
         // ultracode: code sessions on a model that has it, at the chosen level
-        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", false), s(&["--effort", "high", "--settings", uc]));
-        assert_eq!(f(json!({"ultracode": true}), "claude-sonnet-5-5", false), s(&["--settings", uc]));
+        let a = f(json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", false);
+        assert_eq!((&a[..2], settings(&a)), (&s(&["--effort", "high"])[..], json!({"ultracode": true})));
+        assert_eq!(settings(&f(json!({"ultracode": true}), "claude-sonnet-5-5", false)), json!({"ultracode": true}));
         // off is said too (settings can turn it on for every session); unset leaves the CLI's own
-        assert_eq!(f(json!({"effort": "high", "ultracode": false}), "claude-opus-5-5", false), s(&["--effort", "high", "--settings", off]));
-        assert_eq!(f(json!({"effort": "high", "ultracode": null}), "claude-opus-5-5", false), s(&["--effort", "high"]));
-        assert_eq!(f(json!({"effort": "high", "ultracode": "true"}), "claude-opus-5-5", false), s(&["--effort", "high"]));
-        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", true), s(&["--effort", "high"]));
-        assert_eq!(f(json!({"effort": "high", "ultracode": true}), "claude-sonnet-4-6", false), s(&["--effort", "high"]));
+        assert_eq!(settings(&f(json!({"effort": "high", "ultracode": false}), "claude-opus-5-5", false)), json!({"ultracode": false}));
+        for (o, model, chat) in [
+            (json!({"effort": "high", "ultracode": null}), "claude-opus-5-5", false), (json!({"effort": "high", "ultracode": "true"}), "claude-opus-5-5", false),
+            (json!({"effort": "high", "ultracode": true}), "claude-opus-5-5", true), (json!({"effort": "high", "ultracode": true}), "claude-sonnet-4-6", false),
+        ] {
+            assert_eq!(f(o, model, chat), s(&["--effort", "high"]));
+        }
         assert!(f(json!({"ultracode": true}), "default", false).is_empty());
-        // the files the flag points at switch ultracode on and off
-        assert_eq!(std::fs::read_to_string(uc).unwrap(), r#"{"ultracode":true}"#);
-        assert_eq!(std::fs::read_to_string(off).unwrap(), r#"{"ultracode":false}"#);
+        // fast mode: switched on, on a model that has it, in chats and code sessions alike
+        assert_eq!(settings(&f(json!({"fast": true}), "claude-opus-5-5", true)), json!({"fastMode": true}));
+        assert_eq!(settings(&f(json!({"fast": true, "ultracode": true}), "claude-opus-5-5", false)), json!({"fastMode": true, "ultracode": true}));
+        assert!(f(json!({"fast": true}), "claude-sonnet-5-5", false).is_empty());
+        assert!(f(json!({"fast": "yes"}), "claude-opus-5-5", false).is_empty());
+        // thinking off: only where the CLI can turn it off; the switch left alone keeps the engine's default
+        assert_eq!(settings(&f(json!({"thinking": false}), "claude-opus-5", false)), json!({"alwaysThinkingEnabled": false}));
+        assert_eq!(settings(&f(json!({}), "claude-opus-4-8", true)), json!({"alwaysThinkingEnabled": false}));
+        assert!(f(json!({}), "claude-opus-4-8", false).is_empty());
+        assert!(f(json!({"thinking": true}), "claude-opus-4-8", true).is_empty());
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"] {
+            assert!(f(json!({"thinking": false}), model, true).is_empty(), "{model}");
+        }
+        // one file per set of flag settings, kept as it is
+        let one = f(json!({"fast": true}), "claude-opus-5-5", true);
+        assert_eq!(one, f(json!({"fast": true}), "claude-opus-5-5", false));
+        assert_ne!(one, f(json!({"fast": true, "ultracode": false}), "claude-opus-5-5", false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2040,6 +2097,11 @@ mod tests {
         assert_eq!(flags, s(&["--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--setting-sources", ""]));
         assert_eq!(allowed, s(&["mcp__weather__get_forecast", "mcp__my_files__read_text"]));
         assert!(chat_flags(false, &vec![], &serde_json::Map::new(), &[]).1.is_empty());
+        // past-chat search runs without asking, as on the API; another server of that name asks as any other
+        let mut all = crate::past_chats::mcp_tools();
+        all.push(tool(crate::past_chats::SERVER, "query"));
+        let (_, allowed) = chat_flags(false, &chat_tools(all), &serde_json::Map::new(), &[]);
+        assert_eq!(allowed, s(&["mcp__past_chats__conversation_search", "mcp__past_chats__recent_chats"]));
     }
 
     #[test]
@@ -2068,14 +2130,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cr-cc-sdk-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
-        let tools = chat_tools(vec![tool("weather", "get_forecast")]);
+        let mut all = crate::past_chats::mcp_tools();
+        // a connected server that happens to have the name: its tools are its own
+        all.extend([tool("weather", "get_forecast"), tool(crate::past_chats::SERVER, "query")]);
+        let tools = chat_tools(all);
         // a tool the conversation has, whose server isn't connected (any more): the connection's error
-        let r = sdk_mcp_call(&st, &tools, "weather", &json!({"id": 7, "method": "tools/call", "params": {"name": "get_forecast", "arguments": {}}})).await;
-        assert_eq!((r["id"].as_i64(), r["result"]["isError"].as_bool()), (Some(7), Some(true)));
-        assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("Error: "), "{r}");
+        for (server, name) in [("weather", "get_forecast"), (crate::past_chats::SERVER, "query")] {
+            let r = sdk_mcp_call(&st, "c1", &tools, server, &json!({"id": 7, "method": "tools/call", "params": {"name": name, "arguments": {}}})).await;
+            assert_eq!((r["id"].as_i64(), r["result"]["isError"].as_bool()), (Some(7), Some(true)));
+            assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("Error: "), "{r}");
+        }
         // one it doesn't have (another server's, or Blocked): never called
-        let r = sdk_mcp_call(&st, &tools, "db", &json!({"id": 8, "params": {"name": "get_forecast"}})).await;
+        let r = sdk_mcp_call(&st, "c1", &tools, "db", &json!({"id": 8, "params": {"name": "get_forecast"}})).await;
         assert_eq!(r["result"], json!({"content": [{"type": "text", "text": "Tool get_forecast is not available."}], "isError": true}));
+        // past chats: the app answers (here: there are none)
+        let r = sdk_mcp_call(&st, "c1", &tools, crate::past_chats::SERVER, &json!({"id": 9, "params": {"name": "recent_chats", "arguments": {}}})).await;
+        assert_eq!(r["result"], json!({"content": [{"type": "text", "text": "No previous chats found."}], "isError": false}));
         // a title is asked of the CLI only for a conversation that runs on it (the call can go in a spawned task)
         let conv = st.db.conv_create("chat", &format!("{}llama3", crate::oai::PREFIX), None, None, &json!({})).unwrap();
         let ask = title(&st, &conv, "hi", "hello");
@@ -2092,7 +2162,9 @@ mod tests {
     async fn a_real_cli_connects_the_chat_tools() {
         crate::shellenv::ready().await;
         let cli = find_cli("").expect("Claude Code isn't installed");
-        let tools = chat_tools(vec![tool("weather", "get_forecast")]);
+        let mut all = crate::past_chats::mcp_tools();
+        all.push(tool("weather", "get_forecast"));
+        let tools = chat_tools(all);
         let (flags, allowed) = chat_flags(true, &tools, &serde_json::Map::new(), &[]);
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--permission-prompt-tool=stdio"].map(String::from).to_vec();
         args.extend(flags);
@@ -2105,7 +2177,7 @@ mod tests {
         }
         let mut child = cmd.spawn().unwrap();
         let mut stdin = child.stdin.take();
-        write_line(&mut stdin, &json!({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize", "sdkMcpServers": ["weather"]}})).await;
+        write_line(&mut stdin, &json!({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize", "sdkMcpServers": [crate::past_chats::SERVER, "weather"]}})).await;
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let status = tokio::time::timeout(Duration::from_secs(60), async {
             while let Ok(Some(l)) = lines.next_line().await {
@@ -2118,8 +2190,8 @@ mod tests {
                         write_line(&mut stdin, &json!({"type": "control_request", "request_id": "s", "request": {"subtype": "mcp_status"}})).await;
                     }
                 } else if ev["response"]["request_id"] == "s" {
-                    // the server is listed once its connection settles, a moment after the handshake
-                    if ev["response"]["response"]["mcpServers"].as_array().is_some_and(|a| !a.is_empty()) {
+                    // a server is listed once its connection settles, a moment after the handshake
+                    if ev["response"]["response"]["mcpServers"].as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|s| s["status"] == "connected")) {
                         return ev["response"]["response"].clone();
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2131,9 +2203,16 @@ mod tests {
         .await
         .expect("the CLI didn't report its MCP servers");
         stop_cli(child, stdin, true).await;
-        let server = &status["mcpServers"][0];
-        assert_eq!((server["name"].as_str(), server["status"].as_str(), server["transport"].as_str()), (Some("weather"), Some("connected"), Some("sdk")), "{status}");
-        assert_eq!(server["tools"][0]["name"], "get_forecast");
+        let mut servers: Vec<(String, Vec<String>)> = status["mcpServers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .inspect(|s| assert_eq!(s["transport"], "sdk", "{status}"))
+            .map(|s| (s["name"].as_str().unwrap().to_string(), s["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()))
+            .collect();
+        servers.sort();
+        let names = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(servers, [("past_chats".to_string(), names(&["conversation_search", "recent_chats"])), ("weather".to_string(), names(&["get_forecast"]))], "{status}");
     }
 
     /// The installed CLI, signed in, writes a title: one Haiku call of about $0.0002.
@@ -2427,6 +2506,19 @@ mod tests {
         assert_eq!(retry_notice("c1", &ev(json!(529)))["reason"], "overloaded");
         assert_eq!(retry_notice("c1", &ev(json!(503)))["reason"], "server_error");
         assert_eq!(retry_notice("c1", &ev(Value::Null))["reason"], "network");
+    }
+
+    #[test]
+    fn fast_mode_the_cli_cant_give_is_reported() {
+        // init lines as the installed CLI (2.1.326) printed them: without the opt-in, with it, on a model without it
+        let off = json!({"type": "system", "subtype": "init", "fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required"});
+        assert_eq!(fast_mode_notice("c1", &off), Some(json!({"conversation_id": "c1", "reason": "sdk_opt_in_required"})));
+        assert_eq!(fast_mode_notice("c1", &json!({"subtype": "init", "fast_mode_state": "off"})).unwrap()["reason"], Value::Null);
+        for state in ["on", "cooldown"] {
+            assert_eq!(fast_mode_notice("c1", &json!({"subtype": "init", "fast_mode_state": state})), None);
+        }
+        // an older CLI that doesn't say
+        assert_eq!(fast_mode_notice("c1", &json!({"subtype": "init"})), None);
     }
 
     /// Deleting a chat gives up the CLI sessions only it referred to, on every branch: a fork resuming one

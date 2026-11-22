@@ -13,6 +13,7 @@ export const DEFAULTS = {
   find: ['Mod+F'],
   history: ['Mod+R'],
   shortcuts: ['Mod+/'],
+  incognito: ['Mod+Shift+N'],
 };
 
 export const ACTIONS = Object.keys(DEFAULTS);

@@ -4,10 +4,14 @@ import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac } from './api.js';
 import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
-import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot } from './util.js';
+import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot, promptDialog, confirmDialog, modal, relTime } from './util.js';
 import { conversationMenu } from './chat.js';
 import { pendingUpdate, showUpdates } from './updates.js';
 import { tight, roomStep } from './sidebar_room.js';
+import { usageMeter, refreshLimits } from './usage_limits.js';
+import { groupConversations, dropTarget, draggable, loadSections, orgSupported, setSection, createSection, renameSection, deleteSection, listArchived, setArchived } from './sidebar_org.js';
+import { incognitoSupported, newIncognitoChat } from './home.js';
+import * as keymap from './keymap.js';
 
 const RECENT_LIMIT = 30;
 
@@ -63,7 +67,8 @@ function rememberRoute() {
 }
 
 let bound = false;
-const hiddenGroups = new Set();
+// (collapsed sections are remembered; the day groups only until a restart)
+const hiddenGroups = new Set(loadLocal().hiddenSections || []);
 const DAY = 864e5;
 
 /** Code sessions are listed by day, as in Claude Desktop. */
@@ -88,6 +93,8 @@ export function mountSidebar() {
     <div class="sidebar-scroll"></div>
     <div class="sidebar-bottom"><button class="user-card"></button></div>`;
   el.classList.toggle('collapsed', store.sidebarCollapsed);
+  $('.sidebar-bottom', el).prepend(usageMeter());
+  refreshLimits();
   $('.user-card', el).addEventListener('click', (e) => accountMenu(e.currentTarget));
   renderNav();
   renderUserCard();
@@ -188,6 +195,7 @@ function accountMenu(anchor) {
   showMenu(anchor, [
     { header: store.settings.full_name || displayName() || 'ClaudeRust' },
     ...(pendingUpdate() ? [{ label: t('upd_menu', { v: pendingUpdate().version }), icon: 'download', onClick: showUpdates }, { sep: true }] : []),
+    ...(incognitoSupported() ? [{ label: t('incog_new'), icon: 'eyeOff', right: keymap.shown('incognito'), onClick: newIncognitoChat }] : []),
     { label: t('settings'), icon: 'settings', right: isMac ? '⌘,' : 'Ctrl+,', onClick: () => emit('open-settings', 'general') },
     { label: t('language'), icon: 'lang', keepOpen: true, onClick: () => showMenu(anchor, LANGUAGES.map((l) => ({
       label: l.name, checked: (store.settings.language || 'auto') === l.id,
@@ -218,7 +226,10 @@ export async function refreshSidebar() {
   clearTimeout(soon);
   soon = null;
   try {
-    store.conversations = await call('list_conversations', {});
+    const [list, chats, codes] = await Promise.all([call('list_conversations', {}), loadSections('chat'), loadSections('code')]);
+    // (an incognito chat is never listed: the backend leaves it out, and so does this)
+    store.conversations = list.filter((c) => !c.incognito);
+    store.sections = { chat: chats || [], code: codes || [] };
     // turns already running (e.g. after the window was reloaded): the
     // running/finished events only cover turns that start from now on
     for (const c of store.conversations) if (c.running) store.running.add(c.id);
@@ -230,17 +241,21 @@ function chatLink(c) {
   const running = store.running.has(c.id);
   const waiting = [...store.permissions.values()].some((p) => p.conversation_id === c.id);
   const folder = c.kind === 'code' && c.cwd ? c.cwd.split(/[\\/]/).filter(Boolean).pop() || c.cwd : '';
-  const a = h(`<button class="chat-link ${folder ? 'two' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
+  const unread = !!c.unread && !running && !waiting;
+  const a = h(`<button class="chat-link ${folder ? 'two' : ''} ${unread ? 'unread' : ''}" data-id="${esc(c.id)}" ${folder ? `title="${esc(c.cwd)}"` : ''}>
     <span class="txt"><span class="title">${esc(c.title || (c.kind === 'code' ? t('untitled') : t('new_chat')))}</span>${folder ? `<span class="sub">${esc(folder)}</span>` : ''}</span>
-    ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : ''}
-    <span class="icon-btn sm more" role="button" aria-label="more">${icon('more', 16)}</span></button>`);
+    ${waiting ? `<span class="dot wait" title="${esc(t('sess_waiting'))}"></span>` : running ? `<span class="dot" title="${esc(t('sess_running'))}"></span>` : unread ? `<span class="dot unread" title="${esc(t('org_unread'))}"></span><span class="sr-only">${esc(t('org_unread'))}</span>` : ''}
+    <span class="icon-btn sm more" aria-hidden="true">${icon('more', 16)}</span></button>`);
+  // the menu: the ⋯ on hover, a right click, or the keyboard's menu key / Shift+F10
+  const menu = (anchor) => conversationMenu(anchor, c, { onChange: () => refreshSidebar() });
   a.addEventListener('click', (e) => {
-    if (e.target.closest('.more')) {
-      e.stopPropagation();
-      conversationMenu(e.target.closest('.more'), c, { onChange: () => refreshSidebar() });
-      return;
-    }
+    if (e.target.closest('.more')) { e.stopPropagation(); menu(e.target.closest('.more')); return; }
     emit('navigate', { name: 'chat', params: { id: c.id } });
+  });
+  a.addEventListener('contextmenu', (e) => { e.preventDefault(); menu(a); });
+  if (orgSupported()) draggable(a, (zone) => {
+    const to = dropTarget(c.section_id, zone);
+    if (to !== undefined) setSection(c.id, to).then(refreshSidebar, errorToast);
   });
   return a;
 }
@@ -251,20 +266,27 @@ function renderLists() {
   const code = store.appMode === 'code';
   // only this mode's conversations
   const convs = (store.conversations || []).filter((c) => (c.kind === 'code') === code);
-  const starred = convs.filter((c) => c.starred);
+  const sections = ((store.sections || {})[code ? 'code' : 'chat']) || [];
+  const g = groupConversations(convs, sections);
+  const { pinned, starred } = g;
+  const recents = g.recents.slice(0, RECENT_LIMIT);
   // drawn on every running-changed and after every answer: when the links
   // would come out the same, the ones shown stay (and keep hover and focus)
-  const shown = [...starred, ...convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT)];
+  const shown = [...pinned, ...g.sections.flatMap((s) => s.items), ...starred, ...recents];
   const waiting = new Set([...store.permissions.values()].map((p) => p.conversation_id));
-  const sig = snapshot([code, [...hiddenGroups].join(), currentLanguage(), shown, shown.map((c) => store.running.has(c.id)), shown.map((c) => waiting.has(c.id)), convs.length - starred.length > RECENT_LIMIT]);
+  const sig = snapshot([code, [...hiddenGroups].join(), currentLanguage(), orgSupported(), sections, shown, shown.map((c) => store.running.has(c.id)), shown.map((c) => waiting.has(c.id)), g.recents.length > RECENT_LIMIT]);
   if (sameSnapshot(box.__sig, sig)) { box.__sig = sig; highlight(); return; }
   box.__sig = sig;
   box.innerHTML = '';
+  if (pinned.length) {
+    box.appendChild(h(`<div class="section-title">${t('org_pinned')}</div>`));
+    pinned.forEach((c) => box.appendChild(chatLink(c)));
+  }
+  for (const { section, items } of g.sections) drawSection(box, section, items);
   if (starred.length) {
     box.appendChild(h(`<div class="section-title">${t('starred')}</div>`));
     starred.forEach((c) => box.appendChild(chatLink(c)));
   }
-  const recents = convs.filter((c) => !c.starred).slice(0, RECENT_LIMIT);
   if (recents.length) {
     const groups = new Map();
     for (const c of recents) {
@@ -274,7 +296,8 @@ function renderLists() {
     }
     for (const [k, items] of groups) {
       const hidden = hiddenGroups.has(k);
-      const head = h(`<button class="section-title ${hidden ? 'closed' : ''}">${esc(code ? t('grp_' + k) : t('recents'))}${icon('chevDown', 12)}</button>`);
+      // (a drop here takes a conversation out of its section)
+      const head = h(`<button class="section-title ${hidden ? 'closed' : ''}" data-drop="" aria-expanded="${!hidden}">${esc(code ? t('grp_' + k) : t('recents'))}${icon('chevDown', 12)}</button>`);
       head.onclick = () => { if (hidden) hiddenGroups.delete(k); else hiddenGroups.add(k); box.__sig = null; renderLists(); };
       box.appendChild(head);
       if (!hidden) items.forEach((c) => box.appendChild(chatLink(c)));
@@ -282,10 +305,82 @@ function renderLists() {
     const all = h(`<button class="view-all">${t('view_all')}</button>`);
     all.onclick = () => emit('navigate', { name: code ? 'sessions' : 'chats' });
     box.appendChild(all);
-  } else if (!starred.length) {
+  } else if (!starred.length && !pinned.length && !sections.length) {
     box.appendChild(h(`<div class="sidebar-empty muted small">${esc(code ? t('no_sessions') : t('no_chats'))}</div>`));
   }
+  if (orgSupported()) {
+    const row = h(`<div class="org-row"><button class="view-all" data-a="section">${icon('plus', 13)} ${esc(t('org_new_section'))}</button><button class="view-all" data-a="archived">${icon('archive', 13)} ${esc(t('org_archived'))}</button></div>`);
+    row.querySelector('[data-a=section]').onclick = () => newSection(code ? 'code' : 'chat');
+    row.querySelector('[data-a=archived]').onclick = () => showArchived(code ? 'code' : 'chat');
+    box.appendChild(row);
+  }
   highlight();
+}
+
+/** A section: its header (collapse, drop zone, menu) and its conversations. */
+function drawSection(box, s, items) {
+  const k = `section:${s.id}`;
+  const hidden = hiddenGroups.has(k);
+  const head = h(`<div class="section-title sec ${hidden ? 'closed' : ''}" data-drop="${esc(s.id)}"><button class="sec-toggle" aria-expanded="${!hidden}"><span class="ellipsis">${esc(s.name)}</span>${icon('chevDown', 12)}</button><button class="icon-btn sm sec-more" aria-label="${esc(t('org_section_menu', { name: s.name }))}">${icon('more', 14)}</button></div>`);
+  head.querySelector('.sec-toggle').onclick = () => { if (hidden) hiddenGroups.delete(k); else hiddenGroups.add(k); saveLocal({ hiddenSections: [...hiddenGroups].filter((x) => x.startsWith('section:')) }); renderAgain(); };
+  const more = head.querySelector('.sec-more');
+  more.onclick = () => showMenu(more, [
+    { label: t('rename'), icon: 'edit', onClick: async () => {
+      const v = await promptDialog(t('org_rename_section'), s.name);
+      if (v === null || !v.trim()) return;
+      await renameSection(s.id, v);
+      refreshSidebar();
+    } },
+    { label: t('org_delete_section'), icon: 'trash', danger: true, onClick: async () => {
+      if (!(await confirmDialog(t('org_delete_section_confirm', { name: s.name })))) return;
+      await deleteSection(s.id);
+      refreshSidebar();
+    } },
+  ], { width: 220 });
+  box.appendChild(head);
+  if (hidden) return;
+  if (!items.length) box.appendChild(h(`<div class="sidebar-empty muted small sec-empty" data-drop="${esc(s.id)}">${esc(t('org_section_empty'))}</div>`));
+  items.forEach((c) => box.appendChild(chatLink(c)));
+}
+
+function renderAgain() {
+  const box = $('#sidebar .sidebar-scroll');
+  if (box) box.__sig = null;
+  renderLists();
+}
+
+/** "New section…": named here, it's empty until a conversation is moved in. */
+export async function newSection(kind) {
+  const v = await promptDialog(t('org_new_section'), '', { placeholder: t('org_section_ph') });
+  if (v === null || !v.trim()) return null;
+  try {
+    const s = await createSection(kind, v);
+    await refreshSidebar();
+    return s;
+  } catch (e) { errorToast(e); return null; }
+}
+
+/** The archived conversations of `kind`: open one, or take it out of the archive. */
+async function showArchived(kind) {
+  let list;
+  try { list = await listArchived(kind); } catch (e) { errorToast(e); return; }
+  const body = h('<div class="archived-list"></div>');
+  const m = modal({ title: t('org_archived'), body });
+  const draw = () => {
+    body.innerHTML = list.length ? '' : `<p class="muted small">${esc(t('org_archived_none'))}</p>`;
+    for (const c of list) {
+      const row = h(`<div class="archived-row"><button class="archived-open ellipsis">${esc(c.title || t('untitled'))}<span class="muted small"> · ${esc(relTime(c.archived_at || c.updated_at))}</span></button><button class="btn sm">${esc(t('org_unarchive'))}</button></div>`);
+      row.querySelector('.archived-open').onclick = () => { m.close(); emit('navigate', { name: 'chat', params: { id: c.id } }); };
+      row.querySelector('.btn').onclick = async () => {
+        try { await setArchived(c.id, false); } catch (e) { errorToast(e); return; }
+        list = list.filter((x) => x !== c);
+        draw();
+        refreshSidebar();
+      };
+      body.appendChild(row);
+    }
+  };
+  draw();
 }
 
 function highlight() {

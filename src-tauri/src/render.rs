@@ -739,6 +739,11 @@ impl TurnBuilder {
                 _ => {}
             }
         }
+        // the files its code made (code_exec.rs), after what it said
+        if let Some(files) = m.meta["files"].as_array().filter(|f| !f.is_empty()) {
+            self.flush_text(ctx);
+            self.parts.push(json!({"kind": "files", "files": files}));
+        }
     }
 
     /// The finished turn, and the artifact versions counted up to its end.
@@ -1059,6 +1064,23 @@ mod tests {
         assert_eq!(two("builtin"), 1);
         assert_eq!(turns[1]["artifacts"][0]["version"], 1);
         assert_eq!(turns[1]["msg_ids"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn files_the_code_made_follow_the_answer() {
+        let (lt, st, mn) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg: None };
+        let files = json!([{"file_id": "file_1", "name": "q3.xlsx", "size": 2048, "path": "/d/q3.xlsx"}, {"file_id": "file_2", "name": "x.pdf", "error": "too_large"}]);
+        let path = vec![
+            msg("u1", "user", json!([{"type":"text","text":"make a sheet"}]), json!({})),
+            msg("a1", "assistant", json!([{"type":"text","text":"Here it is."},{"type":"text","text":" Enjoy."}]), json!({"files": files})),
+            msg("a2", "assistant", json!([{"type":"text","text":"Anything else?"}]), json!({"files": []})),
+        ];
+        let parts = build_turns(&path, &ctx, &mut ArtifactTracker::default())[1]["parts"].clone();
+        let kinds: Vec<&str> = parts.as_array().unwrap().iter().map(|p| p["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["text", "files", "text"], "no part for an empty list");
+        assert_eq!(parts[1]["files"], files);
+        assert_eq!(parts[0]["raw"], "Here it is. Enjoy.");
     }
 
     /// One render of a turn: the live state it is rendered with.

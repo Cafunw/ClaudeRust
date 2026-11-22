@@ -4,7 +4,8 @@
 //! are bounded, entry names are only looked up in the same zip, nothing
 //! nested is opened, and no entity but XML's own is expanded.
 
-use crate::error::{AppError, AppResult};
+use crate::attachments::refuse;
+use crate::error::AppResult;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
@@ -85,9 +86,9 @@ struct Package<'a> {
 
 impl<'a> Package<'a> {
     fn open(bytes: &'a [u8], what: &'static str, limit: u64) -> AppResult<Self> {
-        let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| AppError::msg(format!("Not a valid {what}: {e}")))?;
+        let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| refuse("office_invalid", format!("Not a valid {what}: {e}")))?;
         if zip.len() > MAX_ENTRIES {
-            return Err(AppError::msg(format!("This {what} has too many parts to read ({}).", zip.len())));
+            return Err(refuse("office_too_many_parts", format!("This {what} has too many parts to read ({}).", zip.len())));
         }
         Ok(Package { zip, what, limit, left: MAX_PACKAGE_BYTES })
     }
@@ -99,13 +100,13 @@ impl<'a> Package<'a> {
         let entry = match self.zip.by_name(name) {
             Ok(e) => e,
             Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-            Err(e) => return Err(AppError::msg(format!("Not a valid {what}: {e}"))),
+            Err(e) => return Err(refuse("office_invalid", format!("Not a valid {what}: {e}"))),
         };
         let mut buf = Vec::new();
         // the header's size is the file's word: only what inflates counts
-        entry.take(self.limit.min(self.left) + 1).read_to_end(&mut buf).map_err(|e| AppError::msg(format!("This {what} is damaged: {e}")))?;
+        entry.take(self.limit.min(self.left) + 1).read_to_end(&mut buf).map_err(|e| refuse("office_damaged", format!("This {what} is damaged: {e}")))?;
         if buf.len() as u64 > self.left {
-            return Err(AppError::msg(format!("This {what} is too large to read.")));
+            return Err(refuse("office_too_large", format!("This {what} is too large to read.")));
         }
         let cut = buf.len() as u64 > self.limit;
         buf.truncate(self.limit as usize);
@@ -117,7 +118,7 @@ impl<'a> Package<'a> {
     /// presentation's slides): each `tag` element's name and the path of
     /// the part its relationship points at.
     fn parts(&mut self, main: &str, tag: &str) -> AppResult<Vec<(String, String)>> {
-        let (xml, _) = self.part(main)?.ok_or_else(|| AppError::msg(format!("Not a valid {}: {main} is missing.", self.what)))?;
+        let (xml, _) = self.part(main)?.ok_or_else(|| refuse("office_invalid", format!("Not a valid {}: {main} is missing.", self.what)))?;
         let mut listed = vec![];
         walk(&xml, |t| {
             if let Tok::Open(n, a) = t {
@@ -257,7 +258,7 @@ impl Out {
     /// The text made from a `what`'s `parts`; an error when none was found.
     fn finish(mut self, what: &str, parts: &str) -> AppResult<String> {
         if self.text.is_empty() {
-            return Err(AppError::msg(format!("This {what} has no {parts} to read.")));
+            return Err(refuse("office_empty", format!("This {what} has no {parts} to read.")));
         }
         if self.full {
             self.text.push_str(&format!("[The rest of this file was left out: its text is over {} KB.]", MAX_TEXT / 1024));

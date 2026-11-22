@@ -1,0 +1,182 @@
+[
+  {
+    "name": "GitHub",
+    "url": "https://api.githubcopilot.com/mcp/",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "api.githubcopilot.com",
+    "docs_url": "https://github.com/github/github-mcp-server",
+    "description": {
+      "en": "Repositories, issues, pull requests and Actions. Signs in with GitHub, or takes a personal access token.",
+      "tr": "Depolar, issue'lar, pull request'ler ve Actions. GitHub ile oturum açar ya da kişisel erişim jetonu alır."
+    }
+  },
+  {
+    "name": "Linear",
+    "url": "https://mcp.linear.app/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.linear.app",
+    "docs_url": "https://linear.app/docs/mcp",
+    "description": {
+      "en": "Find, create and update issues, projects and comments in Linear.",
+      "tr": "Linear'da issue, proje ve yorumları bulur, oluşturur ve günceller."
+    }
+  },
+  {
+    "name": "Notion",
+    "url": "https://mcp.notion.com/mcp",
+    "auth": "oauth",
+    "category": "docs",
+    "domain": "mcp.notion.com",
+    "docs_url": "https://developers.notion.com/docs/get-started-with-mcp",
+    "description": {
+      "en": "Search, read and edit pages and databases in your Notion workspace.",
+      "tr": "Notion çalışma alanınızdaki sayfaları ve veritabanlarını arar, okur ve düzenler."
+    }
+  },
+  {
+    "name": "Sentry",
+    "url": "https://mcp.sentry.dev/mcp",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.sentry.dev",
+    "docs_url": "https://mcp.sentry.dev/",
+    "description": {
+      "en": "Errors, issues and performance data from your Sentry projects.",
+      "tr": "Sentry projelerinizdeki hatalar, sorunlar ve performans verileri."
+    }
+  },
+  {
+    "name": "Atlassian",
+    "url": "https://mcp.atlassian.com/v2/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.atlassian.com",
+    "docs_url": "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+    "description": {
+      "en": "Jira issues and Confluence pages, within the permissions you already have.",
+      "tr": "Mevcut izinleriniz dahilinde Jira issue'ları ve Confluence sayfaları."
+    }
+  },
+  {
+    "name": "Asana",
+    "url": "https://mcp.asana.com/v2/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.asana.com",
+    "docs_url": "https://developers.asana.com/docs/using-asanas-mcp-server",
+    "description": {
+      "en": "Tasks, projects and goals in your Asana workspace.",
+      "tr": "Asana çalışma alanınızdaki görevler, projeler ve hedefler."
+    }
+  },
+  {
+    "name": "Stripe",
+    "url": "https://mcp.stripe.com",
+    "auth": "oauth",
+    "category": "payments",
+    "domain": "mcp.stripe.com",
+    "docs_url": "https://docs.stripe.com/mcp",
+    "description": {
+      "en": "Customers, payments, subscriptions and the Stripe documentation. Can change data in your account.",
+      "tr": "Müşteriler, ödemeler, abonelikler ve Stripe belgeleri. Hesabınızdaki verileri değiştirebilir."
+    }
+  },
+  {
+    "name": "PayPal",
+    "url": "https://mcp.paypal.com/http",
+    "auth": "bearer",
+    "category": "payments",
+    "domain": "mcp.paypal.com",
+    "docs_url": "https://developer.paypal.com/tools/mcp-server/",
+    "description": {
+      "en": "Invoices, orders and transactions in PayPal, with your app's client credentials.",
+      "tr": "Uygulamanızın istemci kimlik bilgileriyle PayPal'daki faturalar, siparişler ve işlemler."
+    }
+  },
+  {
+    "name": "Intercom",
+    "url": "https://mcp.intercom.com/mcp",
+    "auth": "oauth",
+    "category": "support",
+    "domain": "mcp.intercom.com",
+    "docs_url": "https://developers.intercom.com/docs/guides/mcp",
+    "description": {
+      "en": "Conversations, contacts and tickets in Intercom (US-hosted workspaces).",
+      "tr": "Intercom'daki konuşmalar, kişiler ve talepler (ABD'de barındırılan çalışma alanları)."
+    }
+  },
+  {
+    "name": "Square",
+    "url": "https://mcp.squareup.com/mcp",
+    "auth": "oauth",
+    "category": "payments",
+    "domain": "mcp.squareup.com",
+    "docs_url": "https://developer.squareup.com/docs/mcp",
+    "description": {
+      "en": "Payments, orders, catalog and customers in your Square account (production data).",
+      "tr": "Square hesabınızdaki ödemeler, siparişler, katalog ve müşteriler (canlı veriler)."
+    }
+  },
+  {
+    "name": "Figma",
+    "url": "https://mcp.figma.com/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.figma.com",
+    "docs_url": "https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/",
+    "description": {
+      "en": "Design context from Figma files: frames, components and variables, for code.",
+      "tr": "Figma dosyalarından tasarım bağlamı: çerçeveler, bileşenler ve değişkenler, kod için."
+    }
+  },
+  {
+    "name": "Supabase",
+    "url": "https://mcp.supabase.com/mcp",
+    "auth": "oauth",
+    "category": "data",
+    "domain": "mcp.supabase.com",
+    "docs_url": "https://supabase.com/docs/guides/getting-started/mcp",
+    "description": {
+      "en": "Supabase projects: tables, SQL queries, migrations and logs. Can change your databases.",
+      "tr": "Supabase projeleri: tablolar, SQL sorguları, geçişler ve günlükler. Veritabanlarınızı değiştirebilir."
+    }
+  },
+  {
+    "name": "Neon",
+    "url": "https://mcp.neon.tech/mcp",
+    "auth": "oauth",
+    "category": "data",
+    "domain": "mcp.neon.tech",
+    "docs_url": "https://neon.com/docs/ai/neon-mcp-server",
+    "description": {
+      "en": "Neon Postgres projects, branches and SQL. Can change your databases.",
+      "tr": "Neon Postgres projeleri, dalları ve SQL. Veritabanlarınızı değiştirebilir."
+    }
+  },
+  {
+    "name": "Context7",
+    "url": "https://mcp.context7.com/mcp",
+    "auth": "none",
+    "category": "docs",
+    "domain": "mcp.context7.com",
+    "docs_url": "https://github.com/upstash/context7",
+    "description": {
+      "en": "Up-to-date documentation and code examples for libraries. An API key (optional) raises the rate limit.",
+      "tr": "Kütüphaneler için güncel belgeler ve kod örnekleri. İsteğe bağlı API anahtarı istek sınırını yükseltir."
+    }
+  },
+  {
+    "name": "DeepWiki",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "auth": "none",
+    "category": "docs",
+    "domain": "mcp.deepwiki.com",
+    "docs_url": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+    "description": {
+      "en": "Questions about public GitHub repositories, answered from their generated wikis.",
+      "tr": "Herkese açık GitHub depoları hakkındaki sorular, oluşturulmuş vikilerinden yanıtlanır."
+    }
+  }
+]

@@ -41,6 +41,12 @@ pub struct ModelInfo {
     pub vision: bool,
     /// Price per million tokens (input, output) for usage estimates.
     pub price: (f64, f64),
+    /// Fast mode's price per million tokens (input, output), on the models that have it (the API's
+    /// `speed: "fast"`, Claude Code's `fastMode`).
+    pub fast_price: Option<(f64, f64)>,
+    /// The thinking switch can turn thinking off on the account engine: Claude Code refuses to on the
+    /// models it marks as rejecting disabled thinking (Haiku 5.5 too, which the API lets turn it off).
+    pub thinking_switch_cli: bool,
     pub featured: bool,
     pub legacy: bool,
 }
@@ -65,6 +71,8 @@ fn base(id: &str, name: &str, desc: &str) -> ModelInfo {
         context: 1_000_000,
         vision: true,
         price: (5.0, 25.0),
+        fast_price: None,
+        thinking_switch_cli: false,
         featured: false,
         legacy: false,
     }
@@ -87,6 +95,7 @@ fn build_catalog() -> Vec<ModelInfo> {
     m.default_effort = Some("medium");
     m.fallbacks = true;
     m.price = (4.0, 20.0);
+    m.fast_price = Some((8.0, 40.0));
     m.featured = true;
     v.push(m);
 
@@ -108,6 +117,7 @@ fn build_catalog() -> Vec<ModelInfo> {
     let mut m = base("claude-fable-5-2", "Fable 5.2", "Most intelligent model for the hardest problems");
     m.fallbacks = true;
     m.price = (8.0, 40.0);
+    m.fast_price = Some((16.0, 80.0));
     m.featured = true;
     v.push(m);
 
@@ -180,8 +190,15 @@ fn build_catalog() -> Vec<ModelInfo> {
 
     for m in &mut v {
         m.ultracode = m.efforts.contains(&"xhigh");
+        m.thinking_switch_cli = cli_can_disable_thinking(&m.id, m.thinking);
     }
     v
+}
+
+/// What Claude Code 2.1's model table says: thinking can't be disabled where it is always on, on Sonnet 5.5
+/// (the CLI never sends `between_tools`) or on the Haiku 5 family.
+fn cli_can_disable_thinking(id: &str, thinking: Thinking) -> bool {
+    !matches!(thinking, Thinking::AlwaysOn | Thinking::BetweenTools) && !id.contains("haiku-5") && !id.contains("haiku-6")
 }
 
 /// Look up a model, falling back to family heuristics for ids we don't know yet.
@@ -217,6 +234,7 @@ pub fn info(id: &str) -> ModelInfo {
         m.default_effort = None;
     }
     m.ultracode = m.efforts.contains(&"xhigh");
+    m.thinking_switch_cli = cli_can_disable_thinking(&lower, m.thinking);
     m
 }
 
@@ -404,6 +422,24 @@ mod tests {
             ("claude-opus-4-5", false), ("claude-mythos-6", true), ("claude-3-opus", false), ("default", false),
         ] {
             assert_eq!(info(id).ultracode, on, "{id}");
+        }
+    }
+
+    #[test]
+    fn fast_mode_and_the_account_engines_thinking_switch() {
+        for (id, fast, cli_off) in [
+            ("claude-opus-5-5", Some((8.0, 40.0)), false), ("claude-fable-5-2", Some((16.0, 80.0)), false),
+            ("claude-sonnet-5-5", None, false), ("claude-haiku-5-5", None, false), ("claude-opus-5", None, true),
+            ("claude-sonnet-5", None, true), ("claude-opus-4-8", None, true), ("claude-sonnet-4-6", None, true),
+            ("claude-haiku-4-5", None, true), ("claude-fable-6", None, false), ("claude-haiku-6", None, false),
+            ("claude-sonnet-6", None, true), ("default", None, true),
+        ] {
+            let m = info(id);
+            assert_eq!((m.fast_price, m.thinking_switch_cli), (fast, cli_off), "{id}");
+        }
+        // fast mode costs twice the standard price
+        for m in catalog().into_iter().filter(|m| m.fast_price.is_some()) {
+            assert_eq!(m.fast_price, Some((m.price.0 * 2.0, m.price.1 * 2.0)), "{}", m.id);
         }
     }
 

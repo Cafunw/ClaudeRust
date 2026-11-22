@@ -80,6 +80,10 @@ pub fn forget(key: &str) {
     store::delete(key)
 }
 
+/// Whether the store keeps what it is given across restarts (not on Linux here, nor in tests).
+pub(crate) const STORE_PERSISTS: bool = cfg!(all(any(target_os = "macos", target_os = "windows"), not(test)));
+pub(crate) use store::{delete as secret_delete, get as secret_get, set as secret_set};
+
 #[cfg(all(any(target_os = "macos", target_os = "windows"), not(test)))]
 mod store {
     /// Windows keeps at most 2560 bytes per credential, and two JWTs can be

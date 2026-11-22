@@ -157,6 +157,7 @@ fn apply_settings_change(app: &AppHandle, st: &Arc<AppState>, old: &settings::Se
     if old.disabled_mcp_servers != new.disabled_mcp_servers {
         reload_mcp_in_background(app, st);
     }
+    crate::keepawake::apply(new);
 }
 
 #[tauri::command]
@@ -200,9 +201,20 @@ async fn models_view(st: &AppState) -> Value {
     let available: Option<Vec<String>> = api
         .as_ref()
         .map(|l| l.iter().filter_map(|m| m["id"].as_str().map(|s| s.to_string())).collect());
+    // chats on the account (as claudecode::uses_cli decides, short of looking for the CLI): there the thinking
+    // switch turns thinking off only on the models the CLI lets it
+    let cli_chats = {
+        let engine = st.settings.read().chat_engine.clone();
+        engine == "claude-code" || (engine != "api" && st.api_key.read().is_none())
+    };
+    let info_json = |m: &models::ModelInfo| {
+        let mut v = serde_json::to_value(m).unwrap_or(json!({}));
+        v["thinking_switch"] = json!(!cli_chats || m.thinking_switch_cli);
+        v
+    };
     for m in &catalog {
         let avail = available.as_ref().map(|a| a.contains(&m.id)).unwrap_or(true);
-        let mut v = serde_json::to_value(m).unwrap_or(json!({}));
+        let mut v = info_json(m);
         v["available"] = json!(avail);
         out.push(v);
     }
@@ -226,7 +238,7 @@ async fn models_view(st: &AppState) -> Value {
             if let Some(dn) = m["display_name"].as_str() {
                 info.name = dn.trim_start_matches("Claude ").to_string();
             }
-            let mut v = serde_json::to_value(&info).unwrap_or(json!({}));
+            let mut v = info_json(&info);
             v["available"] = json!(true);
             out.push(v);
         }
@@ -267,6 +279,7 @@ pub async fn list_conversations(state: St<'_>, kind: Option<String>, project_id:
                 "id": c.id, "kind": c.kind, "title": c.title, "model": c.model,
                 "project_id": c.project_id, "cwd": c.cwd, "starred": c.starred,
                 "created_at": c.created_at, "updated_at": c.updated_at,
+                "pinned_at": c.pinned_at, "archived_at": c.archived_at, "unread": c.unread, "section_id": c.section_id,
                 "running": running.contains(&c.id),
                 "engine": c.options["engine"],
                 "instructions": c.options["instructions"],
@@ -401,6 +414,9 @@ pub struct SendReq {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub edit: bool,
+    /// Research mode for this message (research.rs; chats on the API engine).
+    #[serde(default)]
+    pub research: bool,
 }
 
 #[tauri::command]
@@ -461,6 +477,7 @@ fn say_to_running_cli<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: 
         if req.text.trim().is_empty() && atts.is_empty() {
             return Err(AppError::msg("Message is empty."));
         }
+        attachments::check_message(&atts, &conv.model)?;
         let mut content: Vec<Value> = atts.iter().map(attachments::to_block).collect();
         if !req.text.trim().is_empty() {
             content.push(json!({"type": "text", "text": req.text}));
@@ -512,6 +529,7 @@ async fn send_into<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &cr
     if req.text.trim().is_empty() && atts.is_empty() {
         return Err(AppError::msg("Message is empty."));
     }
+    attachments::check_message(&atts, &conv.model)?;
     let mut content: Vec<Value> = atts.iter().map(attachments::to_block).collect();
     if !req.text.trim().is_empty() {
         content.push(json!({"type": "text", "text": req.text}));
@@ -590,6 +608,9 @@ async fn send_into<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv: &cr
         "attachments": atts.iter().map(attachments::display_meta).collect::<Vec<_>>(),
         "plan_mode": plan,
     });
+    if req.research {
+        meta["research"] = json!(true);
+    }
     // A /compact summary made at this point of the conversation applies to
     // the message that follows it.
     let pending = conv.options["pending_compact"].as_object().cloned();
@@ -761,6 +782,7 @@ pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> A
         let cleaned = tauri::async_runtime::spawn_blocking(move || -> AppResult<()> {
             let gone = crate::claudecode::unreferenced(&st2.db, sessions)?;
             crate::claudecode::remove_chat_files(&st2.data_dir, &id2, &gone);
+            crate::code_exec::remove_outputs(&st2.data_dir, &id2);
             Ok(())
         });
         if let Ok(Err(e)) = cleaned.await {
@@ -809,6 +831,9 @@ pub async fn export_conversation(state: St<'_>, id: String, format: String) -> A
 
 async fn export_conversation_inner(st: &AppState, id: &str, format: &str) -> AppResult<String> {
     let conv = st.db.conv_get(id)?;
+    if conv.incognito {
+        return Err(crate::memory_synth::coded("incognito_no_export", "An incognito chat isn't saved, so it can't be exported or printed."));
+    }
     let path = match &conv.current_leaf {
         Some(l) => st.db.path_to(l)?,
         None => vec![],
@@ -861,7 +886,11 @@ pub async fn stage_paths(state: St<'_>, paths: Vec<String>) -> AppResult<Value> 
                     out.push(serde_json::to_value(&a)?);
                     st.staged.lock().insert(a.id.clone(), a);
                 }
-                Err(e) => errors.push(e.to_string()),
+                // with its kind, which the composer says in the UI's language
+                Err(e) => {
+                    let name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().to_string());
+                    errors.push(json!({"kind": e.kind(), "message": e.to_string(), "name": name}));
+                }
             }
         }
         Ok(json!({"attachments": out, "errors": errors}))
@@ -1331,9 +1360,8 @@ pub async fn reveal_path(app: AppHandle, state: St<'_>, path: String) -> AppResu
     let st = state.inner().clone();
     let p = path.clone();
     tokio::task::spawn_blocking(move || {
-        let mut roots: Vec<String> = st.db.conv_list(None, None)?.into_iter().filter_map(|c| c.cwd).collect();
-        roots.sort();
-        roots.dedup();
+        // archived sessions' folders too
+        let roots = st.db.conv_cwds()?;
         crate::pathguard::revealable(&p, &st.data_dir, &st.mcp.config_path, &roots)
     })
     .await
@@ -1762,12 +1790,14 @@ pub async fn cc_open_in_terminal(state: St<'_>, conversation_id: String) -> AppR
     };
     let sid = crate::claudecode::latest_session(&path).ok_or_else(|| AppError::msg("This conversation has no Claude Code session yet: send a message first."))?;
     let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::msg("Claude Code isn't installed."))?;
-    // the session carries on as this window runs it: model, effort level and ultracode
+    // the session carries on as this window runs it: model, effort level, ultracode, fast mode and thinking
     let mut args = vec!["--resume".to_string(), sid];
     if !conv.model.trim().is_empty() && conv.model != "default" {
         args.extend(["--model".to_string(), conv.model.clone()]);
     }
-    args.extend(crate::claudecode::cli_session_flags(&conv.options, &conv.model, conv.kind != "code", &st.data_dir));
+    let chat = conv.kind != "code";
+    let thinking_default = !chat || st.settings.read().thinking_default;
+    args.extend(crate::claudecode::cli_session_flags(&conv.options, &conv.model, chat, thinking_default, &st.data_dir));
     crate::claudecode::open_in_terminal(Some(std::path::Path::new(&cwd)), &cli, &args)
 }
 
@@ -2392,6 +2422,7 @@ pub async fn run_routine(app: &AppHandle, st: &Arc<AppState>, r: &crate::routine
         attachment_ids: vec![],
         parent_id: None,
         edit: false,
+        research: false,
     };
     let v = send_message_inner(app, st.clone(), req).await?;
     let id = v["conversation_id"].as_str().unwrap_or_default().to_string();
@@ -2496,7 +2527,7 @@ pub async fn watch_start(app: AppHandle, state: St<'_>, conversation_id: String,
         let text = watch_fix_prompt(&summary);
         let (st2, app2, conv2) = (st_fix.clone(), app_fix.clone(), conv_fix.clone());
         tauri::async_runtime::spawn(async move {
-            let req = SendReq { conversation_id: Some(conv2), new_conversation: None, text, attachment_ids: vec![], parent_id: None, edit: false };
+            let req = SendReq { conversation_id: Some(conv2), new_conversation: None, text, attachment_ids: vec![], parent_id: None, edit: false, research: false };
             let _ = send_message_inner(&app2, st2, req).await;
         });
     });
@@ -2871,9 +2902,10 @@ pub async fn oai_refresh(state: St<'_>) -> AppResult<Value> {
 
 // ------------------------------------------------------------- usage overview
 
-/// Cost of one response's usage with a model's prices (USD).
+/// Cost of one response's usage with a model's prices (USD): its fast-mode prices when the usage says it ran fast.
 pub fn usage_cost(model: &str, u: &Value) -> f64 {
-    let p = models::info(model).price;
+    let m = models::info(model);
+    let p = m.fast_price.filter(|_| u["speed"] == "fast").unwrap_or(m.price);
     let g = |k: &str| u[k].as_u64().unwrap_or(0) as f64;
     (g("input_tokens") * p.0 + g("output_tokens") * p.1 + g("cache_read_input_tokens") * p.0 * 0.1 + g("cache_creation_input_tokens") * p.0 * 1.25) / 1_000_000.0
 }
@@ -2888,6 +2920,12 @@ pub fn answer_cost(model: &str, meta: &Value) -> f64 {
         return 0.0;
     }
     ["usage", "subagent_usage"].iter().filter(|k| meta[**k].is_object()).map(|k| usage_cost(model, &meta[*k])).sum()
+}
+
+/// The plan's usage limits as the account engine last reported them (usage.rs), or null before its first answer.
+#[tauri::command]
+pub fn usage_limits(state: St<'_>) -> Value {
+    state.usage_limits.lock().clone()
 }
 
 /// Tokens and cost across all conversations of the last `days` days.
@@ -2962,6 +3000,24 @@ fn usage_overview_of(st: &AppState, days: Option<u32>) -> AppResult<Value> {
 }
 
 #[cfg(test)]
+mod incognito_export_tests {
+    #[test]
+    fn an_incognito_chat_is_neither_exported_nor_printed() {
+        let dir = std::env::temp_dir().join(format!("cr-export-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = crate::state::AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let open = st.db.conv_create("chat", "m", None, None, &serde_json::json!({})).unwrap();
+        let hidden = st.db.conv_create("chat", "m", None, None, &serde_json::json!({"incognito": true})).unwrap();
+        for format in ["md", "json", "html"] {
+            assert!(tauri::async_runtime::block_on(super::export_conversation_inner(&st, &open.id, format)).is_ok());
+            let e = tauri::async_runtime::block_on(super::export_conversation_inner(&st, &hidden.id, format)).unwrap_err();
+            assert_eq!(e.kind(), "incognito_no_export", "{format}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
 mod usage_tests {
     #[test]
     fn cost_uses_model_prices() {
@@ -2971,6 +3027,13 @@ mod usage_tests {
         assert!((c - (p.0 + p.1)).abs() < 1e-9, "{c}");
         let cached = serde_json::json!({"cache_read_input_tokens": 1_000_000});
         assert!((super::usage_cost("claude-opus-5-5", &cached) - p.0 * 0.1).abs() < 1e-9);
+        // a fast answer at fast prices, on a model that has them; "standard" or no speed at the usual ones
+        let fast = serde_json::json!({"input_tokens": 1_000_000, "output_tokens": 1_000_000, "speed": "fast"});
+        assert!((super::usage_cost("claude-opus-5-5", &fast) - 2.0 * (p.0 + p.1)).abs() < 1e-9);
+        let standard = serde_json::json!({"input_tokens": 1_000_000, "output_tokens": 1_000_000, "speed": "standard"});
+        assert!((super::usage_cost("claude-opus-5-5", &standard) - (p.0 + p.1)).abs() < 1e-9);
+        let s = crate::models::info("claude-sonnet-5-5").price;
+        assert!((super::usage_cost("claude-sonnet-5-5", &fast) - (s.0 + s.1)).abs() < 1e-9);
     }
 
     #[test]

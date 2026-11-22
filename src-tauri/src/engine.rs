@@ -145,6 +145,18 @@ fn opt_bool(o: &Value, k: &str, default: bool) -> bool {
     o[k].as_bool().unwrap_or(default)
 }
 
+/// Code execution and file creation in this chat: the conversation's switch,
+/// else the setting (on by default; every current Claude model has the tool).
+fn code_execution_on(st: &AppState, conv: &Conversation, settings: &Settings) -> bool {
+    conv.kind != "code" && !conv.model.starts_with(crate::oai::PREFIX) && !st.degraded.load(Ordering::Relaxed) && opt_bool(&conv.options, "code_execution", settings.code_execution)
+}
+
+/// Fast mode for this conversation's requests (`options.fast`, which the composer sets
+/// and the account engine reads too), on a model that has it.
+fn fast_mode_on(model_id: &str, conv: &Conversation) -> bool {
+    models::info(model_id).fast_price.is_some() && conv.options["fast"] == true
+}
+
 fn opt_strs(o: &Value, k: &str) -> Vec<String> {
     o[k].as_array()
         .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
@@ -218,20 +230,40 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         if web {
             tools.extend(models::web_tools(&model));
         }
-        if settings.chat_search {
+        // (an incognito chat reads no other chats, as it is read by none)
+        if settings.chat_search && !conv.incognito {
             tools.extend(memory_tools(eager));
         }
+        if code_execution_on(st, conv, settings) {
+            tools.push(crate::code_exec::definition());
+        }
+        // a large project's text is searched, not sent whole (the Claude account's CLI and other endpoints have no such tools)
+        let searched = crate::project_search::too_large(&files) && !conv.model.starts_with(crate::oai::PREFIX) && !crate::claudecode::uses_cli(st, conv).await;
+        let inlined = if searched { &[][..] } else { &files[..] };
+        if searched {
+            tools.extend(crate::project_search::definitions(eager));
+        }
         let date = opts["date"].as_str().map(|s| s.to_string()).unwrap_or_else(today);
-        prompts::chat_system(&prompts::ChatPromptInput {
+        let system = prompts::chat_system(&prompts::ChatPromptInput {
             settings,
             date: &date,
             style: opts["style"].as_str().unwrap_or("normal"),
             project: project.as_ref(),
-            project_files: &files,
+            project_files: inlined,
             web_search: web,
-        })
+        });
+        if searched {
+            format!("{system}\n\n{}", crate::project_search::index_block(&files))
+        } else {
+            system
+        }
     };
     let system = match conversation_instructions(opts) {
+        Some(block) => format!("{system}\n\n{block}"),
+        None => system,
+    };
+    // chat memory (opt-in), fenced as data; the account engine's prompt file is this system prompt too
+    let system = match crate::memory_synth::memory_block(&st.db, settings, conv) {
         Some(block) => format!("{system}\n\n{block}"),
         None => system,
     };
@@ -273,91 +305,15 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
     })
 }
 
-pub const MEMORY_TOOLS: [&str; 2] = ["conversation_search", "recent_chats"];
-
+/// The past-chat tools (past_chats.rs) as this engine offers them.
 fn memory_tools(eager: bool) -> Vec<Value> {
-    let mut v = vec![
-        json!({
-            "name": "conversation_search",
-            "description": "Search the user's past conversations in this app by keywords. Use it when the user refers to something discussed before (for example \"as we discussed\", \"my project from last week\", \"what did you tell me about X\") or when earlier context would clearly help.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Keywords to search for (names, topics, distinctive words)."},
-                    "max_results": {"type": "integer", "description": "Maximum number of results (default 5, max 10)."}
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "recent_chats",
-            "description": "List the user's most recent conversations with an excerpt of how each started. Use it when the user asks about their recent or previous chats without giving specific keywords.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "n": {"type": "integer", "description": "How many chats to list (default 5, max 20)."}
-                }
-            }
-        }),
-    ];
+    let mut v = crate::past_chats::definitions();
     if eager {
         for t in v.iter_mut() {
             t["eager_input_streaming"] = json!(true);
         }
     }
     v
-}
-
-fn run_memory_tool(st: &AppState, conv_id: &str, name: &str, input: &Value) -> (Vec<Value>, bool) {
-    let fmt_date = |ms: i64| {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-            .unwrap_or_default()
-    };
-    if name == "recent_chats" {
-        let n = input["n"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
-        return match st.db.recent_with_first_message(conv_id, n) {
-            Ok(rows) if !rows.is_empty() => {
-                let mut out = String::new();
-                for (_, title, updated, first) in rows {
-                    let first_text = serde_json::from_str::<Value>(&first)
-                        .map(|v| render::plain_text(&v))
-                        .unwrap_or(first);
-                    out.push_str(&format!(
-                        "<chat title=\"{}\" updated=\"{}\">\n{}\n</chat>\n",
-                        if title.is_empty() { "Untitled" } else { &title },
-                        fmt_date(updated),
-                        crate::util::truncate_chars(first_text.trim(), 600)
-                    ));
-                }
-                (text_block(out), false)
-            }
-            Ok(_) => (text_block("No previous chats found."), false),
-            Err(e) => (text_block(e.to_string()), true),
-        };
-    }
-    let q = input["query"].as_str().unwrap_or("").trim();
-    if q.is_empty() {
-        return (text_block("query is required"), true);
-    }
-    let n = input["max_results"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
-    match st.db.search_messages(q, conv_id, n) {
-        Ok(rows) if !rows.is_empty() => {
-            let mut out = String::new();
-            for (_, title, at, role, text) in rows {
-                out.push_str(&format!(
-                    "<result chat=\"{}\" date=\"{}\" from=\"{}\">\n{}\n</result>\n",
-                    if title.is_empty() { "Untitled" } else { &title },
-                    fmt_date(at),
-                    if role == "user" { "user" } else { "assistant" },
-                    crate::util::truncate_chars(text.trim(), 1500)
-                ));
-            }
-            (text_block(out), false)
-        }
-        Ok(_) => (text_block(format!("No past conversations matched \"{q}\".")), false),
-        Err(e) => (text_block(e.to_string()), true),
-    }
 }
 
 pub fn today() -> String {
@@ -566,6 +522,12 @@ pub(crate) fn base_body(rc: &ReqCtx, settings: &Settings, conv: &Conversation, m
         body["fallbacks"] = json!("default");
         betas.push(FALLBACK_BETA.to_string());
     }
+    if rc.tools.iter().any(|t| t["name"] == crate::code_exec::TOOL_NAME) {
+        body["container"] = crate::code_exec::container(conv.options["container"]["id"].as_str());
+    }
+    if fast_mode_on(&rc.model_id, conv) {
+        body["speed"] = json!("fast");
+    }
     (body, betas)
 }
 
@@ -575,14 +537,21 @@ fn strip_optional(body: &mut Value, betas: &mut Vec<String>) {
         o.remove("cache_control");
         o.remove("fallbacks");
         o.remove("context_management");
+        o.remove("container");
     }
     if let Some(t) = body["thinking"].as_object_mut() {
         t.remove("display");
     }
     if let Some(tools) = body["tools"].as_array_mut() {
-        for t in tools {
+        tools.retain(|t| t["name"] != crate::code_exec::TOOL_NAME);
+        for t in tools.iter_mut() {
             if let Some(o) = t.as_object_mut() {
                 o.remove("eager_input_streaming");
+            }
+        }
+        if tools.is_empty() {
+            if let Some(o) = body.as_object_mut() {
+                o.remove("tools");
             }
         }
     }
@@ -619,8 +588,22 @@ where
     let mut tried_thinking = false;
     loop {
         match client.stream(body, betas, cancel, &mut *on_event).await {
+            // fast mode refused here, or out of capacity after the retries: at standard speed
+            Err(e) if body.get("speed").is_some() && (matches!(e.status(), 429 | 529) || (e.status() == 400 && e.to_string().to_lowercase().contains("speed"))) => {
+                log::warn!("fast mode unavailable ({e}); continuing at standard speed");
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("speed");
+                }
+            }
             Err(AppError::Api { status: 400, kind, message }) => {
                 let lower = message.to_lowercase();
+                // the conversation's container expired: a new one
+                if lower.contains("container") && body["container"].get("id").is_some() {
+                    if let Some(c) = body["container"].as_object_mut() {
+                        c.remove("id");
+                    }
+                    continue;
+                }
                 if !tried_thinking
                     && lower.contains("thinking")
                     && (lower.contains("prefix") || lower.contains("binding") || lower.contains("signature") || lower.contains("modified"))
@@ -629,7 +612,7 @@ where
                     strip_all_thinking(body);
                     continue;
                 }
-                let optional_terms = ["cache_control", "fallback", "eager_input_streaming", "display", "beta", "context_management", "extra inputs"];
+                let optional_terms = ["cache_control", "fallback", "eager_input_streaming", "display", "beta", "context_management", "extra inputs", "code_execution", "container", "skill"];
                 if !tried_optional && optional_terms.iter().any(|t| lower.contains(t)) {
                     tried_optional = true;
                     st.degraded.store(true, Ordering::Relaxed);
@@ -820,10 +803,15 @@ pub fn start_reserved<R: Runtime>(app: &AppHandle<R>, mut slot: RunSlot, parent_
             log::error!("generation failed: {e}");
         }
         emit_state(&app, &conv_id, false, err);
+        if !matches!(res, Err(AppError::Cancelled)) {
+            crate::sidebar_cmds::turn_finished(&st, &conv_id);
+        }
         emit_conv_updated(&app, &conv_id);
         notify_done(&app, &st, &conv_id, err.is_some());
         if res.is_ok() {
-            let needs_title = st.db.conv_get(&conv_id).map(|c| c.title.is_empty()).unwrap_or(false);
+            crate::memory_synth::after_turn(&st, &conv_id);
+            // an incognito chat gets no title: nothing names it, not even a notification
+            let needs_title = st.db.conv_get(&conv_id).map(|c| c.title.is_empty() && !c.incognito).unwrap_or(false);
             if needs_title {
                 generate_title(&app, &st, &conv_id).await;
             }
@@ -1034,6 +1022,8 @@ pub(crate) fn turn_budget(conv: &Conversation, settings: &Settings) -> f64 {
 }
 
 async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, mut parent: String, cancel: &CancellationToken) -> AppResult<()> {
+    // every engine's turn, to its end (an error, a panic or Stop included): the guard is dropped then
+    let _awake = crate::keepawake::acquire();
     checkpoint_turn(st, conv_id, &parent, cancel).await;
     auto_compact(app, st, conv_id, &parent, cancel).await;
     if cancel.is_cancelled() {
@@ -1041,6 +1031,8 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
     }
     {
         let conv = st.db.conv_get(conv_id)?;
+        // the folders MCP servers may work in: this turn's (every engine's)
+        st.mcp.set_roots(crate::mcp::session_roots(&conv)).await;
         if conv.model.starts_with(crate::oai::PREFIX) {
             return run_oai(app, st, conv_id, parent, cancel).await;
         }
@@ -1126,6 +1118,33 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
             }
         };
 
+        // Research: the agents' findings go into the request for the answer, which can't call tools
+        let mut research: Option<String> = None;
+        if steps == 1 && crate::research::asked(&conv, &path) {
+            let question = render::plain_text(&path[path.len() - 1].content);
+            match crate::research::gather(app, st, &client, &conv, &rc, &settings, &question, cancel).await {
+                Ok(f) => {
+                    turn_cost += f.spent;
+                    am.meta["research"] = f.meta;
+                    am.meta["subagent_usage"] = Value::Object(f.usage);
+                    // its thinking answers a request later turns don't repeat (the findings)
+                    am.meta["fingerprint"] = json!("research");
+                    crate::research::into_report(&mut body, &f.block);
+                    research = Some(f.block);
+                }
+                Err(e) => {
+                    if matches!(e, AppError::Cancelled) {
+                        am.meta["stopped"] = json!(true);
+                    } else {
+                        am.meta["error"] = serde_json::to_value(&e)?;
+                    }
+                    st.db.msg_update(&am_id, &am.content, &am.meta)?;
+                    renderer.emit(app, conv_id, &am, &live);
+                    return if matches!(e, AppError::Cancelled) { Ok(()) } else { Err(e) };
+                }
+            }
+        }
+
         // ---- stream (with pause_turn continuations)
         let started = Instant::now();
         let mut content: Vec<Value> = vec![];
@@ -1136,6 +1155,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
         let mut invalid_json: HashMap<String, String> = HashMap::new();
         let mut error: Option<AppError> = None;
         let mut continuations = 0;
+        let mut container: Option<Value> = None;
         let saves = PartialSaves::of(st.db.clone(), am_id.clone());
         loop {
             let base = content.clone();
@@ -1175,6 +1195,9 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                         if let Some((fb, b2, bt2)) = overload_switch(st, &conv, &settings, &path).await {
                             body = b2;
                             betas = bt2;
+                            if let Some(r) = &research {
+                                crate::research::into_report(&mut body, r);
+                            }
                             am.meta["overload_fallback"] = json!({"from": conv.model, "to": fb});
                             am.meta["model"] = json!(fb);
                             turn_model = Some(fb);
@@ -1193,6 +1216,9 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                             if let Some((fb, b2, bt2)) = overload_switch(st, &conv, &settings, &path).await {
                                 body = b2;
                                 betas = bt2;
+                                if let Some(r) = &research {
+                                    crate::research::into_report(&mut body, r);
+                                }
                                 am.meta["overload_fallback"] = json!({"from": conv.model, "to": fb});
                                 am.meta["model"] = json!(fb);
                                 turn_model = Some(fb);
@@ -1203,6 +1229,11 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                     content.extend(acc.content());
                     if let Some(m) = acc.model() {
                         model_used = Some(m);
+                    }
+                    // the code execution container: kept for the next requests (its files stay in it)
+                    if let (Some(c), Some(req)) = (acc.container(), body["container"].as_object_mut()) {
+                        req.insert("id".into(), c["id"].clone());
+                        container = Some(json!({"id": c["id"], "expires_at": c["expires_at"]}));
                     }
                     for (k, v) in acc.usage.iter() {
                         let prev = usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -1238,6 +1269,16 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
             }
         }
         saves.finish().await;
+        // a stored container the API refused (expired) is forgotten, or every request would ask for it first
+        let refused = body["container"].is_object() && body["container"].get("id").is_none() && conv.options["container"].is_object();
+        if container.is_some() || refused {
+            update_conv_options(st, conv_id, |o| o["container"] = container.unwrap_or(Value::Null));
+        }
+        let outputs = crate::code_exec::output_file_ids(&content);
+        if !outputs.is_empty() && !cancel.is_cancelled() {
+            let dir = crate::code_exec::outputs_dir(&st.data_dir, conv_id);
+            am.meta["files"] = Value::Array(crate::code_exec::save_outputs(&client, &dir, &outputs, cancel).await);
+        }
 
         // ---- persist
         am.content = Value::Array(content.clone());
@@ -1520,27 +1561,50 @@ pub(crate) fn all_tool_ids(content: &Value) -> HashSet<String> {
         .collect()
 }
 
+/// `a` as the gallery keeps it, its edits applied to the version in
+/// `versions` when it is an update (None when they don't apply); recorded there.
+fn resolve_artifact(versions: &mut HashMap<String, String>, mut a: crate::artifacts::ArtifactSpec) -> Option<crate::artifacts::ArtifactSpec> {
+    if !a.complete {
+        return None;
+    }
+    if a.update {
+        a.content = crate::artifacts::apply_update(versions.get(&a.identifier)?, &a.content).ok()?;
+    }
+    versions.insert(a.identifier.clone(), a.content.clone());
+    Some(a)
+}
+
+fn artifacts_of(text: &str) -> impl Iterator<Item = crate::artifacts::ArtifactSpec> {
+    crate::artifacts::split(text).into_iter().filter_map(|s| match s {
+        crate::artifacts::Segment::Artifact(a) => Some(a),
+        _ => None,
+    })
+}
+
 pub(crate) fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &str) {
-    use crate::artifacts::Segment;
-    for seg in crate::artifacts::split(text) {
-        if let Segment::Artifact(a) = seg {
-            // an update holds edits, not the artifact. shortcut: the gallery keeps the last full version; apply the edits here too (as artifact_update.js does) if it should show them
-            if !a.complete || a.update {
-                continue;
+    let found: Vec<_> = artifacts_of(text).collect();
+    // an update holds edits: the gallery shows them applied to the version before, on this branch
+    let mut versions = HashMap::new();
+    if found.iter().any(|a| a.update) {
+        for m in st.db.path_to(msg_id).unwrap_or_default().iter().filter(|m| m.role == "assistant" && m.id != msg_id) {
+            for a in artifacts_of(&render::plain_text(&m.content)) {
+                resolve_artifact(&mut versions, a);
             }
-            let _ = st.db.artifact_upsert(&crate::db::ArtifactRow {
-                id: new_id(),
-                conversation_id: conv_id.to_string(),
-                message_id: msg_id.to_string(),
-                identifier: a.identifier,
-                kind: a.kind,
-                title: a.title,
-                language: a.language,
-                content: a.content,
-                created_at: now_ms(),
-                conversation_title: None,
-            });
         }
+    }
+    for a in found.into_iter().filter_map(|a| resolve_artifact(&mut versions, a)) {
+        let _ = st.db.artifact_upsert(&crate::db::ArtifactRow {
+            id: new_id(),
+            conversation_id: conv_id.to_string(),
+            message_id: msg_id.to_string(),
+            identifier: a.identifier,
+            kind: a.kind,
+            title: a.title,
+            language: a.language,
+            content: a.content,
+            created_at: now_ms(),
+            conversation_title: None,
+        });
     }
 }
 
@@ -1755,8 +1819,17 @@ async fn execute_tool<R: Runtime>(
         return (content, out.is_error);
     }
 
-    if MEMORY_TOOLS.contains(&name) && conv.kind != "code" {
-        return run_memory_tool(st, conv_id, name, input);
+    if crate::past_chats::NAMES.contains(&name) && conv.kind != "code" {
+        return crate::past_chats::run(st, conv_id, name, input);
+    }
+
+    if let (true, Some(pid)) = (crate::project_search::is_tool(name), conv.project_id.clone()) {
+        // builds the project's index the first time: not on a runtime worker
+        let (db, name, input) = (st.db.clone(), name.to_string(), input.clone());
+        let (text, failed) = tokio::task::spawn_blocking(move || crate::project_search::run_tool(&db, &pid, &name, &input))
+            .await
+            .unwrap_or_else(|_| ("The project search failed.".into(), true));
+        return (text_block(text), failed);
     }
 
     // MCP tool
@@ -1928,16 +2001,47 @@ mod tests {
     }
 
     #[test]
-    fn the_gallery_keeps_full_versions_not_edits() {
+    fn the_gallery_shows_an_update_applied_to_the_version_before() {
         let st = test_state();
         let conv = st.db.conv_create("chat", "claude-opus-5-5", None, None, &json!({})).unwrap();
-        let m = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([]), meta: json!({}), created_at: 0 };
-        st.db.msg_insert(&m).unwrap();
-        let full = "<antArtifact identifier=\"a\" type=\"text/html\" title=\"A\">full</antArtifact>";
-        let edit = "<antArtifact identifier=\"a\" type=\"text/html\" title=\"A\" command=\"update\"><old_str>full</old_str><new_str>x</new_str></antArtifact>";
-        save_artifacts(&st, &conv.id, &m.id, &format!("{full}\n{edit}"));
-        let rows = st.db.artifact_list(10).unwrap();
-        assert_eq!(rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), ["full"]);
+        let art = |body: &str, update: bool| format!("<antArtifact identifier=\"a\" type=\"text/html\" title=\"A\"{}>{body}</antArtifact>", if update { " command=\"update\"" } else { "" });
+        let msg = |id: &str, parent: Option<&str>, text: &str| {
+            let m = Message { id: id.into(), conversation_id: conv.id.clone(), parent_id: parent.map(Into::into), role: "assistant".into(), content: json!([{"type": "text", "text": text}]), meta: json!({}), created_at: 0 };
+            st.db.msg_insert(&m).unwrap();
+            // the gallery tells versions apart by their time
+            std::thread::sleep(Duration::from_millis(3));
+            save_artifacts(&st, &conv.id, id, text);
+        };
+        let gallery = || st.db.artifact_list(10).unwrap().into_iter().map(|r| r.content).collect::<Vec<_>>();
+        // in the same message
+        msg("m1", None, &format!("{}\n{}", art("<p>full</p>", false), art("<old_str>full</old_str><new_str>one</new_str>", true)));
+        assert_eq!(gallery(), ["<p>one</p>"]);
+        // in a later message of the branch
+        msg("m2", Some("m1"), &art("<old_str>\none\n</old_str>\n<new_str>\ntwo\n</new_str>", true));
+        assert_eq!(gallery(), ["<p>two</p>"]);
+        // edits that don't apply leave the gallery as it was
+        msg("m3", Some("m2"), &art("<old_str>missing</old_str><new_str>x</new_str>", true));
+        assert_eq!(gallery(), ["<p>two</p>"]);
+    }
+
+    #[test]
+    fn fast_mode_and_code_execution_follow_the_conversation_then_the_setting() {
+        let st = test_state();
+        let s = Settings::default();
+        let conv = |kind: &str, model: &str, options: Value| Conversation { kind: kind.into(), model: model.into(), options, ..Default::default() };
+        assert!(!fast_mode_on("claude-opus-5-5", &conv("chat", "claude-opus-5-5", json!({}))), "off by default");
+        assert!(fast_mode_on("claude-opus-5-5", &conv("chat", "claude-opus-5-5", json!({"fast": true}))));
+        assert!(!fast_mode_on("claude-sonnet-5-5", &conv("chat", "claude-sonnet-5-5", json!({"fast": true}))), "a model without fast mode");
+        assert!(code_execution_on(&st, &conv("chat", "claude-opus-5-5", json!({})), &s), "on by default");
+        assert!(!code_execution_on(&st, &conv("chat", "claude-opus-5-5", json!({"code_execution": false})), &s));
+        assert!(!code_execution_on(&st, &conv("code", "claude-opus-5-5", json!({})), &s), "code sessions run code on this machine");
+        assert!(!code_execution_on(&st, &conv("chat", "oai:llama", json!({})), &s));
+        st.degraded.store(true, Ordering::Relaxed);
+        assert!(!code_execution_on(&st, &conv("chat", "claude-opus-5-5", json!({})), &s), "the endpoint refused it");
+        let off = Settings { code_execution: false, ..Settings::default() };
+        st.degraded.store(false, Ordering::Relaxed);
+        assert!(!code_execution_on(&st, &conv("chat", "claude-opus-5-5", json!({})), &off), "the setting off");
+        assert!(code_execution_on(&st, &conv("chat", "claude-opus-5-5", json!({"code_execution": true})), &off), "the conversation's switch first");
     }
 
     #[test]

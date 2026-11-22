@@ -53,6 +53,17 @@ pub struct Settings {
     pub chat_search: bool,
     /// Desktop notification when a response finishes in the background.
     pub notifications: bool,
+    /// Chat memory (opt-in): a fast model writes notes about the user from
+    /// their chats, and new chats get them (see memory_synth.rs).
+    pub memory_enabled: bool,
+    /// Each project keeps a memory of its own, written from its chats.
+    pub memory_project_scope: bool,
+    /// Projects whose chats are neither remembered nor given memory.
+    pub memory_excluded_projects: Vec<String>,
+    /// Fast mode switched on in new chats, on the models that have it (`options.fast`).
+    pub fast_mode: bool,
+    /// Code execution and file creation in chats on the API (code_exec.rs).
+    pub code_execution: bool,
 
     // Desktop
     pub quick_entry_enabled: bool,
@@ -63,6 +74,8 @@ pub struct Settings {
     pub launch_at_login: bool,
     /// Look for a newer version now and then (Settings → About).
     pub auto_update: bool,
+    /// Keep the computer awake while Claude works (a turn, a Claude Code workflow or a routine run).
+    pub keep_awake: bool,
 
     // Code
     pub code_permission_mode: String, // default | acceptEdits | plan | bypassPermissions
@@ -128,6 +141,11 @@ impl Default for Settings {
             send_on_enter: true,
             chat_search: true,
             notifications: true,
+            memory_enabled: false,
+            memory_project_scope: true,
+            memory_excluded_projects: vec![],
+            fast_mode: false,
+            code_execution: true,
             quick_entry_enabled: true,
             quick_entry_shortcut: if cfg!(target_os = "macos") {
                 "Alt+Space".into()
@@ -138,6 +156,7 @@ impl Default for Settings {
             hardware_acceleration: "auto".into(),
             launch_at_login: false,
             auto_update: true,
+            keep_awake: true,
             code_permission_mode: "default".into(),
             code_model: DEFAULT_MODEL.into(),
             bash_timeout_secs: 120,
@@ -181,6 +200,9 @@ const NOT_EXPORTED: &[&str] = &[
     "editor",
     "code_permission_mode",
     "tool_policies",
+    // nor turn on what reads the chats and spends on them (memory); project ids are this machine's
+    "memory_enabled",
+    "memory_excluded_projects",
 ];
 /// The installed app's identifier (`tauri.conf.json`).
 pub const PRODUCTION_ID: &str = "dev.clauderust.desktop";
@@ -393,7 +415,10 @@ mod tests {
         evil["editor"] = json!("python3");
         evil["code_permission_mode"] = json!("bypassPermissions");
         evil["tool_policies"] = json!({"Bash": "allow"});
+        evil["memory_enabled"] = json!(true);
         let r = here.imported(&evil).unwrap();
+        assert!(!r.memory_enabled, "memory is turned on here only");
+        assert!(!Settings::default().memory_enabled, "memory is opt-in");
         assert_eq!(r.base_url, here.base_url);
         assert_eq!(r.editor, here.editor);
         assert_eq!(r.code_permission_mode, here.code_permission_mode);

@@ -7,6 +7,7 @@ import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { call } from './api.js';
 import { esc, h, modal, button, toast, confirmDialog, errorToast } from './util.js';
+import { store } from './store.js';
 import { errorNotice } from './neterr.js';
 
 const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$|\.localhost$/;
@@ -25,14 +26,16 @@ export function connectorProblem(c, taken) {
 
 const authKey = (headers) => Object.keys(headers || {}).find((k) => k.toLowerCase() === 'authorization');
 
-/** The mcpServers entry for connector `c` ({url, token, clientId}), keeping
- *  what the entry it replaces (`old`) has besides: other headers, options. */
+/** The mcpServers entry for connector `c` ({url, token, keepToken, clientId}),
+ *  keeping what the entry it replaces (`old`) has besides: other headers,
+ *  options, and with `keepToken` its saved token (a reference to the
+ *  credential store, which mcp_save_config resolves; a new token goes there too). */
 export function connectorEntry(c, old = {}) {
   const e = { ...old, url: c.url.trim() };
   const headers = { ...(old.headers || {}) };
   const k = authKey(headers);
-  if (k) delete headers[k];
   const token = (c.token || '').trim();
+  if (k && (token || !c.keepToken)) delete headers[k];
   if (token) headers.Authorization = /^(bearer|basic)\s/i.test(token) ? token : `Bearer ${token}`;
   if (Object.keys(headers).length) e.headers = headers; else delete e.headers;
   const clientId = (c.clientId || '').trim();
@@ -42,7 +45,7 @@ export function connectorEntry(c, old = {}) {
   return e;
 }
 
-/** The token field's value for entry `e`: its Authorization header without "Bearer ". */
+/** Entry `e`'s Authorization header without "Bearer ": the dialog only asks whether there is one. */
 export function connectorToken(e) {
   const k = authKey(e.headers);
   return k ? String(e.headers[k]).replace(/^bearer\s+/i, '') : '';
@@ -51,21 +54,28 @@ export function connectorToken(e) {
 const configWith = (status, servers) => JSON.stringify({ ...(status.config || {}), mcpServers: servers }, null, 2);
 
 /** The dialog that adds a connector, or edits server `name`'s; `status` is
- *  mcp_status's reply and `redraw(status)` shows the servers again. */
-export function connectorDialog(status, redraw, name = null) {
+ *  mcp_status's reply and `redraw(status)` shows the servers again;
+ *  `preset` ({name, url}) fills a new one in (the connector directory). */
+export function connectorDialog(status, redraw, name = null, preset = null) {
   if (status.config_problem) { toast(t('cc_config_broken'), 'error'); return; }
   let servers = { ...((status.config || {}).mcpServers || {}) };
   let old = name ? servers[name] || {} : {};
+  // a saved token is never shown again: it's only replaced or removed
+  let keepToken = !!connectorToken(old);
   const body = h(`<div class="cc-form">
     <div class="field"><label class="label" for="cc-name">${esc(t('cc_name'))}</label><input class="input" id="cc-name" placeholder="${esc(t('cc_name_ph'))}"></div>
     <div class="field"><label class="label" for="cc-url">${esc(t('cc_url'))}</label><input class="input mono" id="cc-url" placeholder="https://example.com/mcp" spellcheck="false"></div>
-    <div class="field"><label class="label" for="cc-token">${esc(t('cc_token'))} <span class="muted">(${esc(t('optional'))})</span></label><input class="input mono" id="cc-token" type="password" autocomplete="off"><div class="help">${esc(t('cc_token_help'))}</div></div>
+    <div class="field"><label class="label" for="cc-token">${esc(t('cc_token'))} <span class="muted">(${esc(t('optional'))})</span></label><div class="row" style="gap:8px"><input class="input mono" id="cc-token" type="password" autocomplete="off" style="flex:1;min-width:0"><button class="btn sm ghost${keepToken ? '' : ' hidden'}" type="button" data-a="forget">${esc(t('cc_token_forget'))}</button></div>
+      <div class="help">${esc(t(['windows', 'macos'].includes(store.platform) ? 'cc_token_help_store' : 'cc_token_help_file'))}</div></div>
     <details class="help"><summary>${esc(t('advanced'))}</summary><div class="field" style="margin-top:10px"><label class="label" for="cc-client">${esc(t('cc_client_id'))}</label><input class="input mono" id="cc-client" spellcheck="false"><div class="help">${esc(t('cc_client_id_help'))}</div></div></details>
     <div class="cc-out" aria-live="polite"></div></div>`);
   const field = (id) => body.querySelector(`#cc-${id}`);
-  field('name').value = name || '';
-  field('url').value = old.url || '';
-  field('token').value = connectorToken(old);
+  field('name').value = name || (preset && preset.name) || '';
+  field('url').value = old.url || (preset && preset.url) || '';
+  const forget = body.querySelector('[data-a=forget]');
+  const showSaved = () => { field('token').placeholder = keepToken ? t('cc_token_saved') : ''; forget.classList.toggle('hidden', !keepToken); };
+  showSaved();
+  forget.onclick = () => { keepToken = false; field('token').value = ''; showSaved(); };
   field('client').value = (old.oauth && old.oauth.clientId) || '';
   const out = body.querySelector('.cc-out');
   const say = (el) => { out.replaceChildren(el); el.style.marginTop = '12px'; };
@@ -73,7 +83,7 @@ export function connectorDialog(status, redraw, name = null) {
 
   const save = button(t(name ? 'save' : 'cc_add'), 'primary', async () => {
     if (save.dataset.signin) return signIn();
-    const c = { name: field('name').value.trim(), url: field('url').value, token: field('token').value, clientId: field('client').value };
+    const c = { name: field('name').value.trim(), url: field('url').value, token: field('token').value, keepToken, clientId: field('client').value };
     const problem = connectorProblem(c, Object.keys(servers).filter((k) => k !== name));
     out.replaceChildren();
     if (problem) { say(h(`<div class="notice error">${icon('alert', 15)}<div class="grow small">${esc(t(problem))}</div></div>`)); return; }
@@ -84,12 +94,15 @@ export function connectorDialog(status, redraw, name = null) {
     save.textContent = t('connecting');
     let st;
     try { st = await call('mcp_save_config', { config: configWith(status, next) }); } catch (e) { say(errorNotice(e.message)); primary(t(name ? 'save' : 'cc_add')); return; }
-    // saved: from here on the dialog edits this server
-    status = st; servers = next; name = c.name; old = next[c.name];
+    // saved: from here on the dialog edits this server, as written (its token a reference now)
+    status = st; servers = { ...((st.config && st.config.mcpServers) || next) }; name = c.name; old = servers[c.name] || next[c.name];
+    keepToken = !!connectorToken(old);
+    field('token').value = '';
+    showSaved();
     redraw(st);
     const s = st.servers.find((x) => x.name === c.name) || {};
     if (s.status === 'needs_auth') {
-      say(h(`<p class="small" style="margin:0">${esc(t('cc_needs_signin', { name: c.name }))}</p>`));
+      say(h(`<p class="small" style="margin:0">${esc(t('cc_needs_signin_at', { name: c.name, domain: new URL(c.url.trim()).host }))}</p>`));
       save.dataset.signin = '1';
       primary(t('mcp_sign_in'));
     } else if (s.error) {

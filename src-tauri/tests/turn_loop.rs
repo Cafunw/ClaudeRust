@@ -44,6 +44,10 @@ impl Api {
         seen.iter().filter(|(p, b)| p == "/v1/messages" && b["stream"] == true).map(|(_, b)| b.clone()).collect()
     }
 
+    fn paths(&self) -> Vec<String> {
+        self.seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect()
+    }
+
     fn mcp_calls(&self) -> Vec<Value> {
         let seen = self.seen.lock().unwrap();
         seen.iter().filter(|(p, b)| p == "/mcp" && b["method"] == "tools/call").map(|(_, b)| b.clone()).collect()
@@ -98,7 +102,9 @@ async fn serve(mut s: tokio::net::TcpStream, script: &(dyn Fn(&Value) -> Reply +
     }
     let body: Value = serde_json::from_slice(&buf[head_end..head_end + len]).unwrap_or(Value::Null);
     seen.lock().unwrap().push((path.clone(), body.clone()));
-    let reply = if method != "POST" {
+    let reply = if method == "GET" && path.starts_with("/v1/files/") {
+        script(&json!({"get": path}))
+    } else if method != "POST" {
         Reply::Plain(405, vec![], String::new())
     } else if path == "/mcp" {
         mcp(&body)
@@ -197,7 +203,7 @@ fn stalled(body: &Value) -> Reply {
 
 type Events = Arc<Mutex<Vec<(String, Value)>>>;
 
-const EVENTS: [&str; 6] = ["generation-state", "turn", "permission-request", "permission-resolved", "conversation-updated", "generation-retry"];
+const EVENTS: [&str; 7] = ["generation-state", "turn", "permission-request", "permission-resolved", "conversation-updated", "generation-retry", "research-progress"];
 
 struct Harness {
     app: tauri::App<MockRuntime>,
@@ -255,6 +261,11 @@ impl Harness {
 
     /// Send `text` as the first message and start the turn.
     fn send(&self, text: &str) -> String {
+        self.send_with(text, json!({}))
+    }
+
+    /// The same with the message's `meta` (what the send request sets, as `research`).
+    fn send_with(&self, text: &str, meta: Value) -> String {
         let id = clauderust_lib::util::new_id();
         let m = Message {
             id: id.clone(),
@@ -262,7 +273,7 @@ impl Harness {
             parent_id: None,
             role: "user".into(),
             content: json!([{"type": "text", "text": text}]),
-            meta: json!({}),
+            meta,
             created_at: 1,
         };
         self.st.db.msg_insert(&m).unwrap();
@@ -657,5 +668,240 @@ fn an_api_error_is_stored_and_reported() {
         let a = &h.path()[1];
         assert_eq!(a.content, json!([]));
         assert_eq!(a.meta["error"], want);
+    });
+}
+
+/// A Files API file: its metadata and content.
+fn file_reply(get: &str) -> Reply {
+    let meta = |name: &str, size: u64| Reply::Plain(200, vec![], json!({"id": "f", "type": "file", "filename": name, "mime_type": "text/plain", "size_bytes": size, "downloadable": true}).to_string());
+    match get {
+        "/v1/files/file_ok" => meta("report.txt", 10),
+        "/v1/files/file_ok/content" => Reply::Plain(200, vec![], "hello file".into()),
+        "/v1/files/file_big" => meta("big.bin", 60 * 1024 * 1024),
+        "/v1/files/file_evil" => meta("../../evil.txt", 4),
+        _ => Reply::Plain(404, vec![], json!({"type": "error", "error": {"type": "not_found_error", "message": "no"}}).to_string()),
+    }
+}
+
+#[test]
+fn files_made_by_code_execution_are_downloaded_and_attached() {
+    block_on(async {
+        let api = api(|b| {
+            if let Some(get) = b["get"].as_str() {
+                return file_reply(get);
+            }
+            if b["container"]["id"] == "container_1" {
+                return Reply::Stream(reply(b, vec![text_block(0, &["Here is your report."])], "end_turn"));
+            }
+            let outputs: Vec<Value> = ["file_ok", "file_big", "file_evil", "file_../../x"].iter().map(|id| json!({"type": "bash_code_execution_output", "file_id": id})).collect();
+            Reply::Stream(vec![
+                message_start(b),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "bash_code_execution", "input": {}}}),
+                json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"command\": \"python make.py\"}"}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "content_block_start", "index": 1, "content_block": {"type": "bash_code_execution_tool_result", "tool_use_id": "srvtoolu_1",
+                    "content": {"type": "bash_code_execution_result", "stdout": "done", "stderr": "", "return_code": 0, "content": outputs}}}),
+                json!({"type": "content_block_stop", "index": 1}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "pause_turn", "container": {"id": "container_1", "expires_at": "2026-11-22T12:00:00Z"}}, "usage": {"output_tokens": 5}}),
+                json!({"type": "message_stop"}),
+            ])
+        })
+        .await;
+        let h = chat(&api);
+        h.send("Make me a report file");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        h.assert_reset();
+
+        let sent = api.streams();
+        assert_eq!(sent.len(), 2, "the paused turn is continued");
+        assert!(sent[0]["tools"].as_array().unwrap().iter().any(|t| t["type"] == "code_execution_20260521"), "{}", sent[0]["tools"]);
+        let skills: Vec<&str> = sent[0]["container"]["skills"].as_array().unwrap().iter().map(|s| s["skill_id"].as_str().unwrap()).collect();
+        assert_eq!(skills, ["xlsx", "pptx", "docx", "pdf"]);
+        assert!(sent[0]["container"].get("id").is_none(), "a new container");
+        assert_eq!(sent[1]["container"]["id"], "container_1", "the continuation runs in the same container");
+        assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["container"]["id"], "container_1", "kept for the next turn");
+
+        let a = &h.path()[1];
+        assert_eq!(a.content.as_array().unwrap().last().unwrap(), &json!({"type": "text", "text": "Here is your report."}));
+        let files = a.meta["files"].as_array().unwrap();
+        let dir = h.dir.0.join("outputs").join(&h.conv);
+        assert_eq!(files[0]["name"], "report.txt");
+        assert_eq!(files[0]["size"], 10);
+        assert_eq!(files[0]["path"], dir.join("report.txt").display().to_string());
+        assert_eq!(std::fs::read_to_string(dir.join("report.txt")).unwrap(), "hello file");
+        let refused: Vec<(&str, &str)> = files[1..].iter().map(|f| (f["name"].as_str().unwrap_or(""), f["error"].as_str().unwrap())).collect();
+        assert_eq!(refused, [("big.bin", "too_large"), ("../../evil.txt", "bad_name"), ("", "bad_id")]);
+        // refused files are never fetched, and nothing lands outside the conversation's folder
+        let paths = api.paths();
+        assert!(!paths.iter().any(|p| p.contains("file_big/content") || p.contains("file_evil/content") || p.contains("..")), "{paths:?}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(!h.dir.0.join("evil.txt").exists() && !h.dir.0.join("outputs").join("evil.txt").exists());
+    });
+}
+
+#[test]
+fn an_expired_container_is_replaced_and_forgotten() {
+    block_on(async {
+        let api = api(|b| {
+            if b["container"]["id"] == "container_old" {
+                return Reply::Plain(400, vec![], json!({"type": "error", "error": {"type": "invalid_request_error", "message": "container container_old has expired"}}).to_string());
+            }
+            Reply::Stream(reply(b, vec![text_block(0, &["Hello"])], "end_turn"))
+        })
+        .await;
+        let h = chat(&api);
+        h.st.db.conv_set_options(&h.conv, &json!({"container": {"id": "container_old"}})).unwrap();
+        h.send("Hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        let ids: Vec<Value> = api.streams().iter().map(|b| b["container"]["id"].clone()).collect();
+        assert_eq!(ids, [json!("container_old"), Value::Null]);
+        assert!(h.st.db.conv_get(&h.conv).unwrap().options["container"].is_null(), "not asked for again");
+        assert_eq!(h.path()[1].content, json!([{"type": "text", "text": "Hello"}]));
+        assert!(!h.st.degraded.load(Ordering::Relaxed), "code execution stays on");
+    });
+}
+
+#[test]
+fn a_research_turn_plans_searches_in_parallel_and_writes_a_cited_report() {
+    block_on(async {
+        let api = api(|b| {
+            let system = b["system"][0]["text"].as_str().unwrap_or("");
+            if system.starts_with("You plan web research") {
+                return Reply::Stream(reply(b, vec![text_block(0, &["1. Sub one\n2. Sub two"])], "end_turn"));
+            }
+            if system.starts_with("You are a research agent") {
+                let sub = b["messages"][0]["content"][0]["text"].as_str().unwrap();
+                let n = if sub.ends_with("Sub one") { 1 } else { 2 };
+                let url = format!("https://example.com/{n}");
+                return Reply::Stream(reply(b, vec![
+                    vec![
+                        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": format!("srvtoolu_{n}"), "name": "web_search", "input": {}}}),
+                        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json!({"query": format!("query {n}")}).to_string()}}),
+                        json!({"type": "content_block_stop", "index": 0}),
+                        json!({"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": format!("srvtoolu_{n}"),
+                            "content": [{"type": "web_search_result", "url": url, "title": format!("Page {n}")}]}}),
+                        json!({"type": "content_block_stop", "index": 1}),
+                        json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": "",
+                            "citations": [{"type": "web_search_result_location", "url": url, "title": format!("Page {n}"), "cited_text": "x"}]}}),
+                        json!({"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": format!("Finding {n}.")}}),
+                        json!({"type": "content_block_stop", "index": 2}),
+                    ],
+                ], "end_turn"));
+            }
+            Reply::Stream(reply(b, vec![text_block(0, &["Report: see [Page 1](https://example.com/1)."])], "end_turn"))
+        })
+        .await;
+        let h = chat(&api);
+        h.send_with("What happened?", json!({"research": true}));
+        assert_eq!(h.ended().await["error"], Value::Null);
+        h.assert_reset();
+
+        let sent = api.streams();
+        assert_eq!(sent.len(), 4, "a plan, two agents, the report");
+        let system = |b: &Value| b["system"][0]["text"].as_str().unwrap().to_string();
+        let agents: Vec<&Value> = sent.iter().filter(|b| system(b).starts_with("You are a research agent")).collect();
+        assert_eq!(agents.len(), 2);
+        for a in &agents {
+            let tools: Vec<&str> = a["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+            assert_eq!(tools, ["web_search", "web_fetch"], "web tools only");
+            assert!(a.get("container").is_none());
+        }
+        let report = sent.last().unwrap();
+        assert_eq!(report["tool_choice"], json!({"type": "none"}), "the report calls no tools");
+        let asked = report["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(asked[0]["text"], "What happened?");
+        let findings = asked.last().unwrap()["text"].as_str().unwrap();
+        for want in ["<research_findings>", "question=\"Sub one\"", "Finding 1.", "Finding 2.", "- Page 2: https://example.com/2", "Where sources disagree"] {
+            assert!(findings.contains(want), "{want} not in {findings}");
+        }
+
+        let a = &h.path()[1];
+        assert_eq!(a.content, json!([{"type": "text", "text": "Report: see [Page 1](https://example.com/1)."}]));
+        assert_eq!(a.meta["research"]["questions"], json!(["Sub one", "Sub two"]));
+        assert_eq!(a.meta["research"]["sources"], 2);
+        assert_eq!(a.meta["fingerprint"], "research");
+        assert!(a.meta["subagent_usage"]["input_tokens"].as_u64().unwrap() >= 30, "the plan's and agents' tokens: {}", a.meta["subagent_usage"]);
+        let progress = h.events("research-progress");
+        let phases: Vec<&str> = progress.iter().map(|p| p["phase"].as_str().unwrap()).collect();
+        assert_eq!(phases.first(), Some(&"planning"));
+        assert_eq!(phases.last(), Some(&"writing"));
+        assert!(progress.iter().any(|p| p["queries"].as_array().unwrap().iter().any(|q| q == "query 1")), "{progress:?}");
+        assert!(progress.iter().any(|p| p["done"] == 2 && p["total"] == 2));
+    });
+}
+
+#[test]
+fn stop_ends_a_research_turn_before_its_report() {
+    block_on(async {
+        let api = api(|b| match b["system"][0]["text"].as_str().unwrap_or("") {
+            s if s.starts_with("You plan web research") => Reply::Stream(reply(b, vec![text_block(0, &["Sub one"])], "end_turn")),
+            s if s.starts_with("You are a research agent") => stalled(b),
+            _ => Reply::Stream(reply(b, vec![text_block(0, &["Report"])], "end_turn")),
+        })
+        .await;
+        let h = chat(&api);
+        h.send_with("What happened?", json!({"research": true}));
+        until("the agent to start", || (api.streams().len() == 2).then_some(())).await;
+        engine::stop(&h.st, &h.conv);
+        assert_eq!(h.ended().await["error"], Value::Null, "Stop is not an error");
+        h.assert_reset();
+        assert_eq!(api.streams().len(), 2, "no report is asked for after Stop");
+        let a = &h.path()[1];
+        assert_eq!((a.meta["stopped"].clone(), a.content.clone()), (json!(true), json!([])));
+    });
+}
+
+#[test]
+fn fast_mode_falls_back_to_standard_speed() {
+    block_on(async {
+        let api = api(|b| {
+            if b["speed"] == "fast" {
+                return Reply::Plain(429, vec![("x-should-retry", "false")], json!({"type": "error", "error": {"type": "rate_limit_error", "message": "fast mode capacity"}}).to_string());
+            }
+            Reply::Stream(reply(b, vec![text_block(0, &["Hello"])], "end_turn"))
+        })
+        .await;
+        let h = chat(&api);
+        // the option the composer sets, which the account engine reads too
+        h.st.db.conv_set_options(&h.conv, &json!({"fast": true})).unwrap();
+        h.send("Hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        h.assert_reset();
+        let speeds: Vec<Value> = api.streams().iter().map(|b| b["speed"].clone()).collect();
+        assert_eq!(speeds, [json!("fast"), Value::Null]);
+        assert_eq!(h.path()[1].content, json!([{"type": "text", "text": "Hello"}]));
+    });
+}
+
+#[test]
+fn a_large_project_is_searched_through_a_tool() {
+    block_on(async {
+        let api = api(|b| {
+            let msgs = b["messages"].as_array().unwrap();
+            if let Some(r) = msgs.last().unwrap()["content"].as_array().unwrap().iter().find(|c| c["type"] == "tool_result") {
+                let text = r["content"][0]["text"].as_str().unwrap_or("").to_string();
+                return Reply::Stream(reply(b, vec![text_block(0, &[&text])], "end_turn"));
+            }
+            Reply::Stream(reply(b, vec![tool_block(0, "toolu_p", "project_knowledge_search", &json!({"query": "chloroplast"}))], "tool_use"))
+        })
+        .await;
+        let mut h = chat(&api);
+        let p = h.st.db.project_create("Biology", "").unwrap();
+        let mut text: String = (0..4000).map(|i| format!("Line {i} of ordinary filler text in the notes.\n")).collect();
+        text.push_str("Photosynthesis happens in the chloroplast.\n");
+        h.st.db
+            .project_file_add(&clauderust_lib::db::ProjectFile { id: "pf1".into(), project_id: p.id.clone(), name: "notes.md".into(), mime: "text/markdown".into(), size: text.len() as i64, kind: "text".into(), data: text, created_at: 1 })
+            .unwrap();
+        h.conv = h.st.db.conv_create("chat", "claude-opus-5-5", Some(&p.id), None, &json!({})).unwrap().id;
+        h.st.db.conv_set_title(&h.conv, "Test").unwrap();
+        h.send("Where does photosynthesis happen?");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        let sent = api.streams();
+        let system = sent[0]["system"][0]["text"].as_str().unwrap();
+        assert!(system.contains("<project_knowledge_index>") && system.contains("- notes.md ("), "{}", &system[system.len().saturating_sub(800)..]);
+        assert!(!system.contains("Line 3999 of ordinary filler"), "the files are not sent whole");
+        assert!(sent[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "project_knowledge_search"));
+        let answer = h.path().last().unwrap().content[0]["text"].as_str().unwrap().to_string();
+        assert!(answer.starts_with("<passage file=\"notes.md\"") && answer.contains("Photosynthesis happens in the chloroplast."), "{answer}");
     });
 }

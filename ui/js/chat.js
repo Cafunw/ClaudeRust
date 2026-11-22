@@ -7,15 +7,22 @@ import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
 import { t, tOr, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
-import { store, emit, on as onUi, modelInfo, displayName } from './store.js';
+import { store, emit, on as onUi, modelInfo, displayName, saveLocal } from './store.js';
 import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot, scrollBehavior } from './util.js';
-import { createComposer } from './composer.js';
-import { renderParts, turnPlainText, copyText, unifiedDiffHtml } from './parts.js';
+import { createComposer, researchOffered } from './composer.js';
+import { renderParts, turnPlainText, copyText, unifiedDiffHtml, errorMessage } from './parts.js';
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
+import { forgetConversation } from './artifact_storage.js';
 import { PAGE_TURNS, pageStart, parked } from './turnwindow.js';
 import { retryLabel } from './retry_ui.js';
+import { announce, streamAnnouncer } from './a11y.js';
+import { speechText, readAloud, readingKey, stopReading, readAloudAvailable, onVoicesReady } from './readaloud.js';
+import { limitBanner } from './usage_limits.js';
+import { researchLine, researchQuery } from './research_ui.js';
+import { orgSupported, setPinned, setUnread, setSection, setArchived, opened } from './sidebar_org.js';
+import { newSection } from './sidebar.js';
 
 let cur = null;
 
@@ -31,10 +38,29 @@ function composerInitial(conv) {
     effort: o.effort || null,
     ultracode: o.ultracode ?? null,
     web_search: o.web_search ?? false,
+    fast: o.fast ?? false,
+    research: o.research ?? false,
     style: o.style || 'normal',
     disabled_servers: o.disabled_servers || [],
     permission_mode: o.permission_mode || store.settings.code_permission_mode || 'default',
   };
+}
+
+/** An incognito chat: not listed, searched or remembered, and gone once closed.
+ *  (The backend's flag, not the option asked for: a build without incognito keeps the chat.) */
+export const isIncognito = (c) => !!c && c.incognito === true;
+
+export function incognitoBanner() {
+  return h(`<div class="incognito-banner" role="note">${icon('eyeOff', 15)}<span>${esc(t('incog_banner'))}</span></div>`);
+}
+
+/** Gone for good (incognito.rs: as a delete, which also stops its turn and removes its CLI transcript). */
+function discardIncognito(id) {
+  workspace.disposeConversation(id);
+  store.drafts.delete(id);
+  // what its artifacts stored (window.storage) goes too
+  try { forgetConversation(localStorage, id); } catch { /* no storage here */ }
+  call('close_incognito', { id }).catch(() => {});
 }
 
 // the latest open request wins: a slow load of a big conversation must not
@@ -69,12 +95,19 @@ export async function openConversation(id, { focus = true } = {}) {
   const conv = data.conversation;
   store.codeRoot = conv.kind === 'code' ? conv.cwd : null;
   emit('conversation-opened', { id, kind: conv.kind });
+  opened(id);
   const v = viewEl();
   v.innerHTML = '';
   const top = h(`<div class="topbar"></div>`);
   const scroll = h(`<div class="chat-scroll"><div class="chat-col"></div></div>`);
-  const bottom = h(`<div class="chat-bottom"><div class="inner"><div class="perm-area"></div><div class="composer-slot"></div><div class="composer-hint"></div></div></div>`);
+  const bottom = h(`<div class="chat-bottom"><div class="inner"><div class="research-slot"></div><div class="perm-area"></div><div class="composer-slot"></div><div class="composer-hint"></div></div></div>`);
   v.append(top, scroll, bottom);
+  const incognito = isIncognito(conv);
+  if (incognito) {
+    $('.inner', bottom).prepend(incognitoBanner());
+    saveLocal({ lastRoute: null }); // not reopened at the next start: it's gone by then
+  }
+  $('.inner', bottom).prepend(limitBanner());
 
   clearRetry();
   if (cur && cur.ro) cur.ro.disconnect();
@@ -102,7 +135,8 @@ export async function openConversation(id, { focus = true } = {}) {
     mode: conv.kind === 'code' ? 'code' : 'chat',
     placeholder: conv.kind === 'code' ? t('code_placeholder') : t('reply_placeholder'),
     initial: composerInitial(conv),
-    draftKey: id,
+    // an incognito chat's draft isn't kept either
+    draftKey: incognito ? null : id,
     onSend: (text, atts) => sendInConversation(text, atts),
     onStop: () => stopTurn(id),
     onOptions: (patch) => persistOptions(patch),
@@ -206,6 +240,7 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
       c.title = v; onChange && onChange(); emit('conversations-changed');
     } },
   ];
+  if (orgSupported() && !isIncognito(c)) items.push(...orgItems(anchor, c, onChange));
   if (c.kind !== 'code') {
     items.push({ label: c.project_id ? t('remove_from_project') : t('add_to_project'), icon: 'folder', onClick: async () => {
       if (c.project_id) {
@@ -240,11 +275,15 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
   if (c.kind === 'code' && (opts.engine ?? c.engine) === 'claude-code') {
     items.push({ label: t('cc_open_terminal'), icon: 'terminal', onClick: () => call('cc_open_in_terminal', { conversationId: c.id }).catch(errorToast) });
   }
-  items.push(
+  // an incognito chat is kept nowhere: no export, no print (the backend refuses them too)
+  if (!isIncognito(c)) items.push(
     { sep: true },
     { label: t('export_md'), icon: 'download', onClick: () => exportConv(c, 'md') },
     { label: t('export_json'), icon: 'download', onClick: () => exportConv(c, 'json') },
     { label: t('export_html'), icon: 'download', onClick: () => exportConv(c, 'html') },
+    { label: t('print_chat'), icon: 'printer', onClick: () => printConv(c) },
+  );
+  items.push(
     { sep: true },
     { label: t('delete'), icon: 'trash', danger: true, onClick: async () => {
       if (!(await confirmDialog(t('confirm_delete_chat')))) return;
@@ -256,6 +295,55 @@ export async function conversationMenu(anchor, c, { onChange, onDelete } = {}) {
     } },
   );
   showMenu(anchor, items, { width: 220 });
+}
+
+/** Pin, unread, section and archive items of the conversation menu (sidebar_cmds.rs). */
+function orgItems(anchor, c, onChange) {
+  const done = (r) => { if (r) Object.assign(c, { pinned_at: r.pinned_at, archived_at: r.archived_at, unread: r.unread, section_id: r.section_id }); onChange && onChange(); emit('conversations-changed'); };
+  const kind = c.kind === 'code' ? 'code' : 'chat';
+  const moveTo = async (sectionId) => done(await setSection(c.id, sectionId));
+  return [
+    { label: c.pinned_at ? t('org_unpin') : t('org_pin'), icon: 'pin', onClick: async () => done(await setPinned(c.id, !c.pinned_at)) },
+    { label: c.unread ? t('org_mark_read') : t('org_mark_unread'), icon: 'eye', onClick: async () => done(await setUnread(c.id, !c.unread)) },
+    { label: t('org_move'), icon: 'layers', keepOpen: true, onClick: () => {
+      const sections = ((store.sections || {})[kind]) || [];
+      showMenu(anchor, [
+        ...sections.map((s) => ({ label: s.name, checked: s.id === c.section_id, onClick: () => moveTo(s.id) })),
+        ...(c.section_id ? [{ label: t('org_move_out'), icon: 'x', onClick: () => moveTo(null) }] : []),
+        { sep: true },
+        { label: t('org_new_section'), icon: 'plus', onClick: async () => { const s = await newSection(kind); if (s) await moveTo(s.id); } },
+      ], { width: 240 });
+    } },
+    { label: c.archived_at ? t('org_unarchive') : t('org_archive'), icon: 'archive', onClick: async () => {
+      done(await setArchived(c.id, !c.archived_at));
+      if (!c.archived_at) return;
+      toast(t('org_archived_toast'));
+      if (cur && cur.id === c.id) emit('navigate', { name: c.kind === 'code' ? 'code' : 'new' });
+    } },
+  ];
+}
+
+/** Print the conversation (or save it as a PDF): its HTML export, in a
+ *  hidden frame that runs no scripts. (The app's own print key stays off:
+ *  it would print the app.) */
+async function printConv(c) {
+  let html;
+  try { html = await call('export_conversation', { id: c.id, format: 'html' }); } catch (e) { errorToast(e); return; }
+  document.querySelectorAll('iframe.print-frame').forEach((f) => f.remove());
+  const f = document.createElement('iframe');
+  f.className = 'print-frame';
+  f.setAttribute('aria-hidden', 'true');
+  f.tabIndex = -1;
+  // same origin, so the app can call print(); no allow-scripts, so the page runs nothing
+  f.setAttribute('sandbox', 'allow-same-origin allow-modals');
+  f.onload = () => {
+    const w = f.contentWindow;
+    w.addEventListener('afterprint', () => f.remove());
+    w.focus();
+    w.print();
+  };
+  f.srcdoc = html;
+  document.body.appendChild(f);
 }
 
 async function exportConv(c, fmt) {
@@ -291,9 +379,11 @@ function persistOptions(patch) {
 async function sendInConversation(text, atts) {
   if (!cur) return false;
   const id = cur.id;
+  // research is asked per message (research.rs reads it off the question)
+  const research = !!cur.composer.state.research && researchOffered();
   appendOptimisticUser(text, atts);
   try {
-    await call('send_message', { req: { conversation_id: id, text, attachment_ids: atts.map((a) => a.id).filter(Boolean) } });
+    await call('send_message', { req: { conversation_id: id, text, attachment_ids: atts.map((a) => a.id).filter(Boolean), research } });
   } catch (e) {
     await reload();
     throw e;
@@ -525,7 +615,7 @@ function updateScrollButton() {
   let btn = bottom.querySelector('.scroll-down');
   const show = !nearBottom();
   if (show && !btn) {
-    btn = h(`<button class="scroll-down" aria-label="scroll">${icon('arrowDown', 16)}</button>`);
+    btn = h(`<button class="scroll-down" aria-label="${esc(t('a11y_scroll_down'))}" title="${esc(t('a11y_scroll_down'))}">${icon('arrowDown', 16)}</button>`);
     btn.onclick = () => { cur.stick = true; cur.scrollEl.scrollTo({ top: cur.scrollEl.scrollHeight, behavior: scrollBehavior() }); };
     bottom.appendChild(btn);
   } else if (!show && btn) btn.remove();
@@ -612,7 +702,7 @@ function attachmentsHtml(items) {
 function branchNav(turn) {
   const s = turn.siblings;
   if (!s || s.count <= 1) return null;
-  const nav = h(`<span class="branch-nav"><button class="icon-btn sm" data-d="-1" ${s.index === 0 ? 'disabled' : ''}>${icon('chevLeft', 14)}</button><span class="count">${s.index + 1} / ${s.count}</span><button class="icon-btn sm" data-d="1" ${s.index >= s.count - 1 ? 'disabled' : ''}>${icon('chevRight', 14)}</button></span>`);
+  const nav = h(`<span class="branch-nav"><button class="icon-btn sm" data-d="-1" aria-label="${esc(t('a11y_prev_version'))}" ${s.index === 0 ? 'disabled' : ''}>${icon('chevLeft', 14)}</button><span class="count">${s.index + 1} / ${s.count}</span><button class="icon-btn sm" data-d="1" aria-label="${esc(t('a11y_next_version'))}" ${s.index >= s.count - 1 ? 'disabled' : ''}>${icon('chevRight', 14)}</button></span>`);
   nav.querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
     const target = s.ids[s.index + Number(b.dataset.d)];
     if (!target) return;
@@ -825,6 +915,30 @@ function renderTurnFiles(el, turn, streaming) {
   });
 }
 
+/** Read aloud / Stop reading for answer `key` (Markdown `md`). */
+function readAloudButton(key, md) {
+  const b = h('<button class="icon-btn sm read-aloud"></button>');
+  const draw = () => {
+    const on = readingKey() === key;
+    b.innerHTML = icon(on ? 'stop' : 'speaker', 15);
+    b.title = t(on ? 'ra_stop' : 'ra_read');
+    b.setAttribute('aria-label', b.title);
+    b.setAttribute('aria-pressed', String(on));
+  };
+  b.onclick = () => { if (readingKey() === key) stopReading(); else readAloud(key, md, draw); draw(); };
+  draw();
+  return b;
+}
+
+// voices that come a moment after start: the answers drawn by then get their button
+onVoicesReady(() => {
+  if (!cur) return;
+  for (const [id, el] of cur.els) {
+    const actions = el.classList.contains('assistant') && el.querySelector('.turn-actions');
+    if (actions && cur.turns.get(id)) { actions.__sig = null; renderAssistantTurn(el, cur.turns.get(id)); }
+  }
+});
+
 /** "· 12s · $0.04" after the model name, with the token counts on hover. */
 function turnStats(meta) {
   const u = meta.usage || {};
@@ -843,6 +957,7 @@ function renderAssistantTurn(el, turn) {
   }
   const partsEl = el.querySelector('.parts');
   const ctx = {
+    conversationId: cur && cur.id,
     openSettings: (tab) => emit('open-settings', tab),
     onRetry: () => retry(turn),
     onContinue: () => cur && cur.composer && sendInConversation(t('continue'), []).catch(errorToast),
@@ -867,10 +982,14 @@ function renderAssistantTurn(el, turn) {
   const nav = branchNav(turn);
   if (nav) actions.appendChild(nav);
   const text = turnPlainText(turn);
+  // a reading of this answer as it was before (a retry, an edit) stops
+  const said = readingKey();
+  if (said && said.startsWith(`${turn.id}\n`) && said !== `${turn.id}\n${text}`) stopReading();
   if (text) {
     const cb = h(`<button class="icon-btn sm" title="${t('copy')}">${icon('copy', 15)}</button>`);
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
     actions.appendChild(cb);
+    if (readAloudAvailable()) actions.appendChild(readAloudButton(`${turn.id}\n${text}`, text));
     // fork: continue from here in a new conversation
     const lastId = (turn.msg_ids || []).at(-1);
     if (lastId) {
@@ -939,10 +1058,14 @@ function rebuildArtifacts() {
 
 // ------------------------------------------------------------- live events
 
+// a streaming answer told to screen readers a sentence or so at a time
+const answerVoice = streamAnnouncer((s) => announce(s), { prepare: speechText });
+
 export function onTurnEvent({ conversation_id, turn }) {
   if (!cur || cur.id !== conversation_id) return;
   if (cur.retry && Date.now() >= cur.retry.until) clearRetry();
   if (!cur.els.has(turn.id)) rewindow();
+  if (turn.role === 'assistant') answerVoice.update(turn.id, turnPlainText(turn), !turn.streaming);
   upsertTurn(turn, true);
   markLast();
   rebuildArtifacts();
@@ -1002,6 +1125,29 @@ function clearRetry() {
 
 on('generation-retry', (ev) => { if (ev && cur && cur.id === ev.conversation_id && cur.running !== false) showRetry(ev); });
 
+// ------------------------------------------------------------- research
+
+/** Research mode's progress over the composer, with Stop, until its turn ends. */
+function showResearch(p) {
+  const slot = $('.research-slot', cur.bottomEl);
+  let card = slot.querySelector('.research-card');
+  if (!card) {
+    card = h(`<div class="research-card" role="status"><span class="spinner"></span><div class="grow"><div class="rs-line"></div><div class="rs-msg small muted ellipsis"></div></div><button class="btn sm">${icon('stop', 13)} ${esc(t('rs_stop'))}</button></div>`);
+    const id = cur.id;
+    card.querySelector('button').onclick = () => stopTurn(id);
+    slot.appendChild(card);
+  }
+  card.querySelector('.rs-line').textContent = researchLine(p);
+  card.querySelector('.rs-msg').textContent = researchQuery(p);
+}
+
+function clearResearch() {
+  const slot = cur && $('.research-slot', cur.bottomEl);
+  if (slot) slot.innerHTML = '';
+}
+
+on('research-progress', (p) => { if (p && cur && cur.id === p.conversation_id) showResearch(p); });
+
 function showQueue(convId) {
   if (!cur || cur.id !== convId) return;
   const q = queues.get(convId) || [];
@@ -1027,7 +1173,10 @@ export function onStateEvent({ conversation_id, running, error }) {
   cur.running = running;
   cur.composer.setRunning(running);
   if (!running) {
+    answerVoice.finish();
+    if (error) announce(errorMessage(error), true);
     clearRetry();
+    clearResearch();
     cur.permEl.innerHTML = '';
     reload().catch(() => {});
     if (error && error.kind === 'no_api_key') emit('open-settings', 'account');
@@ -1045,14 +1194,28 @@ export function onPermissionRequest(p) {
 export function onPermissionResolved({ request_id }) {
   store.permissions.delete(request_id);
   emit('running-changed');
-  const el = document.querySelector(`.perm-card[data-req="${CSS.escape(request_id)}"]`);
-  if (el) el.remove();
+  dropCard(document.querySelector(`.perm-card[data-req="${CSS.escape(request_id)}"]`));
 }
 
+/** Remove a prompt's card; the keyboard goes on to the next prompt, or back to the box. */
+function dropCard(el) {
+  if (!el) return;
+  // (a disabled button loses focus: respond notes where it was)
+  const hadFocus = el.__hadFocus || el.contains(document.activeElement);
+  el.remove();
+  if (!hadFocus || !cur) return;
+  const next = cur.permEl.querySelector('.perm-card .btn.primary');
+  if (next) next.focus(); else cur.composer.focus();
+}
+
+/** Answer a prompt; its card goes once the answer is taken (it stays, to try again, if that fails). */
 function respond(p, decision, message) {
-  call('respond_permission', { requestId: p.request_id, decision, message: message || null }).catch(errorToast);
   const el = document.querySelector(`.perm-card[data-req="${CSS.escape(p.request_id)}"]`);
-  if (el) el.remove();
+  const controls = el ? [...el.querySelectorAll('button, input, textarea, select')] : [];
+  if (el) el.__hadFocus = el.contains(document.activeElement);
+  controls.forEach((x) => { x.disabled = true; });
+  call('respond_permission', { requestId: p.request_id, decision, message: message || null })
+    .then(() => dropCard(el), (e) => { controls.forEach((x) => { x.disabled = false; }); errorToast(e); });
 }
 
 function showPermission(p) {
@@ -1092,8 +1255,8 @@ function showPermission(p) {
     detail = j && j !== '{}' ? `<pre>${esc(j)}</pre>` : '';
     buttons = [['once', t('allow_once'), 'primary'], ['chat', t('allow_chat'), ''], ['always', t('allow_always'), ''], ['deny', t('deny'), 'ghost']];
   }
-  const card = h(`<div class="perm-card" data-req="${esc(p.request_id)}">
-    <div class="ptitle">${title}</div>
+  const card = h(`<div class="perm-card" data-req="${esc(p.request_id)}" role="group" tabindex="-1" aria-labelledby="pt-${esc(p.request_id)}">
+    <div class="ptitle" id="pt-${esc(p.request_id)}">${title}</div>
     ${desc ? `<div class="pdesc mono">${esc(desc)}</div>` : '<div style="height:8px"></div>'}
     ${detail}
     <div class="pactions"></div>
@@ -1116,7 +1279,17 @@ function showPermission(p) {
   const sendDeny = () => respond(p, 'deny', fb.querySelector('input').value);
   fb.querySelector('button').onclick = sendDeny;
   fb.querySelector('input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendDeny(); });
+  // the keyboard: Enter on the card takes the first choice (Allow once), Esc denies
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); respond(p, 'deny'); }
+    else if (e.key === 'Enter' && e.target === card) { e.preventDefault(); respond(p, buttons[0][0]); }
+  });
   cur.permEl.appendChild(card);
+  const said = card.querySelector('.ptitle').textContent.trim();
+  announce(`${/[.?!:]$/.test(said) ? said : `${said}.`} ${t('perm_keys')}`, true);
+  // not while you're typing a message
+  const a = document.activeElement;
+  if (!(a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT') && a.value.trim())) actions.querySelector('button').focus({ preventScroll: true });
   if (p.kind === 'plan') {
     call('render_markdown', { text: input.plan || '' }).then((html) => { const m = card.querySelector('.plan-md'); if (m) m.innerHTML = html; }).catch(() => {});
   }
@@ -1126,7 +1299,12 @@ function showPermission(p) {
 export function closeCurrent() {
   openSeq++; // a load still under way is for a view that's gone
   clearRetry();
+  stopReading();
+  answerVoice.reset();
   if (cur && cur.ro) cur.ro.disconnect();
+  // an incognito chat goes when it's closed, without asking
+  if (cur && isIncognito(cur.conv)) discardIncognito(cur.id);
+  if (cur) opened(null);
   cur = null;
 }
 
@@ -1154,4 +1332,11 @@ on('ultracode-unavailable', ({ conversation_id }) => {
   if (!cur || cur.id !== conversation_id || ucWarned.has(conversation_id)) return;
   ucWarned.add(conversation_id);
   toast(t('ultracode_unavailable'), 'error');
+});
+// fast mode asked for, and the account's CLI runs the turn at standard speed (claudecode.rs): once per chat
+const fastWarned = new Set();
+on('fast-mode-unavailable', ({ conversation_id }) => {
+  if (!cur || cur.id !== conversation_id || fastWarned.has(conversation_id)) return;
+  fastWarned.add(conversation_id);
+  toast(t('fast_unavailable'));
 });

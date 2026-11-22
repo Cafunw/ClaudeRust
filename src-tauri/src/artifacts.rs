@@ -188,6 +188,42 @@ pub fn split(text: &str) -> Vec<Segment> {
     out
 }
 
+static EDIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<old_str>(.*?)</old_str>\s*<new_str>(.*?)</new_str>").unwrap());
+
+/// `content` with the `<old_str>`/`<new_str>` edits of an update applied in
+/// order, all or none, as ui/js/artifact_update.js applies them in the panel
+/// (keep the two alike): the gallery shows the result too.
+pub fn apply_update(content: &str, body: &str) -> Result<String, String> {
+    // a newline right inside a tag is layout, not text
+    let inner = |s: &str| {
+        let s = s.strip_prefix("\r\n").or_else(|| s.strip_prefix('\n')).unwrap_or(s);
+        s.strip_suffix("\r\n").or_else(|| s.strip_suffix('\n')).unwrap_or(s).to_string()
+    };
+    let edits: Vec<(String, String)> = EDIT_RE.captures_iter(body).map(|c| (inner(&c[1]), inner(&c[2]))).collect();
+    if edits.is_empty() {
+        return Err("The update has no <old_str>…</old_str><new_str>…</new_str> pair.".into());
+    }
+    // the model writes \n; an artifact that came in with \r\n is edited in kind
+    let crlf = content.contains("\r\n");
+    let eol = |s: &str| if crlf { s.replace("\r\n", "\n").replace('\n', "\r\n") } else { s.to_string() };
+    let mut out = content.to_string();
+    for (i, (old, new)) in edits.iter().enumerate() {
+        let n = if edits.len() > 1 { format!(" {}", i + 1) } else { String::new() };
+        let old = eol(old);
+        if old.is_empty() {
+            return Err(format!("old_str{n} is empty."));
+        }
+        let at = out.find(&old).ok_or_else(|| format!("old_str{n} was not found in the current version."))?;
+        // overlapping matches count: "aa" is twice in "aaa"
+        let next = at + out[at..].chars().next().map_or(1, char::len_utf8);
+        if out[next..].contains(&old) {
+            return Err(format!("old_str{n} appears more than once in the current version."));
+        }
+        out.replace_range(at..at + old.len(), &eol(new));
+    }
+    Ok(out)
+}
+
 pub fn kind_label(kind: &str, language: Option<&str>) -> String {
     match kind {
         "text/html" => "HTML".into(),
@@ -255,43 +291,32 @@ pub const ARTIFACT_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' '
 /// reach nothing but the app's page, so these ask it over postMessage (see
 /// ui/js/artifacts.js): `window.storage` (ui/js/artifact_storage.js) and
 /// `window.claude.complete` (asks the person first, then artifact_ai.rs).
-/// Errors go to the app too, which offers to ask Claude for a fix.
-const ERROR_HOOK: &str = r#"<script>
-(function () {
-  var seq = 0, waiting = {};
-  window.addEventListener('error', function (e) {
-    var message = String(e.message || e.error || 'unknown');
-    var d = document.getElementById('__artifact_error') || document.createElement('pre');
-    d.id = '__artifact_error';
-    d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;margin:0;padding:10px 14px;background:#fde8e4;color:#7a1f0e;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;max-height:40%;overflow:auto;z-index:99999';
-    d.textContent = 'Error: ' + message;
-    document.body && document.body.appendChild(d);
-    var stack = e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 6).join('\n') : '';
-    window.parent.postMessage({ __artifact: 'error', message: message, stack: stack }, '*');
-  });
-  window.addEventListener('message', function (e) {
-    var d = e.data;
-    if (e.source !== window.parent || !d || d.__artifact !== 'reply' || !waiting[d.id]) return;
-    var w = waiting[d.id];
-    delete waiting[d.id];
-    if (d.error) w[1](new Error(d.error)); else w[0](d.result);
-  });
-  function call(op, args) {
-    return new Promise(function (ok, fail) {
-      var id = ++seq;
-      waiting[id] = [ok, fail];
-      window.parent.postMessage({ __artifact: 'call', id: id, op: op, args: args }, '*');
-    });
-  }
-  window.storage = {
-    get: function (key, shared) { return call('get', [key, !!shared]); },
-    set: function (key, value, shared) { return call('set', [key, value, !!shared]); },
-    delete: function (key, shared) { return call('delete', [key, !!shared]); },
-    list: function (prefix, shared) { return call('list', [prefix, !!shared]); }
-  };
-  window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };
-})();
-</script>"#;
+/// Errors go to the app too, which offers to ask Claude for a fix. First of
+/// all comes FRAME_GUARD.
+pub const ERROR_HOOK: &str = concat!("<script>\n", include_str!("artifact_guard.js"), include_str!("artifact_hook.js"), "</script>");
+
+/// Undoes what the webview's start-up scripts change in every frame (alert,
+/// confirm, link clicks; see the file); links ask the app.
+pub const FRAME_GUARD: &str = concat!("<script>\n", include_str!("artifact_guard.js"), "</script>");
+
+/// An MCP App's page (mcp_apps.rs builds it, its own CSP first). Not
+/// previewable: an artifact of this type is shown as code.
+pub const MCP_APP_KIND: &str = "text/html;profile=mcp-app";
+
+/// `doc` with `first` before anything that can run, but after a doctype:
+/// anything before that would put the page in quirks mode.
+pub fn insert_at_start(doc: &str, first: &str) -> String {
+    let lower = doc.to_ascii_lowercase();
+    let html = lower.find("<html");
+    let at = lower
+        .find("<!doctype")
+        .filter(|&i| html.is_none_or(|h| i < h))
+        .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
+        .unwrap_or(0);
+    let mut s = doc.to_string();
+    s.insert_str(at, first);
+    s
+}
 
 fn theme_attr(dark: bool) -> &'static str {
     if dark {
@@ -307,17 +332,8 @@ pub fn build_document(kind: &str, content: &str, dark: bool) -> String {
         "text/html" => {
             let lower = content.to_ascii_lowercase();
             if lower.contains("<html") || lower.contains("<!doctype") {
-                // the hook goes first, so the page's scripts find its APIs, but after the
-                // doctype: anything before it would put the page in quirks mode
-                let html = lower.find("<html");
-                let at = lower
-                    .find("<!doctype")
-                    .filter(|&i| html.is_none_or(|h| i < h))
-                    .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
-                    .unwrap_or(0);
-                let mut s = content.to_string();
-                s.insert_str(at, ERROR_HOOK);
-                s
+                // the hook goes first, so the page's scripts find its APIs
+                insert_at_start(content, ERROR_HOOK)
             } else {
                 format!(
                     "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{BASE_STYLE}{FRAGMENT_STYLE}{ERROR_HOOK}</head><body>{content}</body></html>"
@@ -325,7 +341,7 @@ pub fn build_document(kind: &str, content: &str, dark: bool) -> String {
             }
         }
         "image/svg+xml" => format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\">{BASE_STYLE}{}<style>body{{display:flex;align-items:center;justify-content:center;min-height:100vh;background:transparent}}svg{{max-width:100%;height:auto}}</style></head><body>{content}</body></html>",
+            "<!doctype html><html><head><meta charset=\"utf-8\">{BASE_STYLE}{}{ERROR_HOOK}<style>body{{display:flex;align-items:center;justify-content:center;min-height:100vh;background:transparent}}svg{{max-width:100%;height:auto}}</style></head><body>{content}</body></html>",
             theme_attr(dark)
         ),
         "application/vnd.ant.mermaid" => format!(
@@ -339,6 +355,7 @@ mermaid.initialize({{ startOnLoad: true, theme: '{mtheme}', securityLevel: 'stri
             mtheme = if dark { "dark" } else { "default" }
         ),
         "application/vnd.ant.react" => build_react(content, dark),
+        MCP_APP_KIND => insert_at_start(content, FRAME_GUARD),
         _ => format!(
             "<!doctype html><html><head><meta charset=\"utf-8\">{BASE_STYLE}</head><body><pre>{}</pre></body></html>",
             escape_html(content)
@@ -531,6 +548,29 @@ mod tests {
             Segment::Artifact(a) => assert!(!a.update),
             _ => panic!(),
         }
+    }
+
+    fn edit(pairs: &[(&str, &str)]) -> String {
+        pairs.iter().map(|(o, n)| format!("<old_str>{o}</old_str>\n<new_str>{n}</new_str>")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn updates_apply_as_in_the_panel() {
+        assert_eq!(apply_update("<h1>Hi</h1><p>x</p>", &edit(&[("<h1>Hi</h1>", "<h1>Hello</h1>")])).unwrap(), "<h1>Hello</h1><p>x</p>");
+        assert_eq!(apply_update("a b", &edit(&[("b", "$& $1 $$")])).unwrap(), "a $& $1 $$", "text, not a pattern");
+        assert!(apply_update("one two", &edit(&[("three", "3")])).unwrap_err().contains("not found"));
+        assert!(apply_update("x = 1; y = 1;", &edit(&[("= 1", "= 2")])).unwrap_err().contains("more than once"));
+        assert!(apply_update("aaa", &edit(&[("aa", "b")])).unwrap_err().contains("more than once"), "overlapping");
+        assert!(apply_update("şşş", &edit(&[("şş", "b")])).unwrap_err().contains("more than once"), "by characters");
+        assert!(apply_update("abc", &edit(&[("", "b")])).unwrap_err().contains("empty"));
+        assert!(apply_update("abc", "just text").unwrap_err().contains("no <old_str>"));
+        // in order, all or none
+        assert_eq!(apply_update("let a = 1;", &edit(&[("a = 1", "b = 1"), ("b = 1;", "b = 2;")])).unwrap(), "let b = 2;");
+        assert!(apply_update("alpha beta", &edit(&[("alpha", "ALPHA"), ("gamma", "GAMMA")])).unwrap_err().contains("old_str 2 was not found"));
+        // layout newlines, CRLF content, and a pair still streaming
+        assert_eq!(apply_update("a\nline 1\nline 2\nb", "<old_str>\nline 1\nline 2\n</old_str><new_str>\nline 1\n</new_str>").unwrap(), "a\nline 1\nb");
+        assert_eq!(apply_update("a\r\nb\r\nc\r\n", &edit(&[("b\nc", "x\ny")])).unwrap(), "a\r\nx\r\ny\r\n");
+        assert_eq!(apply_update("a c", "<old_str>a</old_str><new_str>b</new_str>\n<old_str>c</old_str><new_str>d").unwrap(), "b c");
     }
 
     /// WCAG contrast ratio of two `#rrggbb` colours.

@@ -1,11 +1,13 @@
 // Rendering of assistant message parts (text, thinking, tools, notices).
 import { icon, ARTIFACT_ICON } from './icons.js';
 import { t } from './i18n.js';
-import { esc, h, morph, toast, errorToast, fmtUsd, snapshot, sameSnapshot, relPath } from './util.js';
+import { esc, h, morph, toast, errorToast, fmtUsd, snapshot, sameSnapshot, relPath, humanSize } from './util.js';
 import { friendlyError } from './neterr.js';
 import { lineDiff } from './diffstat.js';
 import { call } from './api.js';
 import { store, modelInfo } from './store.js';
+import { watchMermaid } from './mermaid_block.js';
+import { mountApp } from './mcp_apps.js';
 
 // ------------------------------------------------------------- decorating
 
@@ -59,6 +61,7 @@ export function decorate(root) {
       b.before(run);
     }
   });
+  all('.code-block[data-lang="mermaid"]').forEach(watchMermaid);
   all('.artifact-card').forEach((c) => {
     const kind = c.dataset.kind;
     const ic = c.querySelector('.artifact-card-icon');
@@ -364,7 +367,7 @@ function renderFetch(el, p) {
   el.innerHTML = `<div class="tool-head">${icon('globe', 15)}<span class="tname">${running ? `<span class="shimmer">${t('fetching')}</span>` : t('fetched')}</span><span class="targ">${esc(p.title || p.url || '')}</span>${p.status === 'error' ? `<span class="status err">${esc(p.error || t('failed'))}</span>` : running ? '<span class="status"><span class="spinner"></span></span>' : `<span class="status">${esc(domain)}</span>`}</div>`;
 }
 
-function errorMessage(err) {
+export function errorMessage(err) {
   if (!err) return '';
   const k = err.kind;
   if (k === 'no_api_key') return t('err_no_api_key');
@@ -437,6 +440,38 @@ function renderNotice(el, p, ctx) {
   }
 }
 
+const OUT_ERRORS = new Set(['bad_id', 'bad_name', 'too_large', 'too_many', 'not_downloadable', 'failed']);
+
+/** How a file the chat's code made is shown: its name, and its size or why it couldn't be kept. */
+export function outputFile(f) {
+  const e = f && f.error;
+  return {
+    ok: !e,
+    name: (f && typeof f.name === 'string' && f.name) || t('cx_unnamed'),
+    sub: e ? t(`cx_err_${OUT_ERRORS.has(e) ? e : 'failed'}`) : humanSize(Number(f.size) || 0),
+  };
+}
+
+/** Files the code made (code_exec.rs): Save a copy, or show the folder. Never
+ *  opened from here: a file Claude's code wrote is not run with a click. */
+function renderFiles(el, p, ctx) {
+  el.className = 'out-files';
+  const files = Array.isArray(p.files) ? p.files : [];
+  el.innerHTML = `<div class="lbl">${esc(t('cx_files'))}</div>${files.map((f, i) => {
+    const o = outputFile(f);
+    const ext = (o.name.split('.').pop() || '').slice(0, 4).toUpperCase();
+    return `<div class="att out-file ${o.ok ? '' : 'err'}"><div class="ficon">${esc(ext)}</div><div class="info"><div class="n" title="${esc(o.name)}">${esc(o.name)}</div><div class="s">${esc(o.sub)}</div></div>${o.ok
+      ? `<button class="icon-btn sm" data-a="save" data-i="${i}" title="${esc(t('cx_save'))}" aria-label="${esc(t('cx_save_x', { x: o.name }))}">${icon('download', 15)}</button><button class="icon-btn sm" data-a="reveal" data-i="${i}" title="${esc(t('reveal'))}" aria-label="${esc(t('cx_reveal_x', { x: o.name }))}">${icon('folder', 15)}</button>` : ''}</div>`;
+  }).join('')}`;
+  el.querySelectorAll('button[data-a]').forEach((b) => {
+    const f = files[Number(b.dataset.i)];
+    b.onclick = () => {
+      if (b.dataset.a === 'reveal') { call('reveal_path', { path: f.path }).catch(errorToast); return; }
+      call('save_output_file', { conversationId: ctx && ctx.conversationId, name: f.name }).then((ok) => { if (ok) toast(t('cx_saved')); }, errorToast);
+    };
+  });
+}
+
 /** Update the parts container of an assistant turn. Returns whether any
  *  part was drawn or removed (false: the DOM is as it was). */
 export function renderParts(container, parts, ctx) {
@@ -471,10 +506,11 @@ export function renderParts(container, parts, ctx) {
         morph(el, p.html || '').forEach(decorate);
         break;
       case 'thinking': renderThinking(el, p); break;
-      case 'tool': renderTool(el, p); break;
+      case 'tool': renderTool(el, p); mountApp(el, p, ctx); break;
       case 'search': renderSearch(el, p); break;
       case 'fetch': renderFetch(el, p); break;
       case 'notice': renderNotice(el, p, ctx); break;
+      case 'files': renderFiles(el, p, ctx); break;
       default: el.textContent = '';
     }
   });

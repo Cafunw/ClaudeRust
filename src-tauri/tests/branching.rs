@@ -327,6 +327,11 @@ impl Chat {
     /// `send_message` with `text`; an edit with `edit_parent` (the edited
     /// message's parent, "" for the first message). Waits for the turn.
     async fn say(&self, text: &str, edit_parent: Option<&str>) -> Result<String, String> {
+        self.say_with(text, edit_parent, false).await
+    }
+
+    /// `say`, with the request's research switch.
+    async fn say_with(&self, text: &str, edit_parent: Option<&str>, research: bool) -> Result<String, String> {
         let before = self.ended.load(Ordering::SeqCst);
         let req = commands::SendReq {
             conversation_id: Some(self.conv.clone()),
@@ -335,6 +340,7 @@ impl Chat {
             attachment_ids: vec![],
             parent_id: edit_parent.map(Into::into),
             edit: edit_parent.is_some(),
+            research,
         };
         let r = commands::send_message_inner(self.app.handle(), self.st.clone(), req).await.map_err(|e| e.to_string())?;
         until("the turn to end", || (self.ended.load(Ordering::SeqCst) > before && !self.st.runs.lock().contains_key(&self.conv)).then_some(())).await;
@@ -352,6 +358,20 @@ impl Chat {
     fn parent(&self, id: &str) -> Option<String> {
         self.st.db.msg_get(id).unwrap().parent_id
     }
+}
+
+#[test]
+fn a_message_sent_for_research_is_marked_so() {
+    block_on(async {
+        let c = Chat::new().await;
+        let plain = c.say("hello", None).await.unwrap();
+        assert!(c.st.db.msg_get(&plain).unwrap().meta.get("research").is_none());
+        let asked = c.say_with("look it up", None, true).await.unwrap();
+        // what research.rs starts from (it runs on the API engine this harness uses)
+        assert_eq!(c.st.db.msg_get(&asked).unwrap().meta["research"], true);
+        let reply = c.st.db.msg_get(&c.leaf()).unwrap();
+        assert!(reply.meta["research"].is_object(), "{}", reply.meta);
+    });
 }
 
 #[test]

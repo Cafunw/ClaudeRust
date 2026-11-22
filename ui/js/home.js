@@ -1,10 +1,13 @@
-// New chat (welcome) screen.
+// New chat (welcome) screen, and the incognito one.
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, displayName, newChatModel } from './store.js';
-import { $, esc } from './util.js';
-import { createComposer } from './composer.js';
+import { $, esc, h } from './util.js';
+import { createComposer, researchOffered } from './composer.js';
+import * as keymap from './keymap.js';
+import { notRegistered } from './optional_cmd.js';
+import { limitBanner } from './usage_limits.js';
 
 function greeting() {
   const hr = new Date().getHours();
@@ -13,40 +16,67 @@ function greeting() {
   return n ? `${g}, ${n}` : g;
 }
 
-export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null }) {
-  const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers };
+// incognito.rs is in this build: asked without its argument, the command is refused for that, not as unknown
+let incognitoOk = false;
+call('close_incognito', {}).catch((e) => { incognitoOk = !notRegistered(e); });
+export const incognitoSupported = () => incognitoOk;
+
+export function newIncognitoChat() {
+  emit('navigate', { name: 'new', params: { incognito: true } });
+}
+
+window.addEventListener('keydown', (e) => {
+  if (incognitoOk && !e.defaultPrevented && keymap.matches(e, 'incognito')) { e.preventDefault(); newIncognitoChat(); }
+});
+
+export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null, incognito = false }) {
+  const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers, fast: !!st.fast, research: !!st.research };
+  const research = kind === 'chat' && !!st.research && researchOffered();
+  if (kind === 'chat' && incognito) options.incognito = true;
   if (kind === 'code') { options.permission_mode = st.permission_mode; options.ultracode = engine === 'claude-code' ? st.ultracode ?? null : null; if (engine) options.engine = engine; if (worktree !== null) options.worktree = worktree; }
   const r = await call('send_message', {
     req: {
       new_conversation: { kind, model: st.model, project_id: projectId || null, cwd, options },
       text,
       attachment_ids: atts.map((a) => a.id).filter(Boolean),
+      research,
     },
   });
-  store.drafts.delete('new');
+  if (!incognito) store.drafts.delete('new');
   emit('conversations-changed');
   emit('navigate', { name: 'chat', params: { id: r.conversation_id } });
   return true;
 }
 
-export function renderNewChat(view, { projectId = null, text = '' } = {}) {
+export function renderNewChat(view, { projectId = null, text = '', incognito = false } = {}) {
   const proj = projectId ? store.projects.find((p) => p.id === projectId) : null;
-  view.innerHTML = `<div class="topbar"></div><div class="welcome">
-    <div class="greeting"><span class="spark">${spark(34)}</span><span>${esc(greeting())}</span></div>
+  // (an incognito chat is never one of a project's: those are remembered with it)
+  const inc = incognito && incognitoOk && !proj;
+  view.innerHTML = `<div class="topbar"><div class="spacer"></div></div><div class="welcome ${inc ? 'incognito' : ''}">
+    ${inc
+    ? `<div class="greeting">${icon('eyeOff', 30)}<span>${esc(t('incog_title'))}</span></div><p class="incog-d muted">${esc(t('incog_d'))}</p>`
+    : `<div class="greeting"><span class="spark">${spark(34)}</span><span>${esc(greeting())}</span></div>`}
     ${proj ? `<div class="project-pill"><button class="chip">${icon('folder', 14)} ${esc(proj.name)}</button></div>` : ''}
     <div class="composer-wrap"></div></div>`;
+  if (incognitoOk && !proj) {
+    const label = inc ? t('incog_leave') : t('incog_new');
+    const b = h(`<button class="icon-btn incog-toggle ${inc ? 'on' : ''}" aria-pressed="${inc}" title="${esc(label)}" aria-label="${esc(label)}">${icon('eyeOff', 17)}</button>`);
+    b.onclick = () => emit('navigate', { name: 'new', params: inc ? {} : { incognito: true } });
+    $('.topbar', view).appendChild(b);
+  }
   const composer = createComposer({
     mode: 'chat',
     placeholder: t('help_today'),
-    draftKey: 'new',
+    // nothing typed in an incognito chat is kept
+    draftKey: inc ? null : 'new',
     initial: { model: newChatModel('chat') },
-    onSend: (txt, atts, st) => startConversation({ text: txt, atts, st, projectId }),
+    onSend: (txt, atts, st) => startConversation({ text: txt, atts, st, projectId, incognito: inc }),
   });
-  $('.composer-wrap', view).appendChild(composer.el);
+  $('.composer-wrap', view).append(limitBanner(), composer.el);
   const pill = $('.project-pill button', view);
   if (pill) pill.onclick = () => emit('navigate', { name: 'project', params: { id: projectId } });
   if (text) composer.setText(text);
   composer.focus();
-  document.title = 'ClaudeRust';
+  document.title = inc ? t('incog_title') : 'ClaudeRust';
   return composer;
 }

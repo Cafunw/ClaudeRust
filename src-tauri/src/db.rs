@@ -56,6 +56,36 @@ pub struct Conversation {
     pub options: Value,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set at creation (`options.incognito` on a chat): listed, searched and
+    /// remembered nowhere, and removed when it's closed or the app quits.
+    pub incognito: bool,
+    pub pinned_at: Option<i64>,
+    /// Archived chats are left out of the list and of search (unless asked).
+    pub archived_at: Option<i64>,
+    /// A turn finished while another conversation was open.
+    pub unread: bool,
+    pub section_id: Option<String>,
+}
+
+/// A user-made sidebar section (a "group" in the Code tab) of `kind` chats or code sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Section {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
+/// The chat memory of one scope (`memory_synth::GLOBAL` or a project id).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryRow {
+    pub scope: String,
+    pub text: String,
+    /// The conversations it was written from.
+    pub sources: Vec<String>,
+    pub updated_at: i64,
+    /// When the model last merged chats into it (0 = never).
+    pub synthesized_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +227,19 @@ const MIGRATIONS: &[&str] = &[
        THEN json_extract(meta, '$.stop_reason') IS NULL AND json_extract(meta, '$.error') IS NULL AND json_extract(meta, '$.stopped') IS NULL ELSE 0 END;
      CREATE INDEX idx_messages_typed ON messages(created_at) WHERE role = 'user' AND CASE WHEN json_valid(meta) AND json_type(meta) = 'object'
        THEN json_extract(meta, '$.tool_results') IS NULL AND json_extract(meta, '$.hook_feedback') IS NULL ELSE 1 END;",
+    // 3: incognito chats (the index finds a crash's leftovers at start) and
+    // the sidebar's pins, archive, unread marks and sections (deleting a
+    // section keeps its conversations)
+    "ALTER TABLE conversations ADD COLUMN incognito INTEGER NOT NULL DEFAULT 0;
+     CREATE INDEX idx_conv_incognito ON conversations(id) WHERE incognito = 1;
+     CREATE TABLE sections (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+     ALTER TABLE conversations ADD COLUMN pinned_at INTEGER;
+     ALTER TABLE conversations ADD COLUMN archived_at INTEGER;
+     ALTER TABLE conversations ADD COLUMN unread INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN section_id TEXT REFERENCES sections(id) ON DELETE SET NULL;",
+    // 4: chat memory, one text per scope
+    "CREATE TABLE chat_memory (scope TEXT PRIMARY KEY, text TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '[]',
+       updated_at INTEGER NOT NULL, synthesized_at INTEGER NOT NULL DEFAULT 0);",
 ];
 
 fn conv_from_row(r: &Row) -> rusqlite::Result<Conversation> {
@@ -213,6 +256,22 @@ fn conv_from_row(r: &Row) -> rusqlite::Result<Conversation> {
         options: serde_json::from_str(&options).unwrap_or(Value::Object(Default::default())),
         created_at: r.get("created_at")?,
         updated_at: r.get("updated_at")?,
+        incognito: r.get("incognito")?,
+        pinned_at: r.get("pinned_at")?,
+        archived_at: r.get("archived_at")?,
+        unread: r.get("unread")?,
+        section_id: r.get("section_id")?,
+    })
+}
+
+fn memory_from_row(r: &Row) -> rusqlite::Result<MemoryRow> {
+    let sources: String = r.get("sources")?;
+    Ok(MemoryRow {
+        scope: r.get("scope")?,
+        text: r.get("text")?,
+        sources: serde_json::from_str(&sources).unwrap_or_default(),
+        updated_at: r.get("updated_at")?,
+        synthesized_at: r.get("synthesized_at")?,
     })
 }
 
@@ -336,8 +395,10 @@ impl Db {
     }
 
     fn init(mut conn: Connection) -> AppResult<Db> {
+        // secure_delete: what is deleted or replaced is zeroed in the file, so
+        // a deleted (or incognito) chat's text doesn't stay in free pages
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;",
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;",
         )?;
         migrate(&mut conn)?;
         let fts = conn
@@ -407,11 +468,14 @@ impl Db {
             options: options.clone(),
             created_at: now,
             updated_at: now,
+            // only chats: a code session leaves worktrees, checkpoints and the person's own CLI history
+            incognito: kind == "chat" && options["incognito"] == true,
+            ..Default::default()
         };
         self.conn.lock().execute(
-            "INSERT INTO conversations(id,kind,title,model,project_id,cwd,starred,current_leaf,options,created_at,updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,0,NULL,?7,?8,?8)",
-            params![conv.id, conv.kind, conv.title, conv.model, conv.project_id, conv.cwd, options.to_string(), now],
+            "INSERT INTO conversations(id,kind,title,model,project_id,cwd,starred,current_leaf,options,created_at,updated_at,incognito)
+             VALUES(?1,?2,?3,?4,?5,?6,0,NULL,?7,?8,?8,?9)",
+            params![conv.id, conv.kind, conv.title, conv.model, conv.project_id, conv.cwd, options.to_string(), now, conv.incognito],
         )?;
         Ok(conv)
     }
@@ -422,9 +486,27 @@ impl Db {
         conv.ok_or_else(|| AppError::msg("Conversation not found"))
     }
 
+    /// The conversations the sidebar lists: not incognito, not archived.
     pub fn conv_list(&self, kind: Option<&str>, project_id: Option<&str>) -> AppResult<Vec<Conversation>> {
+        self.conv_list_in(false, kind, project_id)
+    }
+
+    /// The archived conversations (see `conv_list`).
+    pub fn conv_list_archived(&self, kind: Option<&str>) -> AppResult<Vec<Conversation>> {
+        self.conv_list_in(true, kind, None)
+    }
+
+    /// Every folder a conversation works in, archived ones' too.
+    pub fn conv_cwds(&self) -> AppResult<Vec<String>> {
         let c = self.read_conn();
-        let mut sql = String::from("SELECT * FROM conversations WHERE 1=1");
+        let mut st = c.prepare("SELECT DISTINCT cwd FROM conversations WHERE cwd IS NOT NULL ORDER BY cwd")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn conv_list_in(&self, archived: bool, kind: Option<&str>, project_id: Option<&str>) -> AppResult<Vec<Conversation>> {
+        let c = self.read_conn();
+        let mut sql = format!("SELECT * FROM conversations WHERE incognito = 0 AND archived_at IS {}NULL", if archived { "NOT " } else { "" });
         let mut args: Vec<String> = vec![];
         if let Some(k) = kind {
             args.push(k.to_string());
@@ -464,11 +546,47 @@ impl Db {
     }
 
     pub fn conv_set_options(&self, id: &str, options: &Value) -> AppResult<()> {
+        // an incognito chat stays one (a fork copies the options, and with them the flag)
         self.conn
             .lock()
-            .prepare_cached("UPDATE conversations SET options=?2 WHERE id=?1")?
+            .prepare_cached("UPDATE conversations SET options = CASE WHEN incognito = 1 THEN json_set(?2, '$.incognito', json('true')) ELSE ?2 END WHERE id=?1")?
             .execute(params![id, options.to_string()])?;
         Ok(())
+    }
+
+    pub fn conv_set_pinned(&self, id: &str, pinned: bool) -> AppResult<()> {
+        self.conn.lock().execute("UPDATE conversations SET pinned_at=?2 WHERE id=?1", params![id, pinned.then(now_ms)])?;
+        Ok(())
+    }
+
+    pub fn conv_set_archived(&self, id: &str, archived: bool) -> AppResult<()> {
+        self.conn.lock().execute("UPDATE conversations SET archived_at=?2 WHERE id=?1", params![id, archived.then(now_ms)])?;
+        Ok(())
+    }
+
+    pub fn conv_set_unread(&self, id: &str, unread: bool) -> AppResult<()> {
+        self.conn.lock().prepare_cached("UPDATE conversations SET unread=?2 WHERE id=?1")?.execute(params![id, unread])?;
+        Ok(())
+    }
+
+    /// Move a conversation into a section of its own kind (`None`: out of any).
+    pub fn conv_set_section(&self, id: &str, section_id: Option<&str>) -> AppResult<()> {
+        let n = self.conn.lock().execute(
+            "UPDATE conversations SET section_id=?2 WHERE id=?1 AND (?2 IS NULL OR EXISTS (SELECT 1 FROM sections s WHERE s.id=?2 AND s.kind=conversations.kind))",
+            params![id, section_id],
+        )?;
+        if n == 0 {
+            return Err(AppError::msg("That conversation or section no longer exists."));
+        }
+        Ok(())
+    }
+
+    /// Incognito conversations still stored (a crash's leftovers, at start).
+    pub fn incognito_ids(&self) -> AppResult<Vec<String>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare("SELECT id FROM conversations INDEXED BY idx_conv_incognito WHERE incognito = 1")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn conv_set_model(&self, id: &str, model: &str) -> AppResult<()> {
@@ -519,7 +637,7 @@ impl Db {
         let c = self.read_conn();
         let mut st = c.prepare(
             "SELECT m.created_at, m.conversation_id, c.title, c.kind, c.model, m.meta FROM messages m JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'assistant' AND m.created_at >= ?1 AND json_extract(m.meta, '$.forked_from') IS NULL",
+             WHERE m.role = 'assistant' AND m.created_at >= ?1 AND json_extract(m.meta, '$.forked_from') IS NULL AND c.incognito = 0",
         )?;
         let rows = st.query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -565,7 +683,7 @@ impl Db {
                     ELSE json_array(json_extract(m.content, '$')) END,
                     m.created_at, c.title
              FROM messages m INDEXED BY idx_messages_typed JOIN conversations c ON c.id = m.conversation_id
-             WHERE m.role = 'user' AND CASE WHEN json_valid(m.meta) AND json_type(m.meta) = 'object'
+             WHERE m.role = 'user' AND c.incognito = 0 AND CASE WHEN json_valid(m.meta) AND json_type(m.meta) = 'object'
                THEN json_extract(m.meta, '$.tool_results') IS NULL AND json_extract(m.meta, '$.hook_feedback') IS NULL ELSE 1 END
              ORDER BY m.created_at DESC LIMIT 5000",
         )?;
@@ -659,7 +777,12 @@ impl Db {
             c.execute("DELETE FROM messages_fts WHERE conversation_id=?1", [id])?;
             self.forget_indexed(id);
         }
+        let incognito = c.query_row("SELECT incognito FROM conversations WHERE id=?1", [id], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false);
         c.execute("DELETE FROM conversations WHERE id=?1", [id])?;
+        if incognito {
+            // the zeroed pages reach the file, and the log's old copies of them go
+            let _ = c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
         Ok(())
     }
 
@@ -790,6 +913,10 @@ impl Db {
             return Ok(());
         }
         let c = self.conn.lock();
+        // an incognito chat's words are never written to the index
+        if c.prepare_cached("SELECT incognito FROM conversations WHERE id=?1")?.query_row([conv_id], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false) {
+            return Ok(());
+        }
         let known = self.indexed.lock().get(msg_id).cloned();
         match &known {
             // stored by this process: at most the row it got here
@@ -816,14 +943,21 @@ impl Db {
         Ok(())
     }
 
+    /// Conversations by title and words, archived ones left out.
     pub fn search(&self, query: &str, limit: usize) -> AppResult<Vec<SearchHit>> {
+        self.search_in(query, limit, false)
+    }
+
+    /// `search`, with the archived conversations too when `include_archived`.
+    pub fn search_in(&self, query: &str, limit: usize, include_archived: bool) -> AppResult<Vec<SearchHit>> {
         let q = query.trim();
         let c = self.read_conn();
         let mut hits: Vec<SearchHit> = vec![];
+        let shown = if include_archived { "c.incognito = 0" } else { "c.incognito = 0 AND c.archived_at IS NULL" };
         if q.is_empty() {
-            let mut st = c.prepare(
-                "SELECT id,title,kind,updated_at FROM conversations ORDER BY updated_at DESC LIMIT ?1",
-            )?;
+            let mut st = c.prepare(&format!(
+                "SELECT id,title,kind,updated_at FROM conversations c WHERE {shown} ORDER BY updated_at DESC LIMIT ?1"
+            ))?;
             let rows = st.query_map([limit as i64], |r| {
                 Ok(SearchHit {
                     conversation_id: r.get(0)?,
@@ -839,9 +973,9 @@ impl Db {
         // Title matches first.
         let like = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
         {
-            let mut st = c.prepare(
-                "SELECT id,title,kind,updated_at FROM conversations WHERE title LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?2",
-            )?;
+            let mut st = c.prepare(&format!(
+                "SELECT id,title,kind,updated_at FROM conversations c WHERE {shown} AND title LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?2"
+            ))?;
             let rows = st.query_map(params![like, limit as i64], |r| {
                 Ok(SearchHit {
                     conversation_id: r.get(0)?,
@@ -857,11 +991,11 @@ impl Db {
             }
         }
         if self.fts {
-            let mut st = c.prepare(
+            let mut st = c.prepare(&format!(
                 "SELECT f.conversation_id, f.message_id, c.title, snippet(messages_fts, 0, '\u{1}', '\u{2}', '…', 12), c.kind, c.updated_at
                  FROM messages_fts f JOIN conversations c ON c.id = f.conversation_id
-                 WHERE messages_fts MATCH ?1 ORDER BY rank LIMIT ?2",
-            )?;
+                 WHERE messages_fts MATCH ?1 AND {shown} ORDER BY rank LIMIT ?2"
+            ))?;
             let fq = fts_query(q);
             if !fq.is_empty() {
                 if let Ok(rows) = st.query_map(params![fq, limit as i64], |r| {
@@ -882,11 +1016,11 @@ impl Db {
                 }
             }
         } else {
-            let mut st = c.prepare(
+            let mut st = c.prepare(&format!(
                 "SELECT m.conversation_id, m.id, c.title, substr(m.content, 1, 200), c.kind, c.updated_at
                  FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                 WHERE m.content LIKE ?1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT ?2",
-            )?;
+                 WHERE {shown} AND m.content LIKE ?1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT ?2"
+            ))?;
             let rows = st.query_map(params![like, limit as i64], |r| {
                 Ok(SearchHit {
                     conversation_id: r.get(0)?,
@@ -939,7 +1073,7 @@ impl Db {
             "SELECT c.id, c.title, c.updated_at,
                     (SELECT m.content FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user'
                      ORDER BY m.created_at ASC LIMIT 1)
-             FROM conversations c WHERE c.id != ?1 AND c.kind = 'chat' ORDER BY c.updated_at DESC LIMIT ?2",
+             FROM conversations c WHERE c.id != ?1 AND c.kind = 'chat' AND c.incognito = 0 ORDER BY c.updated_at DESC LIMIT ?2",
         )?;
         let rows = st.query_map(params![exclude_conv, limit as i64], |r| {
             let content: Option<String> = r.get(3)?;
@@ -1011,7 +1145,9 @@ impl Db {
     }
 
     pub fn project_delete(&self, id: &str) -> AppResult<()> {
-        self.conn.lock().execute("DELETE FROM projects WHERE id=?1", [id])?;
+        let c = self.conn.lock();
+        c.execute("DELETE FROM projects WHERE id=?1", [id])?;
+        c.execute("DELETE FROM chat_memory WHERE scope=?1", [id])?;
         Ok(())
     }
 
@@ -1064,7 +1200,7 @@ impl Db {
         let mut st = c.prepare(
             "SELECT a.*, c.title AS conversation_title FROM artifacts a
              JOIN conversations c ON c.id = a.conversation_id
-             WHERE a.created_at = (SELECT MAX(b.created_at) FROM artifacts b WHERE b.conversation_id=a.conversation_id AND b.identifier=a.identifier)
+             WHERE c.incognito = 0 AND a.created_at = (SELECT MAX(b.created_at) FROM artifacts b WHERE b.conversation_id=a.conversation_id AND b.identifier=a.identifier)
              ORDER BY a.created_at DESC LIMIT ?1",
         )?;
         let rows = st.query_map([limit as i64], |r| {
@@ -1090,6 +1226,97 @@ impl Db {
             params![conv_id, identifier],
         )?;
         Ok(())
+    }
+
+    // ---------------------------------------------------------------- sections
+
+    pub fn section_create(&self, kind: &str, name: &str) -> AppResult<Section> {
+        let s = Section { id: new_id(), kind: kind.to_string(), name: name.to_string(), created_at: now_ms() };
+        self.conn.lock().execute("INSERT INTO sections(id,kind,name,created_at) VALUES(?1,?2,?3,?4)", params![s.id, s.kind, s.name, s.created_at])?;
+        Ok(s)
+    }
+
+    pub fn section_list(&self, kind: &str) -> AppResult<Vec<Section>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare("SELECT id,kind,name,created_at FROM sections WHERE kind=?1 ORDER BY created_at, rowid")?;
+        let rows = st.query_map([kind], |r| Ok(Section { id: r.get(0)?, kind: r.get(1)?, name: r.get(2)?, created_at: r.get(3)? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn section_rename(&self, id: &str, name: &str) -> AppResult<()> {
+        if self.conn.lock().execute("UPDATE sections SET name=?2 WHERE id=?1", params![id, name])? == 0 {
+            return Err(AppError::msg("That section no longer exists."));
+        }
+        Ok(())
+    }
+
+    /// Its conversations stay, outside any section.
+    pub fn section_delete(&self, id: &str) -> AppResult<()> {
+        self.conn.lock().execute("DELETE FROM sections WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ memory
+
+    pub fn memory_get(&self, scope: &str) -> AppResult<Option<MemoryRow>> {
+        Ok(self.conn.lock().query_row("SELECT * FROM chat_memory WHERE scope=?1", [scope], memory_from_row).optional()?)
+    }
+
+    pub fn memory_list(&self) -> AppResult<Vec<MemoryRow>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare("SELECT * FROM chat_memory ORDER BY updated_at DESC")?;
+        let rows = st.query_map([], memory_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The memory of `scope` as the person wrote it (its sources stay).
+    pub fn memory_set(&self, scope: &str, text: &str) -> AppResult<()> {
+        self.conn.lock().execute(
+            "INSERT INTO chat_memory(scope,text,updated_at) VALUES(?1,?2,?3) ON CONFLICT(scope) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at",
+            params![scope, text, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Store a synthesis written from the memory as it was at `read_at`
+    /// (its `updated_at`; None: there was none). False, and nothing stored,
+    /// when it changed meanwhile (the person edited it).
+    pub fn memory_store_synthesis(&self, scope: &str, text: &str, sources: &[String], read_at: Option<i64>) -> AppResult<bool> {
+        let (now, sources) = (now_ms(), serde_json::to_string(sources)?);
+        let c = self.conn.lock();
+        let n = match read_at {
+            Some(at) => c.execute(
+                "UPDATE chat_memory SET text=?2, sources=?3, updated_at=?4, synthesized_at=?4 WHERE scope=?1 AND updated_at=?5",
+                params![scope, text, sources, now, at],
+            )?,
+            None => c.execute(
+                "INSERT INTO chat_memory(scope,text,sources,updated_at,synthesized_at) VALUES(?1,?2,?3,?4,?4) ON CONFLICT(scope) DO NOTHING",
+                params![scope, text, sources, now],
+            )?,
+        };
+        Ok(n == 1)
+    }
+
+    pub fn memory_delete(&self, scope: &str) -> AppResult<()> {
+        self.conn.lock().execute("DELETE FROM chat_memory WHERE scope=?1", [scope])?;
+        Ok(())
+    }
+
+    /// The chats a memory is written from, most recently updated first: not
+    /// incognito, answered, updated after `since`; those of `project`, or
+    /// (None) those outside any project, with `every_project` those of any
+    /// project but the `excluded` ones too.
+    pub fn memory_sources(&self, project: Option<&str>, every_project: bool, excluded: &[String], since: i64, limit: usize) -> AppResult<Vec<Conversation>> {
+        let c = self.read_conn();
+        let mut st = c.prepare(
+            "SELECT * FROM conversations WHERE kind = 'chat' AND incognito = 0 AND current_leaf IS NOT NULL AND updated_at > ?1
+               AND CASE WHEN ?2 IS NOT NULL THEN project_id IS ?2
+                        WHEN ?3 THEN project_id IS NULL OR project_id NOT IN (SELECT value FROM json_each(?4))
+                        ELSE project_id IS NULL END
+             ORDER BY updated_at DESC LIMIT ?5",
+        )?;
+        let rows = st.query_map(params![since, project, every_project, serde_json::to_string(excluded)?, limit as i64], conv_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -1514,5 +1741,152 @@ mod tests {
         assert!(recent[0].3.contains("u1"));
         db.conv_delete(&conv.id).unwrap();
         assert!(db.msg_get("u1").is_err());
+    }
+
+    fn artifact(conv: &str, msg: &str, content: &str) -> ArtifactRow {
+        ArtifactRow { id: new_id(), conversation_id: conv.into(), message_id: msg.into(), identifier: "a".into(), kind: "text/markdown".into(), title: "t".into(), language: None, content: content.into(), created_at: 1, conversation_title: None }
+    }
+
+    #[test]
+    fn an_incognito_chat_is_listed_nowhere_and_leaves_nothing_in_the_file() {
+        let dir = std::env::temp_dir().join(format!("cr-incog-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let db = Db::open(&path).unwrap();
+        // in the incognito chat only (a deleted chat's words stay in the search index's segments until they merge)
+        let secret = "zebracorn4417";
+        let word = "plainword";
+        let normal = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let inc = db.conv_create("chat", "m", None, None, &json!({"incognito": true})).unwrap();
+        assert!(inc.incognito && !normal.incognito && db.conv_get(&inc.id).unwrap().incognito);
+        assert!(!db.conv_create("code", "m", None, Some("/p"), &json!({"incognito": true})).unwrap().incognito, "chats only");
+        db.conv_set_title(&normal.id, &format!("{word} chat")).unwrap();
+        db.conv_set_title(&inc.id, &format!("{word} {secret} title")).unwrap();
+        for (conv, id, text) in [(&normal.id, "n1", word.to_string()), (&inc.id, "i1", format!("{word} {secret}"))] {
+            let mut m = text_msg(id, conv);
+            m.content = json!([{"type":"text","text": format!("{text} question")}]);
+            db.msg_insert(&m).unwrap();
+            db.msg_insert(&Message { id: format!("{id}a"), parent_id: Some(id.into()), role: "assistant".into(), meta: json!({"stop_reason": "end_turn", "usage": {"output_tokens": 3}}), created_at: 2, ..m.clone() }).unwrap();
+            db.conv_set_leaf(conv, Some(&format!("{id}a"))).unwrap();
+            db.fts_index(conv, id, &format!("{text} question")).unwrap();
+            db.artifact_upsert(&artifact(conv, &format!("{id}a"), &format!("{text} doc"))).unwrap();
+        }
+        // the options can't lose the flag (a fork copies them)
+        db.conv_set_options(&inc.id, &json!({"style": "x"})).unwrap();
+        assert_eq!(db.conv_get(&inc.id).unwrap().options["incognito"], true);
+        let only_normal = |ids: Vec<String>| assert_eq!(ids, vec![normal.id.clone()]);
+        only_normal(db.conv_list(None, None).unwrap().into_iter().filter(|c| c.kind == "chat").map(|c| c.id).collect());
+        only_normal(db.search(word, 10).unwrap().into_iter().map(|h| h.conversation_id).collect());
+        assert!(db.search(secret, 10).unwrap().is_empty());
+        only_normal(db.search("", 10).unwrap().into_iter().filter(|h| h.kind == "chat").map(|h| h.conversation_id).collect());
+        only_normal(db.search_in(word, 10, true).unwrap().into_iter().map(|h| h.conversation_id).collect());
+        only_normal(db.search_messages(word, "", 10).unwrap().into_iter().map(|r| r.0).collect());
+        only_normal(db.recent_with_first_message("", 10).unwrap().into_iter().map(|r| r.0).collect());
+        only_normal(db.assistant_usage_since(0).unwrap().into_iter().map(|r| r.1).collect());
+        only_normal(db.artifact_list(10).unwrap().into_iter().map(|a| a.conversation_id).collect());
+        only_normal(db.memory_sources(None, true, &[], 0, 10).unwrap().into_iter().map(|c| c.id).collect());
+        assert_eq!(db.prompt_history(word, 10).unwrap().len(), 1);
+        assert_eq!(fts_rows(&db, "i1"), Vec::<String>::new(), "never indexed");
+        assert_eq!(db.incognito_ids().unwrap(), vec![inc.id.clone()]);
+        let on_disk = || std::fs::read_dir(&dir).unwrap().flatten().any(|f| std::fs::read(f.path()).unwrap().windows(secret.len()).any(|w| w == secret.as_bytes()));
+        assert!(on_disk(), "written while it runs");
+        db.conv_delete(&inc.id).unwrap();
+        db.conv_delete(&normal.id).unwrap();
+        let count = |sql: &str| db.conn.lock().query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT count(*) FROM messages") + count("SELECT count(*) FROM artifacts") + count("SELECT count(*) FROM messages_fts"), 0);
+        assert!(db.incognito_ids().unwrap().is_empty());
+        // nor in the file's free pages or its write-ahead log
+        assert!(!on_disk(), "the open database keeps the text");
+        drop(db);
+        assert!(!on_disk());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pins_archive_unread_and_sections() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let b = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+        let code = db.conv_create("code", "m", None, Some("/p"), &json!({})).unwrap();
+        db.conv_set_title(&b.id, "archived plan").unwrap();
+        db.conv_set_pinned(&a.id, true).unwrap();
+        db.conv_set_unread(&a.id, true).unwrap();
+        let got = db.conv_get(&a.id).unwrap();
+        assert!(got.pinned_at.is_some() && got.unread);
+        db.conv_set_pinned(&a.id, false).unwrap();
+        db.conv_set_unread(&a.id, false).unwrap();
+        let got = db.conv_get(&a.id).unwrap();
+        assert!(got.pinned_at.is_none() && !got.unread);
+        // archived: out of the list and the search, unless asked
+        db.conv_set_archived(&b.id, true).unwrap();
+        assert!(db.conv_list(Some("chat"), None).unwrap().iter().all(|c| c.id != b.id));
+        assert_eq!(db.conv_list_archived(Some("chat")).unwrap().into_iter().map(|c| c.id).collect::<Vec<_>>(), vec![b.id.clone()]);
+        assert!(db.search("archived", 10).unwrap().is_empty());
+        assert_eq!(db.search_in("archived", 10, true).unwrap().len(), 1);
+        assert!(db.conv_cwds().unwrap() == vec!["/p".to_string()]);
+        db.conv_set_archived(&b.id, false).unwrap();
+        assert_eq!(db.search("archived", 10).unwrap().len(), 1);
+        // sections: one kind's conversations each, and deleting one keeps them
+        let s = db.section_create("chat", "Work").unwrap();
+        let g = db.section_create("code", "Repos").unwrap();
+        db.conv_set_section(&a.id, Some(&s.id)).unwrap();
+        assert!(db.conv_set_section(&code.id, Some(&s.id)).is_err(), "a chat section takes no code session");
+        assert!(db.conv_set_section(&a.id, Some("gone")).is_err());
+        assert!(db.conv_set_section("gone", None).is_err());
+        db.conv_set_section(&code.id, Some(&g.id)).unwrap();
+        db.section_rename(&s.id, "Home").unwrap();
+        assert!(db.section_rename("gone", "x").is_err());
+        assert_eq!(db.section_list("chat").unwrap().into_iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Home"]);
+        assert_eq!(db.conv_get(&a.id).unwrap().section_id.as_deref(), Some(s.id.as_str()));
+        db.section_delete(&s.id).unwrap();
+        let a2 = db.conv_get(&a.id).unwrap();
+        assert!(a2.section_id.is_none(), "the chat stays, out of the section");
+        assert!(db.section_list("chat").unwrap().is_empty());
+        assert_eq!(db.conv_get(&code.id).unwrap().section_id.as_deref(), Some(g.id.as_str()));
+        db.conv_set_section(&code.id, None).unwrap();
+        assert!(db.conv_get(&code.id).unwrap().section_id.is_none());
+    }
+
+    #[test]
+    fn memory_sources_and_a_synthesis_that_lost_a_race() {
+        let db = Db::open_in_memory().unwrap();
+        let p = db.project_create("P", "").unwrap();
+        let q = db.project_create("Q", "").unwrap();
+        let mk = |project: Option<&str>, options: Value| {
+            let c = db.conv_create("chat", "m", project, None, &options).unwrap();
+            db.msg_insert(&text_msg(&new_id(), &c.id)).unwrap();
+            db.conv_set_leaf(&c.id, Some("x")).unwrap();
+            c.id
+        };
+        let free = mk(None, json!({}));
+        let in_p = mk(Some(&p.id), json!({}));
+        let in_q = mk(Some(&q.id), json!({}));
+        mk(None, json!({"incognito": true}));
+        db.conv_create("chat", "m", None, None, &json!({})).unwrap(); // never answered
+        let ids = |v: Vec<Conversation>| { let mut v: Vec<String> = v.into_iter().map(|c| c.id).collect(); v.sort(); v };
+        let sorted = |mut v: Vec<String>| { v.sort(); v };
+        assert_eq!(ids(db.memory_sources(None, false, &[], 0, 10).unwrap()), vec![free.clone()]);
+        assert_eq!(ids(db.memory_sources(Some(&p.id), false, &[], 0, 10).unwrap()), vec![in_p.clone()]);
+        assert_eq!(ids(db.memory_sources(None, true, std::slice::from_ref(&q.id), 0, 10).unwrap()), sorted(vec![free.clone(), in_p.clone()]));
+        assert_eq!(ids(db.memory_sources(None, true, &[], 0, 10).unwrap()), sorted(vec![free.clone(), in_p, in_q]));
+        assert_eq!(db.memory_sources(None, true, &[], 0, 2).unwrap().len(), 2);
+        assert!(db.memory_sources(None, true, &[], now_ms() + 1000, 10).unwrap().is_empty(), "only those updated since");
+        // a synthesis stores only over the memory it read
+        assert!(db.memory_store_synthesis("global", "one", std::slice::from_ref(&free), None).unwrap());
+        assert!(!db.memory_store_synthesis("global", "two", &[], None).unwrap(), "made meanwhile");
+        let read = db.memory_get("global").unwrap().unwrap();
+        assert_eq!((read.text.as_str(), read.sources.clone(), read.synthesized_at), ("one", vec![free], read.updated_at));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.memory_set("global", "edited").unwrap();
+        assert!(!db.memory_store_synthesis("global", "three", &[], Some(read.updated_at)).unwrap(), "edited meanwhile");
+        let now = db.memory_get("global").unwrap().unwrap();
+        assert_eq!((now.text.as_str(), now.synthesized_at), ("edited", read.synthesized_at), "an edit keeps the sources and the synthesis time");
+        assert!(db.memory_store_synthesis("global", "four", &[], Some(now.updated_at)).unwrap());
+        // a project's memory goes with it
+        db.memory_set(&p.id, "p notes").unwrap();
+        db.project_delete(&p.id).unwrap();
+        assert!(db.memory_get(&p.id).unwrap().is_none());
+        db.memory_delete("global").unwrap();
+        assert!(db.memory_list().unwrap().is_empty());
     }
 }

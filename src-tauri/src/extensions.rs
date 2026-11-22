@@ -188,7 +188,7 @@ pub fn install(zip_path: &Path, extensions_dir: &Path, config_path: &Path, user_
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values))
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true))
 }
 
 /// Install an extension that is already unpacked in a folder (for example one
@@ -208,7 +208,7 @@ pub fn install_from_dir(src: &Path, extensions_dir: &Path, config_path: &Path, u
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values))
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true))
 }
 
 /// A fresh, empty folder next to the install to unpack into; leftovers of
@@ -237,7 +237,7 @@ fn staging_dir(extensions_dir: &Path, name: &str) -> AppResult<PathBuf> {
 /// run), writing to a throwaway config rather than the real one.
 fn dry_run(dir: &Path, name: &str, manifest: &Value, extensions_dir: &Path, user_values: &Value) -> AppResult<()> {
     let scratch = extensions_dir.join(format!(".dry-run-{}.json", &crate::util::new_id()[..8]));
-    let r = register(dir, name, manifest, &scratch, user_values);
+    let r = register(dir, name, manifest, &scratch, user_values, false);
     let _ = std::fs::remove_file(&scratch);
     r.map(|_| ())
 }
@@ -322,7 +322,9 @@ fn copy_dir(src: &Path, dst: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_values: &Value) -> AppResult<String> {
+/// `keep`: put secret settings (`sensitive`) in the credential store, the
+/// config holding references (a dry run keeps nothing).
+fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_values: &Value, keep: bool) -> AppResult<String> {
     let name = name.to_string();
     // user config: provided values, else defaults; check required ones
     let mut user = Map::new();
@@ -353,7 +355,8 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
                 ),
                 o => o,
             };
-            user.insert(k.clone(), val);
+            let secret = (keep && def["sensitive"].as_bool() == Some(true)).then(|| val.as_str().and_then(mcp::keep_secret)).flatten();
+            user.insert(k.clone(), secret.map_or(val, Value::from));
         }
     }
 
@@ -402,12 +405,124 @@ fn register(dir: &Path, name: &str, manifest: &Value, config_path: &Path, user_v
         "path": dir.display().to_string(),
         "version": manifest["version"],
         "display_name": manifest["display_name"].as_str().or(manifest["name"].as_str()),
+        // for changing them later (reconfigure)
+        "user_config": user,
     });
 
     let mut config = mcp::read_config_for_update(config_path)?;
     config["mcpServers"][&name] = entry;
     mcp::write_config(config_path, &config)?;
     Ok(name)
+}
+
+/// The folder of the installed extension `name` in `config`, and its
+/// manifest. Only a folder right inside `extensions_dir` (links resolved):
+/// the config can be edited by hand, and this folder gets deleted.
+fn installed(name: &str, extensions_dir: &Path, config: &Value) -> AppResult<(PathBuf, Value)> {
+    let path = config["mcpServers"][name]["extension"]["path"].as_str().ok_or_else(|| AppError::msg(format!("“{name}” isn't an installed extension.")))?;
+    let dir = std::fs::canonicalize(path).map_err(|e| AppError::msg(format!("The folder of “{name}” can't be found ({e}): {path}")))?;
+    if dir.parent() != Some(std::fs::canonicalize(extensions_dir)?.as_path()) {
+        return Err(AppError::msg(format!("{} isn't in the extensions folder, so it is left alone.", dir.display())));
+    }
+    let mf = dir.join("manifest.json");
+    if std::fs::metadata(&mf)?.len() > MAX_MANIFEST_BYTES {
+        return Err(AppError::msg("The extension's manifest.json is too large (over 1 MB)."));
+    }
+    Ok((dir, parse_manifest(&std::fs::read(&mf)?)?))
+}
+
+fn is_secret(spec: &Value) -> bool {
+    spec["sensitive"].as_bool() == Some(true)
+}
+
+/// What Settings shows to change extension `name`: the manifest's settings,
+/// the values given (a secret one only as `secrets_set`, never its value).
+pub fn settings(name: &str, extensions_dir: &Path, config_path: &Path) -> AppResult<Value> {
+    let config = mcp::read_config(config_path);
+    let (_, manifest) = installed(name, extensions_dir, &config)?;
+    let spec = manifest["user_config"].as_object().cloned().unwrap_or_default();
+    let current = &config["mcpServers"][name]["extension"]["user_config"];
+    let (mut values, mut secrets_set) = (Map::new(), vec![]);
+    for (k, def) in &spec {
+        let v = &current[k];
+        if v.is_null() || v.as_str() == Some("") {
+            continue;
+        }
+        if is_secret(def) {
+            secrets_set.push(k.clone());
+        } else {
+            values.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(json!({
+        "name": name,
+        "display_name": manifest["display_name"].as_str().or(manifest["name"].as_str()),
+        "user_config": spec,
+        "values": values,
+        "secrets_set": secrets_set,
+    }))
+}
+
+/// Register extension `name` again with `values`; a secret setting left
+/// empty keeps the one it has.
+pub fn reconfigure(name: &str, extensions_dir: &Path, config_path: &Path, values: &Value) -> AppResult<()> {
+    let config = mcp::read_config_for_update(config_path)?;
+    let (_, manifest) = installed(name, extensions_dir, &config)?;
+    // registered at the path it has, not the canonical one (on Windows a \\?\ path, which the args' "/" breaks)
+    let dir = PathBuf::from(config["mcpServers"][name]["extension"]["path"].as_str().unwrap_or_default());
+    let current = &config["mcpServers"][name]["extension"]["user_config"];
+    let mut merged = Map::new();
+    for (k, def) in manifest["user_config"].as_object().into_iter().flatten() {
+        let given = values.get(k).filter(|v| !v.is_null() && v.as_str() != Some(""));
+        if let Some(v) = given.or_else(|| Some(&current[k]).filter(|v| is_secret(def) && !v.is_null())) {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    register(&dir, name, &manifest, config_path, &Value::Object(merged), true).map(|_| ())
+}
+
+/// Take extension `name` out of the config (its secrets go with it); the
+/// folder to delete once its server has stopped.
+pub fn unregister(name: &str, extensions_dir: &Path, config_path: &Path) -> AppResult<PathBuf> {
+    let mut config = mcp::read_config_for_update(config_path)?;
+    let (dir, _) = installed(name, extensions_dir, &config)?;
+    if let Some(m) = config["mcpServers"].as_object_mut() {
+        m.remove(name);
+    }
+    mcp::write_config(config_path, &config)?;
+    Ok(dir)
+}
+
+type St<'a> = tauri::State<'a, std::sync::Arc<crate::state::AppState>>;
+
+async fn on_pool<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + 'static) -> AppResult<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn extension_settings(state: St<'_>, name: String) -> AppResult<Value> {
+    let (dir, config) = (state.data_dir.join("extensions"), state.mcp.config_path.clone());
+    on_pool(move || settings(&name, &dir, &config)).await
+}
+
+#[tauri::command]
+pub async fn extension_reconfigure(app: tauri::AppHandle, state: St<'_>, name: String, values: Value) -> AppResult<Value> {
+    let (dir, config) = (state.data_dir.join("extensions"), state.mcp.config_path.clone());
+    on_pool(move || reconfigure(&name, &dir, &config, &values)).await?;
+    crate::commands::mcp_reload(app, state).await
+}
+
+#[tauri::command]
+pub async fn extension_uninstall(app: tauri::AppHandle, state: St<'_>, name: String) -> AppResult<Value> {
+    let (dir, config) = (state.data_dir.join("extensions"), state.mcp.config_path.clone());
+    let folder = on_pool(move || unregister(&name, &dir, &config)).await?;
+    // its server stopped with the reload, so its files can go
+    let status = crate::commands::mcp_reload(app, state).await?;
+    on_pool(move || {
+        std::fs::remove_dir_all(&folder).map_err(|e| AppError::msg(format!("The extension was removed, but its folder {} couldn't be deleted: {e}", folder.display())))
+    })
+    .await?;
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -518,6 +633,56 @@ mod tests {
         assert_eq!(std::fs::read(&installed).unwrap(), b"v2");
         let left: Vec<String> = std::fs::read_dir(&ext).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
         assert_eq!(left, ["up"], "{left:?}");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn settings_show_no_secret_and_reconfigure_keeps_an_empty_one() {
+        let tmp = std::env::temp_dir().join(format!("ext-conf-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ext, cfg) = (tmp.join("ext"), tmp.join("config.json"));
+        let b = tmp.join("c.mcpb");
+        bundle(&b, &json!({"name": "conf", "server": {"type": "node", "mcp_config": {"command": "node", "args": ["--dir=${user_config.dir}"], "env": {"TOKEN": "${user_config.token}"}}},
+            "user_config": {"token": {"type": "string", "sensitive": true, "required": true}, "dir": {"type": "directory", "default": "/a"}}}), &[]);
+        install(&b, &ext, &cfg, &json!({"token": "s3cret"})).unwrap();
+        let s = settings("conf", &ext, &cfg).unwrap();
+        assert_eq!(s["values"], json!({"dir": "/a"}));
+        assert_eq!(s["secrets_set"], json!(["token"]));
+        assert!(!s.to_string().contains("s3cret"), "{s}");
+        assert_eq!(s["user_config"]["token"]["sensitive"], true);
+        // a new folder; the token left empty stays
+        reconfigure("conf", &ext, &cfg, &json!({"dir": "/b", "token": ""})).unwrap();
+        let srv = &mcp::read_config(&cfg)["mcpServers"]["conf"];
+        assert_eq!(srv["args"], json!(["--dir=/b"]));
+        assert_eq!(srv["extension"]["path"], ext.join("conf").display().to_string(), "the path it was installed at, not a canonical one");
+        assert_eq!(srv["env"]["TOKEN"], "s3cret", "tests keep secrets in the file, as Linux does");
+        reconfigure("conf", &ext, &cfg, &json!({"token": "n3w"})).unwrap();
+        let srv = &mcp::read_config(&cfg)["mcpServers"]["conf"];
+        assert_eq!((srv["env"]["TOKEN"].as_str(), srv["args"][0].as_str()), (Some("n3w"), Some("--dir=/a")), "an empty setting is its default again");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn uninstall_takes_only_a_folder_inside_the_extensions_folder() {
+        let tmp = std::env::temp_dir().join(format!("ext-rm-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ext, cfg) = (tmp.join("ext"), tmp.join("config.json"));
+        let b = tmp.join("u.mcpb");
+        bundle(&b, &manifest("1.0.0", false), &[("index.js", b"x")]);
+        install(&b, &ext, &cfg, &json!({})).unwrap();
+        // a hand-edited entry pointing elsewhere, and a server that isn't an extension, are refused
+        let mut c = mcp::read_config(&cfg);
+        c["mcpServers"]["evil"] = json!({"command": "x", "extension": {"path": tmp.display().to_string()}});
+        c["mcpServers"]["plain"] = json!({"command": "x"});
+        mcp::write_config(&cfg, &c).unwrap();
+        assert!(unregister("evil", &ext, &cfg).unwrap_err().to_string().contains("left alone"));
+        assert!(unregister("plain", &ext, &cfg).unwrap_err().to_string().contains("isn't an installed extension"));
+        assert!(settings("evil", &ext, &cfg).is_err());
+        let folder = unregister("up", &ext, &cfg).unwrap();
+        assert_eq!(folder, std::fs::canonicalize(ext.join("up")).unwrap());
+        let c = mcp::read_config(&cfg);
+        assert!(c["mcpServers"]["up"].is_null());
+        assert!(c["mcpServers"]["evil"].is_object() && tmp.exists(), "the others are untouched");
         let _ = std::fs::remove_dir_all(tmp);
     }
 

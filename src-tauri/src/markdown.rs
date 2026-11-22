@@ -118,14 +118,16 @@ fn highlight_code(code: &str, lang: &str, open: bool) -> String {
 }
 
 /// `open`: the block has no closing fence (yet): it is most likely still
-/// streaming, so the next render will have more code in it.
+/// streaming, so the next render will have more code in it. Such a block
+/// is marked `data-open` (the UI draws a Mermaid block only once it's whole).
 fn code_block_html(lang: &str, code: &str, open: bool) -> String {
     let lang_clean = lang.split_whitespace().next().unwrap_or("").to_string();
     let label = highlight::language_label(&lang_clean);
     let body = highlight_code(code, &lang_clean, open);
     format!(
-        "<div class=\"code-block\" data-lang=\"{l}\"><div class=\"code-header\"><span class=\"code-lang\">{label}</span><button class=\"code-copy\" type=\"button\" data-action=\"copy-code\"></button></div><pre><code class=\"hl-code\">{body}</code></pre></div>",
+        "<div class=\"code-block\" data-lang=\"{l}\"{o}><div class=\"code-header\"><span class=\"code-lang\">{label}</span><button class=\"code-copy\" type=\"button\" data-action=\"copy-code\"></button></div><pre><code class=\"hl-code\">{body}</code></pre></div>",
         l = escape_html(&lang_clean),
+        o = if open { " data-open" } else { "" },
         label = escape_html(&label)
     )
 }
@@ -420,6 +422,15 @@ mod tests {
     fn streaming_unclosed_fence() {
         let h = render("```py\nprint(1)", O);
         assert!(h.contains("code-block"));
+    }
+
+    #[test]
+    fn a_code_block_still_streaming_is_marked_open() {
+        let open = render("A chart:\n\n```mermaid\ngraph TD; A-->B", O);
+        assert!(open.contains(r#"data-lang="mermaid" data-open>"#), "{open}");
+        let done = render("A chart:\n\n```mermaid\ngraph TD; A-->B\n```\n", O);
+        assert!(done.contains(r#"data-lang="mermaid">"#) && !done.contains("data-open"), "{done}");
+        assert!(!render("    indented code\n", O).contains("data-open"));
     }
 
     #[test]

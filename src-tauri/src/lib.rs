@@ -9,11 +9,14 @@ pub mod claudecode;
 pub mod attachments;
 pub mod checkpoints;
 pub mod codetools;
+pub mod code_exec;
 pub mod commands;
 pub mod compact;
+pub mod connector_directory;
 pub mod db;
 pub mod deeplink;
 pub mod devtools;
+pub mod diagnostics;
 pub mod display;
 pub mod engine;
 pub mod error;
@@ -24,20 +27,27 @@ pub mod grepsearch;
 pub mod highlight;
 pub mod hooks;
 pub mod import;
+pub mod incognito;
 #[cfg(windows)]
 pub mod jobobject;
+pub mod keepawake;
 pub mod logdigest;
 pub mod markdown;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod memory;
+pub mod memory_cmds;
+pub mod memory_synth;
 pub mod models;
 pub mod oai;
 pub mod office;
+pub mod past_chats;
 pub mod pathguard;
+pub mod project_search;
 pub mod prompts;
 pub mod pullrequest;
 pub mod render;
+pub mod research;
 pub mod routines;
 pub mod scripts;
 pub mod secrets;
@@ -45,6 +55,8 @@ pub mod settings;
 pub mod shellenv;
 pub mod slash;
 pub mod shells;
+pub mod sidebar_cmds;
+pub mod skills;
 pub mod state;
 pub mod subagent;
 pub mod symbols;
@@ -52,6 +64,7 @@ pub mod terminal;
 pub mod todos;
 pub mod turnstream;
 pub mod updates;
+pub mod usage;
 pub mod util;
 pub mod view;
 pub mod watch;
@@ -323,6 +336,8 @@ pub fn run() {
             let _ = db.mark_interrupted();
             let _ = db.delete_unfinished_imports();
             claudecode::sweep_prompt_files(&data_dir);
+            // incognito chats a crash left (none of their turns can be running yet)
+            incognito::sweep(&db, &data_dir);
             let st = Arc::new(AppState::new(db, data_dir, mcp_path));
             st.shells.set_app(app.handle().clone());
             devtools::start(app.handle());
@@ -422,6 +437,7 @@ pub fn run() {
             commands::pick_files,
             commands::pick_directory,
             commands::save_text_file,
+            code_exec::save_output_file,
             commands::respond_permission,
             commands::list_projects,
             commands::create_project,
@@ -436,6 +452,7 @@ pub fn run() {
             commands::delete_artifact,
             commands::serve_artifact,
             artifact_ai::artifact_complete,
+            artifact_ai::artifact_complete_check,
             commands::render_markdown,
             commands::highlight_code,
             commands::mcp_status,
@@ -448,6 +465,16 @@ pub fn run() {
             mcp_oauth::mcp_oauth_sign_out,
             mcp::elicit::mcp_elicit_pending,
             mcp::elicit::mcp_elicit_respond,
+            connector_directory::connector_directory,
+            mcp::apps::mcp_app_info,
+            mcp::apps::mcp_app_open,
+            mcp::apps::mcp_app_call,
+            skills::skills_list,
+            skills::skill_set_enabled,
+            skills::skill_pick_file,
+            skills::skill_install_preview,
+            skills::skill_install,
+            skills::skill_uninstall,
             commands::pick_extension,
             commands::claude_code_info,
             commands::shells_list,
@@ -458,6 +485,7 @@ pub fn run() {
             commands::git_show,
             commands::git_revert,
             commands::usage_overview,
+            commands::usage_limits,
             commands::oai_refresh,
             commands::arch_map,
             commands::commit_message_suggest,
@@ -542,16 +570,39 @@ pub fn run() {
             commands::claude_auth_logout,
             commands::extension_inspect,
             commands::extension_install,
+            extensions::extension_settings,
+            extensions::extension_reconfigure,
+            extensions::extension_uninstall,
             import::import_scan,
             import::import_mcp_servers,
             import::import_desktop_extensions,
             import::import_claude_code_sessions,
             import::import_claude_export,
             import::pick_import_file,
+            incognito::close_incognito,
+            sidebar_cmds::conversation_set_pinned,
+            sidebar_cmds::conversation_set_archived,
+            sidebar_cmds::conversation_set_unread,
+            sidebar_cmds::conversation_set_section,
+            sidebar_cmds::conversation_opened,
+            sidebar_cmds::list_archived_conversations,
+            sidebar_cmds::search_conversations,
+            sidebar_cmds::sections_list,
+            sidebar_cmds::section_create,
+            sidebar_cmds::section_rename,
+            sidebar_cmds::section_delete,
+            memory_cmds::chat_memory_list,
+            memory_cmds::chat_memory_get,
+            memory_cmds::chat_memory_set,
+            memory_cmds::chat_memory_delete,
+            memory_cmds::chat_memory_delete_all,
+            memory_cmds::chat_memory_import,
+            memory_cmds::chat_memory_update_now,
             commands::open_external,
             commands::open_path,
             commands::reveal_path,
             commands::copy_text,
+            diagnostics::log_tail,
             commands::set_zoom,
             commands::quick_entry_submit,
             commands::quick_entry_hide,
@@ -587,6 +638,8 @@ pub fn run() {
                     while (!st.runs.lock().is_empty() || st.shells.any_running()) && start.elapsed() < std::time::Duration::from_millis(2500) {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
+                    // the incognito chats still open, once their turns stopped
+                    incognito::sweep(&st.db, &st.data_dir);
                     st.mcp.stop_all().await
                 });
             }

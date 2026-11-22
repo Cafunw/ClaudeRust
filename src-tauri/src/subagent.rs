@@ -116,6 +116,9 @@ impl Registry {
                 if let Some(n) = v.as_u64() {
                     let prev = into.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
                     into.insert(k.clone(), json!(prev + n));
+                } else if v.is_string() {
+                    // `speed`: fast mode is priced apart
+                    into.insert(k.clone(), v.clone());
                 }
             }
         };

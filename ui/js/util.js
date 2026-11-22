@@ -1,6 +1,6 @@
 // DOM helpers, menus, modals and toasts.
 import { icon } from './icons.js';
-import { t } from './i18n.js';
+import { t, tOr } from './i18n.js';
 import { friendlyError } from './neterr.js';
 
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -137,6 +137,9 @@ export function toast(msg, kind = '', { action, onAction, duration } = {}) {
 
 /** A failure as a toast: a transport error said plainly, its raw text a click away. */
 export function errorToast(e) {
+  // a refusal the backend names by its code (memory_synth::coded), in the UI's language
+  const coded = e && typeof e.kind === 'string' ? tOr(`errk_${e.kind}`, null) : null;
+  if (coded) { toast(coded, 'error'); return; }
   const raw = (e && e.message) || String(e);
   const plain = friendlyError(raw);
   if (!plain) { toast(raw, 'error'); return; }

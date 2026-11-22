@@ -62,16 +62,28 @@ fn check_prompt(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// An error when window.claude.complete can't work in `conversation_id`.
+async fn engine_supported(state: &AppState, conversation_id: &str) -> AppResult<()> {
+    let conv = state.db.conv_get(conversation_id)?;
+    // shortcut: the API only; the account's CLI and other providers have no one-shot call for it yet
+    if conv.model.starts_with(crate::oai::PREFIX) || crate::claudecode::uses_cli(state, &conv).await {
+        return Err(AppError::msg("window.claude.complete needs an Anthropic API key, and this conversation doesn't run on one."));
+    }
+    Ok(())
+}
+
+/// Asked before the person is: where it can't work, nobody is asked to allow it.
+#[tauri::command]
+pub async fn artifact_complete_check(state: tauri::State<'_, Arc<AppState>>, conversation_id: String) -> AppResult<()> {
+    engine_supported(&state, &conversation_id).await
+}
+
 /// Answer `prompt` for the artifact `artifact_id` of `conversation_id`, once
 /// the person allowed it (artifacts.js).
 #[tauri::command]
 pub async fn artifact_complete(state: tauri::State<'_, Arc<AppState>>, conversation_id: String, artifact_id: String, prompt: String) -> AppResult<String> {
     check_prompt(&prompt).map_err(AppError::msg)?;
-    let conv = state.db.conv_get(&conversation_id)?;
-    // shortcut: the API only; the account's CLI and other providers have no one-shot call for it yet
-    if conv.model.starts_with(crate::oai::PREFIX) || crate::claudecode::uses_cli(&state, &conv).await {
-        return Err(AppError::msg("window.claude.complete needs an Anthropic API key, and this conversation doesn't run on one."));
-    }
+    engine_supported(&state, &conversation_id).await?;
     let client = state.client()?;
     LIMITS.lock().take(&conversation_id, &artifact_id, Instant::now()).map_err(AppError::msg)?;
     let model_id = state.settings.read().title_model.clone();
@@ -148,8 +160,14 @@ mod tests {
         let other_provider = st.db.conv_create("chat", &format!("{}gpt", crate::oai::PREFIX), None, None, &json!({})).unwrap();
         for id in [&account.id, &other_provider.id] {
             assert!(ask(id, "hi").contains("needs an Anthropic API key"), "{id}");
+            // the check the dialog waits for says the same, so the person is never asked
+            let check = tauri::async_runtime::block_on(artifact_complete_check(app.state(), id.to_string())).unwrap_err().to_string();
+            assert!(check.contains("needs an Anthropic API key"), "{id}");
             assert!(ask(id, "").contains("needs a prompt"));
             assert!(!LIMITS.lock().used.contains_key(id.as_str()));
         }
+        // on the API the check passes, and the dialog is shown
+        st.settings.write().chat_engine = "api".into();
+        assert!(tauri::async_runtime::block_on(artifact_complete_check(app.state(), account.id.clone())).is_ok());
     }
 }
