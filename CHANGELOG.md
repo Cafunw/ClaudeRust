@@ -3,6 +3,129 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.7] - 2026-11-22
+
+A Node.js for desktop extensions, an extension directory and signature
+checks, files from GitHub and from Google links, styles drafted from
+your writing, error messages in your language, and a sweep of the
+interface.
+
+**Extensions**
+- Desktop extensions that start with `node` can use a Node.js the app
+  downloads: when an extension needs Node.js and the computer has none,
+  the app offers it (version 26.13.1 from nodejs.org, about 41 MB on
+  Windows). It downloads only when you click, and only if the file's
+  SHA-256 is the one built into the app and the one nodejs.org lists.
+  Settings → Developer shows which Node.js the extensions use and
+  removes the downloaded one. Servers that start with `npx` still need
+  Node.js installed on the computer.
+- On Windows, servers that need Python 3 are started with `py` or
+  `python`, not the Microsoft Store's stand-in `python3`.
+- *Browse extensions* (Settings → Developer) lists 16 public `.mcpb`
+  releases, each a publisher's own GitHub release, in 6 categories with
+  a search. *Install* downloads the bundle only when you press it, checks
+  its SHA-256 against the listed one and shows the preview below before
+  anything is installed. An installed extension with a newer listed
+  version offers the update.
+- The preview of an extension shows its publisher, where it comes from,
+  its SHA-256 and the bundle's signature: trusted (it chains to the
+  system's code-signing roots), self-signed, untrusted, unverifiable,
+  invalid or unsigned. A self-signed, untrusted, unverifiable or
+  unsigned bundle needs an extra confirmation, and an invalid one (changed
+  after it was signed) can't be installed.
+
+**Files from GitHub and Google**
+- *Add from GitHub*, in a chat's attach menu and a project's menu: pick
+  text files from a repository's tree to add to the chat or to the
+  project's knowledge. Public repositories need no sign-in (GitHub
+  allows 60 requests an hour); an optional access token, kept in the
+  system's credential store, reads private repositories and raises the
+  limit to 5,000 an hour.
+- *Add from a link*: a Google Drive file, or a Google Doc, Sheet or
+  Slides deck shared as "anyone with the link". A Doc comes in as
+  Markdown, a Sheet (the one the link shows) as CSV and a deck as text.
+  There is no Google sign-in, so a file that isn't shared by link is
+  refused.
+
+**Chats and styles**
+- Settings → Profile: a custom style can be drafted from up to 3
+  writing samples (6,000 characters each, at least 200 in all). A fast
+  model describes how they are written; you edit the draft and save it.
+  The samples are sent once and not stored. Up to 20 drafts a day, with
+  an API key or on your Claude account.
+- Below 900 px the artifact panel opens as a sheet over the chat, with
+  *Back to chat* in place of *Close*.
+- An artifact's error is shown once; before, it showed in the app and
+  again inside the artifact.
+- Settings no longer says that searching past chats is unavailable on
+  your Claude account.
+
+**Keys and errors**
+- The key of an OpenAI-compatible endpoint is kept in the system's
+  credential store (an existing key is moved there) and Settings shows
+  it masked. Where the system has no credential store it stays in the
+  app's database.
+- Many error messages from the engine now appear in the interface
+  language (English or Turkish); the original English text stays under
+  *Details*.
+
+**Interface**
+- Lists, tabs and menus can be driven with the arrow keys, Home and End.
+- The Code side panel can be resized: it keeps at least 300 px, and the
+  chat keeps at least 400 px.
+- In a diff, a binary file is a note instead of a broken line, and a
+  diff of more than 1,500 lines shows the first 1,500 with a button for
+  the rest.
+- Text contrast meets WCAG AA in both themes (body, secondary and status
+  text, and accent buttons).
+- Nothing is clipped at 420 px wide.
+- Onboarding keeps what you typed when you change the language, and says
+  why it can't go on without a key. Project cards count chats in each
+  language, and task times and review comments on removed lines are in
+  the interface language.
+
+**Known limits**
+- The Node.js download was tried only against a local test server, not
+  against nodejs.org.
+- The extension directory and the GitHub and Google link sources were
+  tried only against local test servers. Google's export formats were
+  not checked against Google, and files that aren't shared by link
+  can't be read: that would need a Google sign-in, and the app has no
+  Google client registered for it.
+- Drafting a style was tried with an API key against a stand-in, not on
+  your Claude account.
+- Some messages from the engine are still English in the Turkish
+  interface: the engine-busy texts, its crash text, errors when
+  continuing a reply, its notifications, the success text when a
+  worktree's changes are applied, and the diagnostics' labels.
+- Update notices cover only extensions the directory lists. The
+  connector directory still has none of Anthropic's own account
+  connectors, and MCP sampling is not supported.
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply. A release build was not measured.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- An MCP App page can reach the hosts its server declares without asking
+  you first.
+- MCP Apps are shown inline only: no side panel or full screen, and an
+  app can't update what Claude knows.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- The CI end-to-end job has still not been seen passing on GitHub: the
+  WebView's debugging port doesn't open on the runner. The same 15 tests
+  pass on a development machine.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs, so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.6] - 2026-11-22
 
 Continue a reply that was cut off, much less work while a reply streams,
