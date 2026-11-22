@@ -307,6 +307,11 @@ impl Harness {
         assert!(self.st.pending_perms.lock().values().all(|p| p["conversation_id"] != c), "a permission prompt left");
         let states: Vec<bool> = self.events("generation-state").iter().map(|e| e["running"].as_bool().unwrap()).collect();
         assert_eq!(states, vec![true, false]);
+        // sent just after the state event, behind the turn's own housekeeping writes: a slow machine needs a moment
+        let t0 = Instant::now();
+        while self.events("conversation-updated").is_empty() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(!self.events("conversation-updated").is_empty());
     }
 }
@@ -543,7 +548,9 @@ fn the_final_write_lands_after_the_saves_made_while_streaming() {
             let h = chat(&api);
             h.send("Hi");
             if how == "stop" {
-                until("the reply to stream", || h.path().get(1).filter(|m| m.content.as_array().unwrap().len() == 40).map(|_| ())).await;
+                // all 40 blocks and the whole text of the last one: Stop keeps what has been read, and a slow machine may not have read the end yet
+                let whole = long_text(39).len();
+                until("the reply to stream", || h.path().get(1).filter(|m| m.content.as_array().unwrap().len() == 40 && m.content[39]["text"].as_str().is_some_and(|t| t.len() == whole)).map(|_| ())).await;
                 engine::stop(&h.st, &h.conv);
             }
             let end = h.ended().await;

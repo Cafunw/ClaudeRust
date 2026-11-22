@@ -69,6 +69,25 @@ function tail(n) {
   return text.slice(-n).trim();
 }
 
+/** The app's own log, which says where its start stopped (the dev copy itself prints nothing once it runs). */
+function appLogTail(n) {
+  try {
+    const identifier = JSON.parse(fs.readFileSync(config, 'utf8')).identifier;
+    return fs.readFileSync(path.join(process.env.APPDATA, identifier, 'logs', 'clauderust.log'), 'utf8').slice(-n).trim();
+  } catch (e) {
+    return `(no app log: ${e.code || e.message})`;
+  }
+}
+
+/** What the debugging port answers and how many WebView2 processes exist, for the heartbeat. */
+async function portState() {
+  const t = await targets();
+  const webviews = process.platform === 'win32'
+    ? (spawnSync('tasklist', ['/FI', 'IMAGENAME eq msedgewebview2.exe', '/NH'], { encoding: 'utf8' }).stdout.match(/msedgewebview2\.exe/g) || []).length
+    : 0;
+  return `port 9333: ${t === null ? 'closed' : JSON.stringify(t.map((x) => `${x.type} ${String(x.url).slice(0, 60)}`))}; WebView2 processes: ${webviews}`;
+}
+
 let code = 1;
 try {
   const t0 = Date.now();
@@ -81,7 +100,7 @@ try {
     if (Date.now() - beat > 60_000) {
       beat = Date.now();
       const last = tail(300).split(/\r?\n/).pop();
-      console.log(`[${Math.round((beat - t0) / 1000)} s] waiting for the window; the dev copy's last line: ${last}`);
+      console.log(`[${Math.round((beat - t0) / 1000)} s] waiting for the window; the dev copy's last line: ${last}; ${await portState()}`);
     }
     await sleep(1000);
   }
@@ -91,7 +110,9 @@ try {
   code = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit', env: { ...process.env, CLAUDERUST_E2E_REQUIRED: '1' } }).status ?? 1;
 } catch (e) {
   console.error(e.message);
-  console.error(`--- the dev copy's output, last lines ---\n${tail(6000)}`);
+  console.error(`--- the dev copy's output, last lines ---\n${tail(3000)}`);
+  console.error(`--- the app's own log, last lines ---\n${appLogTail(6000)}`);
+  console.error(`--- ${await portState()}`);
 } finally {
   stop();
 }
