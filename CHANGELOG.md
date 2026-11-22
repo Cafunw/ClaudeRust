@@ -3,6 +3,106 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.6] - 2026-11-22
+
+Continue a reply that was cut off, much less work while a reply streams,
+no white flash at start, artifacts kept off the network, and a larger
+connector directory.
+
+**Chats**
+- *Continue* on the last reply when it was stopped or broke off with an
+  error: Claude goes on from where it stopped instead of starting over
+  (*Retry* still writes it again). With an API key the new text is added
+  to the same message, less what it repeats of the end. On your Claude
+  account the Claude Code session is resumed with the reply's last words,
+  and the rest is kept as a second message in the same answer. A reply
+  that stopped in a tool call, a Research report and replies of
+  OpenAI-compatible models can still only be retried.
+- On your Claude account, what had streamed in of a reply is kept when
+  you stop it or when Claude Code exits in the middle of it.
+- Much less data goes from the engine to the window while a reply
+  streams: about 7 times the size of the text instead of about 80 times
+  (measured on a 77,900-character reply with 30 code blocks), and in that
+  test the longest pause between frames fell from 59 ms to 16 ms. The
+  reply is redrawn up to 10 times a second (before, about 20).
+- The window no longer flashes white when it opens in a dark theme: it
+  starts in the colour of the theme you used last.
+
+**Artifacts**
+- Artifacts can no longer reach other hosts: requests, and images, media
+  and fonts from other sites, are blocked, as in Claude Desktop's
+  artifact sandbox. Scripts from the usual CDNs and Google Fonts still
+  load, so React and Mermaid, `window.storage` and
+  `window.claude.complete` work as before, and Claude is told to put data
+  and images in the artifact itself. A blocked request shows as the
+  artifact's error, with *Try fixing*.
+- The artifact panel closes when you switch to a branch of the chat that
+  has no artifact, and opens again when you come back to one that has.
+
+**Connectors**
+- *Browse connectors* lists 48 remote MCP servers run by their vendors
+  (before, 15), each checked against its vendor's documentation, with a
+  filter for their 11 categories. New among them: GitLab, Vercel,
+  Netlify, Cloudflare, Hugging Face, monday.com, ClickUp, Airtable,
+  Webflow, PostHog, Datadog and PagerDuty.
+
+**Interface**
+- Labels that were still in English in the Turkish interface (pasted
+  text, token counts, the MCP config example, the palette's Developer
+  entry) are translated. An untitled chat is *New chat* (*Yeni sohbet*)
+  everywhere and an untitled Code session *Untitled* (*Adsız*); a chat
+  whose first message has no text stays untitled instead of being named
+  "New chat" in English.
+- Search snippets no longer show raw Markdown (table pipes, headings,
+  code fences, bold marks, link targets), and a table that follows a
+  code block no longer touches it.
+
+**Development**
+- `npm run build:unsigned` builds the installers without the updater's
+  signing key.
+- The Claude account engine's turn loop has 11 end-to-end tests against a
+  stand-in Claude Code CLI: a plain turn, a permission allowed and
+  denied, resume and fork, a CLI that dies mid-reply, continuing a cut-off
+  reply, a rate-limit event, Stop, a CLI that stays after its result, a
+  lost session and a workflow.
+- Test copies of the app (a development build started with the WebView
+  debugging port, or any build started with `CLAUDERUST_OFFSCREEN=1`)
+  open off-screen and never take focus.
+- The end-to-end launcher picks a debugging port the machine lets it bind
+  (9333 first). When it fails it prints that port's state, the app's log,
+  its processes and folders, and the reserved port ranges.
+- The test that failed on the Windows and macOS CI runners with 0.1.5 now
+  waits for what it checks; those jobs passed on the last run.
+
+**Known limits**
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply. A release build was not measured.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- The connector directory has no Desktop extension directory and none of
+  Anthropic's own account connectors. There is no extension update
+  check, and MCP sampling is not supported.
+- An MCP App page can reach the hosts its server declares without asking
+  you first.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- The CI end-to-end job has not yet been seen passing on GitHub: its last
+  run failed because the WebView's debugging port never opened on the
+  runner. This release changes how the port is chosen.
+- MCP Apps are shown inline only: no side panel or full screen, and an app
+  can't update what Claude knows.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs, so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.5] - 2026-11-22
 
 Plan usage limits, thinking and Fast mode on your Claude account, code
