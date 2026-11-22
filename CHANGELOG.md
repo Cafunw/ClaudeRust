@@ -3,6 +3,69 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.3] - 2026-11-22
+
+Long conversations open fast, Auto mode asks in more cases, older MCP
+servers connect and can ask you questions, and clearer network errors.
+
+**Long conversations**
+- A long conversation opens quickly: only the latest 40 turns (fewer when
+  they are long) are drawn, and older ones load as you scroll up or press
+  *Show earlier messages*. Find in the conversation still searches all of
+  it, and the outline has *Show earlier messages* to list every turn.
+
+**Code**
+- Auto permission mode now also asks before a command that hands a program
+  code or a command to run through its options or stdin (for example
+  `python -c`, `node --eval`, `make -f -`, `cargo --config`, compiler
+  plugins), before installing a named package, and before git commands that
+  copy hooks in (`--template`).
+- It also asks before running scripts and build files that changed during
+  the session, before git runs hooks the session changed, and before editing
+  scripts, build files, CI workflows or hook files.
+
+**MCP**
+- Remote MCP servers that only speak the older HTTP+SSE transport connect:
+  when a server turns the newer transport down, the app tries the older one.
+- A server can ask you for information while it works (elicitation): a
+  dialog shows its message and fields, and you send, decline or close it.
+  What you type there goes to that server.
+- Requests to remote MCP servers follow a redirect only within the same
+  site, as their sign-in already did.
+
+**Security**
+- Windows and macOS: the credential-store entries (API key, MCP sign-ins)
+  are named after the app's identifier, so a development or test copy keeps
+  its own instead of sharing the installed app's. The installed app keeps
+  the entries it already had.
+- A copy of the app registers itself for `clauderust://` links only with the
+  installed app's identifier and only when no working handler is
+  registered, so starting another copy no longer takes the links over
+  (Windows and Linux; the Linux check is not yet tried on Linux).
+
+**Interface**
+- New chats and new code sessions start on the model you picked last, kept
+  separately for each; after a change of the default model in Settings, or
+  when that model is no longer offered, they start on the default.
+- Network errors in Settings (Test connection, Load models), on MCP server
+  cards and in Updates are said plainly, with the raw error text under
+  *Details*.
+- Words in table cells stay whole; a wide table scrolls sideways.
+- In a narrow window the Code workspace opens as a sheet over the dimmed
+  chat; a click beside it closes it.
+
+**Stability**
+- An answer saved while it streams in is written in the background, so a
+  slow disk no longer holds up the stream.
+- At most 64 artifact documents are kept for display, the oldest going
+  first, instead of all of them being dropped at once.
+
+**Development**
+- CI runs every Rust test target (unit and integration tests) on Windows,
+  Ubuntu and macOS, and the UI lint and tests; these jobs first run with
+  this release. The new end-to-end UI test drives a development copy on
+  Windows and is not part of the installer.
+
 ## [0.1.2] - 2026-11-22
 
 Sign-in for remote MCP servers, tools in chats on your Claude account,
