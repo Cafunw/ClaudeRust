@@ -82,15 +82,22 @@ copy, as the `e2e` CI job does:
 npm run e2e        # or: node ui/e2e/run.mjs [tauri config]
 ```
 
-`ui/e2e/run.mjs` starts `npx tauri dev --no-watch --config dev/e2e.conf.json`
-(its own identifier, so its own settings and chats, not the installed app's)
-with these variables, waits for the window (up to 25 minutes for a first
-build), runs the tests and ends the copy's process tree:
+`ui/e2e/run.mjs` starts `npx tauri dev --no-watch --config <config>` with
+`dev/e2e.conf.json` (its own identifier, so its own settings and chats, not
+the installed app's) plus the window entries of `tauri.conf.json`, whose
+`additionalBrowserArgs` carry the debugging port (9333, or the next free one)
+next to wry's own WebView2 arguments; it writes that config to
+`target/e2e/tauri.e2e.conf.json`. The port does not go through
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which the copy runs without: the
+WebView2 of a GitHub Windows runner never applied that variable. It starts
+the copy with these variables, waits for the window (up to 12 minutes for a
+first build), prints the debugging flag on the copy's browser process, runs
+the tests and ends the copy's process tree:
 
 | Variable | Value | Why |
 |---|---|---|
 | `CLAUDERUST_API_KEY` | `sk-ant-test` | the only key the mock takes; the keyring is not touched |
-| `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` | `--remote-debugging-port=9333` | the port the tests drive the page on |
+| `CLAUDERUST_OFFSCREEN` | `1` | the window opens off-screen and never takes focus |
 | `CLAUDE_CONFIG_DIR` | an empty temporary folder | a built-in Code session runs your own Claude Code hooks from `<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`; on Windows `HOME` and `USERPROFILE` do not move that folder (the app asks Windows for the profile folder) |
 | `CLAUDERUST_E2E_REQUIRED` | `1` (for the tests only) | a test that would be skipped fails instead |
 
@@ -98,8 +105,10 @@ The copy's output goes to `target/e2e/dev.log`, and on a failure the app's
 own log is copied next to it (`app.log`; CI uploads both as the `e2e-logs`
 artifact). It refuses to start while something else listens on port 9333.
 
-To drive a copy you started yourself instead (for example to watch it), set
-the same variables, start it, and run the tests once the window is up:
+To drive a copy you started yourself instead, set the same variables (the
+debugging port in the environment variable here, which a local WebView2
+applies; a development build with that port also opens off-screen), start it,
+and run the tests once the window is up:
 
 ```powershell
 $env:CLAUDERUST_API_KEY = 'sk-ant-test'

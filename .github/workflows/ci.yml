@@ -61,12 +61,12 @@ jobs:
         run: npm run test:ui
 
   # the end-to-end UI suite (ui/e2e), driven over the WebView2 debugging port
-  # of a dev copy of the app: Windows only
-  # informational until its first green run: on the runner the WebView2 debugging port never opens (see the log of the failing step)
+  # of a dev copy of the app: Windows only. The port is in the window's own
+  # WebView2 arguments (run.mjs): the runner's WebView2 never applied it from
+  # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
   e2e:
     runs-on: windows-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

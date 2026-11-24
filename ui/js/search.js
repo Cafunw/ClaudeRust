@@ -28,6 +28,8 @@ export function openSearch() {
   let idx = 0;
   let tab = 'all';
   const close = () => { scrim.remove(); open = null; };
+  // "@ for files" only where there are files: a code session's folder
+  chatContext().then((ctx) => { if (!(ctx && ctx.cwd)) $('.pal-hint', scrim).textContent = t('pal_hint_chat'); }, () => {});
   const choose = (it) => {
     close();
     if (!it) return;

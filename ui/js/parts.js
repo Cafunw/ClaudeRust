@@ -290,6 +290,16 @@ function expanded(el) {
   if (head && head.tagName === 'BUTTON') head.setAttribute('aria-expanded', String(el.classList.contains('open')));
 }
 
+/** "Thought for 12s", "Thought for 1m 5s" from a block's `thinking_ms`; '' when it wasn't timed. */
+export function thoughtFor(ms) {
+  const n = Number(ms);
+  if (ms === null || ms === undefined || ms === '' || !Number.isFinite(n) || n < 0) return '';
+  const sec = Math.max(1, Math.round(n / 1000));
+  if (sec < 60) return t('thought_for_s', { s: sec });
+  const m = Math.floor(sec / 60);
+  return sec % 60 ? t('thought_for_m_s', { m, s: sec % 60 }) : t('thought_for_m', { m });
+}
+
 function renderThinking(el, p) {
   if (!el.classList.contains('thinking')) {
     el.className = 'thinking';
@@ -304,11 +314,15 @@ function renderThinking(el, p) {
     ic.innerHTML = icon('bulb', 15);
     if (!el.dataset.userToggled) el.classList.add('open');
   } else {
-    lab.textContent = t('thought_process');
+    lab.textContent = thoughtFor(p.thinking_ms) || t('thought_process');
     lab.classList.remove('shimmer');
     ic.innerHTML = icon('clock', 15);
     if (!el.dataset.userToggled) el.classList.remove('open');
   }
+  // thinking that came without its text (omitted by the API) has nothing to open
+  const empty = !p.raw && !p.streaming && !p.redacted;
+  el.classList.toggle('empty', empty);
+  el.querySelector('.thinking-head').disabled = empty;
   expanded(el);
   const body = el.querySelector('.thinking-body');
   if (p.redacted && !p.raw) {
@@ -402,6 +416,11 @@ export function errorMessage(err) {
   return err.message || t('error_title');
 }
 
+// the help sites the app's own error sentences name: a link's address comes from this list, never from the message
+const HELP_LINK = /\b(?:https:\/\/)?(claude\.com\/claude-code|nodejs\.org|www\.python\.org\/downloads\/|docs\.astral\.sh\/uv\/)/g;
+/** Escaped text with the help sites it names made links (opened in the browser by the click handler above). */
+export const linkHelp = (escaped) => escaped.replace(HELP_LINK, (m, site) => `<a href="https://${site}">${m}</a>`);
+
 function renderNotice(el, p, ctx) {
   el.className = 'notice';
   let html = '';
@@ -411,7 +430,7 @@ function renderNotice(el, p, ctx) {
       const msg = errorMessage(p.error);
       const raw = (p.error && p.error.message) || '';
       const details = raw && raw !== msg ? `<details class="err-raw"><summary>${esc(t('err_details'))}</summary><div class="mono">${esc(raw)}</div></details>` : '';
-      html = `${icon('alert', 16)}<div class="grow"><div>${esc(msg)}</div>${details}<div class="actions"></div></div>`;
+      html = `${icon('alert', 16)}<div class="grow"><div>${linkHelp(esc(msg))}</div>${details}<div class="actions"></div></div>`;
       break;
     }
     case 'refusal':

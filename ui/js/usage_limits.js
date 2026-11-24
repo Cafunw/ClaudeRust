@@ -2,12 +2,16 @@
 // the sidebar footer with a card of every limit, and a banner over the
 // composer when one is close or reached. Sending stays possible either way:
 // the server decides.
-import { t } from './i18n.js';
+import { t, currentLanguage } from './i18n.js';
 import { call, on } from './api.js';
 import { esc, h, showMenu } from './util.js';
+import { icon } from './icons.js';
+import { loadLocal, saveLocal } from './store.js';
 import { notRegistered } from './optional_cmd.js';
 
 const LABELS = { five_hour: 'ul_5h', seven_day: 'ul_week', weekly: 'ul_week', seven_day_opus: 'ul_week_opus', seven_day_sonnet: 'ul_week_sonnet', overage: 'ul_extra' };
+// the limit as a sentence names it ("your weekly limit for all models")
+const PHRASES = { five_hour: 'ul_ph_5h', seven_day: 'ul_ph_week', weekly: 'ul_ph_week', seven_day_opus: 'ul_ph_week_opus', seven_day_sonnet: 'ul_ph_week_sonnet', overage: 'ul_ph_extra' };
 
 /** A percentage from a fraction (`utilization`, which can pass 1) or a percent (`used_pct`). */
 function pct(fraction, percent) {
@@ -52,6 +56,24 @@ export function normalizeLimits(payload) {
 
 export function limitLabel(x) {
   return x.label || (LABELS[x.key] ? t(LABELS[x.key]) : x.key.replace(/_/g, ' '));
+}
+
+/** The banner's sentence for the limit shown first. */
+export function bannerText(level, x) {
+  const s = t(level === 'exceeded' ? 'ul_over' : 'ul_near', { limit: limitPhrase(x) });
+  // a Turkish sentence starts with the limit's name ("haftalık …")
+  return s.charAt(0).toLocaleUpperCase(currentLanguage()) + s.slice(1);
+}
+
+/** "your weekly limit for all models": the limit as a sentence names it. */
+export function limitPhrase(x) {
+  return PHRASES[x.key] ? t(PHRASES[x.key]) : t('ul_ph_other', { limit: limitLabel(x) });
+}
+
+/** What a dismissed banner stays hidden for: a new level, limit or window shows it again. */
+export function bannerKey(level, x) {
+  // payloads may restate the same reset a few seconds apart
+  return `${level}|${x.key}|${x.resetsAt ? Math.round(x.resetsAt / 6e5) : ''}`;
 }
 
 /** "2 h 5 min", "35 min", "3 d 4 h" until `ms`. */
@@ -107,19 +129,21 @@ function drawMeter(btn) {
   btn.className = `ul-meter ${state.level}`;
   const v = top.pct === null ? null : Math.round(top.pct);
   btn.innerHTML = `<span class="ul-name">${esc(limitLabel(top))}</span>${v === null ? '' : `<span class="ul-mini"><span style="width:${v}%"></span></span><span class="ul-pct">${pctText(v)}</span>`}`;
-  const tip = t('ul_meter_tip', { limit: limitLabel(top), pct: v === null ? '—' : pctText(v) });
+  const tip = t('ul_meter_tip', { limit: limitPhrase(top), pct: v === null ? '—' : pctText(v) });
   btn.title = tip;
   btn.setAttribute('aria-label', tip);
 }
 
 function drawBanner(el) {
   const top = headline(state);
-  el.classList.toggle('hidden', state.level === 'ok' || !top);
-  if (state.level === 'ok' || !top) { el.innerHTML = ''; return; }
+  const key = top && bannerKey(state.level, top);
+  const off = state.level === 'ok' || !top || loadLocal().limitBannerDismissed === key;
+  el.classList.toggle('hidden', off);
+  if (off) { el.innerHTML = ''; return; }
   const reset = resetText(top.resetsAt, Date.now(), loc());
-  const msg = t(state.level === 'exceeded' ? 'ul_banner_over' : 'ul_banner_near', { limit: limitLabel(top) });
   el.className = `limit-banner ${state.level}`;
-  el.innerHTML = `<span>${esc(msg)}${reset ? ` ${esc(reset)}.` : ''}</span>`;
+  el.innerHTML = `<span class="grow">${esc(bannerText(state.level, top))}${reset ? ` ${esc(reset)}.` : ''}</span><button class="icon-btn sm" type="button" title="${esc(t('ul_dismiss'))}" aria-label="${esc(t('ul_dismiss'))}">${icon('x', 14)}</button>`;
+  el.querySelector('button').onclick = () => { saveLocal({ limitBannerDismissed: key }); redraw(); };
 }
 
 function redraw() {

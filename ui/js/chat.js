@@ -43,6 +43,7 @@ function composerInitial(conv) {
     research: o.research ?? false,
     style: o.style || 'normal',
     disabled_servers: o.disabled_servers || [],
+    disabled_tools: o.disabled_tools || [],
     permission_mode: o.permission_mode || store.settings.code_permission_mode || 'default',
   };
 }
@@ -1025,6 +1026,8 @@ function renderAssistantTurn(el, turn) {
       actions.appendChild(forkBtn);
     }
   }
+  // a turn that failed has no answer to rate
+  const failed = turn.parts.some((p) => p.kind === 'notice' && p.code === 'error');
   const fb = turn.meta && turn.meta.feedback;
   const up = h(`<button class="icon-btn sm ${fb === 'up' ? 'active' : ''}" title="${t('good')}">${icon('thumbUp', 15)}</button>`);
   const down = h(`<button class="icon-btn sm ${fb === 'down' ? 'active' : ''}" title="${t('bad')}">${icon('thumbDown', 15)}</button>`);
@@ -1040,7 +1043,8 @@ function renderAssistantTurn(el, turn) {
   rb.onclick = () => retry(turn);
   const rm = h(`<button class="icon-btn sm" title="${t('retry_with')}" style="width:18px;margin-left:-4px">${icon('chevDown', 12)}</button>`);
   rm.onclick = () => showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: tOr(`model_d_${m.id}`, m.description), checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
-  actions.append(up, down, rb, rm);
+  if (!failed) actions.append(up, down);
+  actions.append(rb, rm);
   const model = turn.meta && turn.meta.model;
   // ("<synthetic>": a reply Claude Code made up itself, such as its sign-in error, not a model's)
   if (model && model !== '<synthetic>') actions.appendChild(h(`<span class="small muted model-label">${esc(modelInfo(model).name)}</span>`));

@@ -574,5 +574,365 @@
       "en": "Run Apify Actors to scrape websites and collect web data. Runs can cost credits in your Apify account.",
       "tr": "Web sitelerini kazımak ve web verisi toplamak için Apify Actor'larını çalıştırır. Çalıştırmalar Apify hesabınızda kredi harcayabilir."
     }
+  },
+  {
+    "name": "Ahrefs",
+    "url": "https://api.ahrefs.com/mcp/mcp",
+    "auth": "oauth",
+    "category": "crm",
+    "domain": "api.ahrefs.com",
+    "docs_url": "https://docs.ahrefs.com/en/mcp/docs/introduction",
+    "description": {
+      "en": "SEO data from Ahrefs: backlinks, keywords, rankings and competitors. Uses the API units of your Ahrefs plan.",
+      "tr": "Ahrefs'ten SEO verileri: geri bağlantılar, anahtar kelimeler, sıralamalar ve rakipler. Ahrefs planınızın API birimlerini kullanır."
+    }
+  },
+  {
+    "name": "Basecamp",
+    "url": "https://mcp.basecamp.com/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.basecamp.com",
+    "docs_url": "https://basecamp.com/ai",
+    "description": {
+      "en": "Projects, to-dos, card tables, messages, docs, schedules and Campfire chats in Basecamp.",
+      "tr": "Basecamp'teki projeler, yapılacaklar, kart tabloları, mesajlar, belgeler, takvimler ve Campfire sohbetleri."
+    }
+  },
+  {
+    "name": "DigitalOcean",
+    "url": "https://mcp.digitalocean.com/mcp",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.digitalocean.com",
+    "docs_url": "https://docs.digitalocean.com/reference/mcp/configure-mcp/",
+    "description": {
+      "en": "Build, deploy and troubleshoot apps and infrastructure on DigitalOcean. Signs in, or takes an API token. Can change your resources.",
+      "tr": "DigitalOcean'da uygulama ve altyapı kurun, dağıtın, sorun giderin. Oturum açar ya da API belirteci alır. Kaynaklarınızı değiştirebilir."
+    }
+  },
+  {
+    "name": "Fly.io",
+    "url": "https://mcp.fly.io",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.fly.io",
+    "docs_url": "https://mcp.fly.io/",
+    "description": {
+      "en": "Fly.io apps, Machines, volumes, secrets and Managed Postgres. Can deploy and change your apps.",
+      "tr": "Fly.io uygulamaları, Machine'ler, birimler, gizli değerler ve Managed Postgres. Uygulamalarınızı dağıtabilir ve değiştirebilir."
+    }
+  },
+  {
+    "name": "New Relic",
+    "url": "https://mcp.newrelic.com/mcp/",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.newrelic.com",
+    "docs_url": "https://docs.newrelic.com/docs/agentic-ai/mcp/setup/",
+    "description": {
+      "en": "Metrics, logs, traces, entities and alerts in New Relic, within your own permissions.",
+      "tr": "New Relic'teki metrikler, günlükler, izler, varlıklar ve uyarılar; kendi izinleriniz dahilinde."
+    }
+  },
+  {
+    "name": "Railway",
+    "url": "https://mcp.railway.com",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.railway.com",
+    "docs_url": "https://docs.railway.com/ai/mcp-server",
+    "description": {
+      "en": "Railway projects, services, deployments, variables and logs. Can deploy and change your services.",
+      "tr": "Railway projeleri, hizmetleri, dağıtımları, değişkenleri ve günlükleri. Hizmetlerinizi dağıtabilir ve değiştirebilir."
+    }
+  },
+  {
+    "name": "Whimsical",
+    "url": "https://mcp.whimsical.com/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.whimsical.com",
+    "docs_url": "https://whimsical.com/integrations/mcp",
+    "description": {
+      "en": "Create and edit flowcharts, mind maps, wireframes and docs in Whimsical, or search your workspace.",
+      "tr": "Whimsical'da akış şemaları, zihin haritaları, tel çerçeveler ve belgeler oluşturup düzenleyin ya da çalışma alanınızda arayın."
+    }
+  },
+  {
+    "name": "WorkOS",
+    "url": "https://mcp.workos.com/mcp",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.workos.com",
+    "docs_url": "https://workos.com/docs/mcp",
+    "description": {
+      "en": "Organizations, users, SSO connections and Directory Sync in your WorkOS workspace.",
+      "tr": "WorkOS çalışma alanınızdaki kuruluşlar, kullanıcılar, SSO bağlantıları ve Directory Sync."
+    }
+  },
+  {
+    "name": "Zapier",
+    "url": "https://mcp.zapier.com/api/v1/connect",
+    "auth": "oauth",
+    "category": "automation",
+    "domain": "mcp.zapier.com",
+    "docs_url": "https://github.com/zapier/mcp",
+    "description": {
+      "en": "Run actions in thousands of apps through Zapier, or build automations with triggers. Actions count against your Zapier plan.",
+      "tr": "Zapier üzerinden binlerce uygulamada eylem çalıştırın ya da tetikleyicili otomasyonlar kurun. Eylemler Zapier planınızdan düşer."
+    }
+  },
+  {
+    "name": "AssemblyAI",
+    "url": "https://mcp.assemblyai.com/mcp",
+    "auth": "oauth",
+    "category": "media",
+    "domain": "mcp.assemblyai.com",
+    "docs_url": "https://www.assemblyai.com/docs/mcp-server",
+    "description": {
+      "en": "Transcribe, summarize and analyze audio with AssemblyAI. Signs in, or takes an API key; usage is billed at your API rates.",
+      "tr": "AssemblyAI ile sesi yazıya dökün, özetleyin ve çözümleyin. Oturum açar ya da API anahtarı alır; kullanım API fiyatlarınızla faturalanır."
+    }
+  },
+  {
+    "name": "Axiom",
+    "url": "https://mcp.axiom.co/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.axiom.co",
+    "docs_url": "https://axiom.co/docs/console/intelligence/mcp-server",
+    "description": {
+      "en": "Datasets and their schemas in Axiom: run APL queries over logs, traces and events.",
+      "tr": "Axiom'daki veri kümeleri ve şemaları: günlükler, izler ve olaylar üzerinde APL sorguları çalıştırın."
+    }
+  },
+  {
+    "name": "beehiiv",
+    "url": "https://mcp.beehiiv.com/mcp",
+    "auth": "oauth",
+    "category": "crm",
+    "domain": "mcp.beehiiv.com",
+    "docs_url": "https://github.com/beehiiv/agents",
+    "description": {
+      "en": "Newsletters, posts, podcasts, subscribers and their analytics in beehiiv.",
+      "tr": "beehiiv'deki bültenler, gönderiler, podcast'ler, aboneler ve analizleri."
+    }
+  },
+  {
+    "name": "ElevenLabs",
+    "url": "https://api.us.elevenlabs.io/v1/mcp",
+    "auth": "oauth",
+    "category": "media",
+    "domain": "api.us.elevenlabs.io",
+    "docs_url": "https://elevenlabs.io/mcp",
+    "description": {
+      "en": "Generate speech, music and sound effects, and manage voice agents in your ElevenLabs account. Generations use your credits.",
+      "tr": "ElevenLabs hesabınızda konuşma, müzik ve ses efekti üretin, sesli ajanları yönetin. Üretimler kredilerinizi kullanır."
+    }
+  },
+  {
+    "name": "Productboard",
+    "url": "https://mcp.productboard.com",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.productboard.com",
+    "docs_url": "https://developer.productboard.com/reference/mcp-server",
+    "description": {
+      "en": "Customer feedback, features and roadmaps in Productboard.",
+      "tr": "Productboard'daki müşteri geri bildirimleri, özellikler ve yol haritaları."
+    }
+  },
+  {
+    "name": "Box",
+    "url": "https://mcp.box.com",
+    "auth": "oauth",
+    "category": "docs",
+    "domain": "mcp.box.com",
+    "docs_url": "https://developer.box.com/guides/box-mcp/setup",
+    "description": {
+      "en": "Search, read and ask questions about files and folders in Box, within your own permissions.",
+      "tr": "Box'taki dosya ve klasörlerde arayın, okuyun ve soru sorun; kendi izinleriniz dahilinde."
+    }
+  },
+  {
+    "name": "Plaid",
+    "url": "https://api.dashboard.plaid.com/mcp/",
+    "auth": "oauth",
+    "category": "payments",
+    "domain": "api.dashboard.plaid.com",
+    "docs_url": "https://plaid.com/docs/resources/mcp/",
+    "description": {
+      "en": "Your Plaid integration as the Plaid Dashboard shows it: Items to diagnose, Link conversion and API usage.",
+      "tr": "Plaid Dashboard'un gösterdiği haliyle Plaid entegrasyonunuz: sorun tespiti için Item'lar, Link dönüşümü ve API kullanımı."
+    }
+  },
+  {
+    "name": "Semgrep",
+    "url": "https://mcp.semgrep.ai/mcp",
+    "auth": "none",
+    "category": "dev",
+    "domain": "mcp.semgrep.ai",
+    "docs_url": "https://github.com/semgrep/mcp",
+    "description": {
+      "en": "Scan code for security bugs and vulnerabilities with Semgrep's rules. No account needed.",
+      "tr": "Semgrep kurallarıyla kodu güvenlik hatalarına ve açıklarına karşı tarayın. Hesap gerekmez."
+    }
+  },
+  {
+    "name": "Sanity",
+    "url": "https://mcp.sanity.io",
+    "auth": "oauth",
+    "category": "docs",
+    "domain": "mcp.sanity.io",
+    "docs_url": "https://www.sanity.io/docs/ai/mcp-server",
+    "description": {
+      "en": "Documents, schemas, releases and GROQ queries in your Sanity projects. Can change your content.",
+      "tr": "Sanity projelerinizdeki belgeler, şemalar, sürümler ve GROQ sorguları. İçeriğinizi değiştirebilir."
+    }
+  },
+  {
+    "name": "Socket",
+    "url": "https://mcp.socket.dev/",
+    "auth": "oauth",
+    "category": "dev",
+    "domain": "mcp.socket.dev",
+    "docs_url": "https://github.com/SocketDev/socket-mcp",
+    "description": {
+      "en": "Supply-chain security, quality and license scores of npm, PyPI and other open-source packages, from Socket.",
+      "tr": "npm, PyPI ve diğer açık kaynak paketlerin tedarik zinciri güvenliği, kalite ve lisans puanları (Socket)."
+    }
+  },
+  {
+    "name": "Svelte",
+    "url": "https://mcp.svelte.dev/mcp",
+    "auth": "none",
+    "category": "docs",
+    "domain": "mcp.svelte.dev",
+    "docs_url": "https://svelte.dev/docs/ai/remote-setup",
+    "description": {
+      "en": "The Svelte and SvelteKit documentation, and a checker that suggests fixes for Svelte code.",
+      "tr": "Svelte ve SvelteKit belgeleri ile Svelte koduna düzeltme öneren bir denetleyici."
+    }
+  },
+  {
+    "name": "Astro Docs",
+    "url": "https://mcp.docs.astro.build/mcp",
+    "auth": "none",
+    "category": "docs",
+    "domain": "mcp.docs.astro.build",
+    "docs_url": "https://docs.astro.build/en/guides/build-with-ai/",
+    "description": {
+      "en": "Search the current Astro documentation and guides from the chat. No account needed.",
+      "tr": "Güncel Astro belgelerinde ve kılavuzlarında sohbetten arayın. Hesap gerekmez."
+    }
+  },
+  {
+    "name": "Pulumi",
+    "url": "https://mcp.ai.pulumi.com/mcp",
+    "auth": "oauth",
+    "category": "cloud",
+    "domain": "mcp.ai.pulumi.com",
+    "docs_url": "https://www.pulumi.com/docs/ai/guides/set-up-mcp-server/",
+    "description": {
+      "en": "Your Pulumi Cloud stacks, resources and deployments, and the Pulumi registry of cloud providers.",
+      "tr": "Pulumi Cloud'daki yığınlarınız, kaynaklarınız ve dağıtımlarınız ile bulut sağlayıcılarının Pulumi kaydı."
+    }
+  },
+  {
+    "name": "Plane",
+    "url": "https://mcp.plane.so/http/mcp",
+    "auth": "oauth",
+    "category": "projects",
+    "domain": "mcp.plane.so",
+    "docs_url": "https://developers.plane.so/dev-tools/mcp-server",
+    "description": {
+      "en": "Work items, cycles, modules and pages in your Plane Cloud workspace.",
+      "tr": "Plane Cloud çalışma alanınızdaki iş öğeleri, döngüler, modüller ve sayfalar."
+    }
+  },
+  {
+    "name": "Granola",
+    "url": "https://mcp.granola.ai/mcp",
+    "auth": "oauth",
+    "category": "docs",
+    "domain": "mcp.granola.ai",
+    "docs_url": "https://docs.granola.ai/help-center/sharing/integrations/mcp",
+    "description": {
+      "en": "Your Granola meeting notes and transcripts: search, read and summarize them.",
+      "tr": "Granola toplantı notlarınız ve dökümleriniz: arayın, okuyun ve özetleyin."
+    }
+  },
+  {
+    "name": "Lucid",
+    "url": "https://mcp.lucid.app/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.lucid.app",
+    "docs_url": "https://help.lucid.co/hc/en-us/articles/42578801807508-Integrate-Lucid-with-AI-tools-using-the-Lucid-MCP-server",
+    "description": {
+      "en": "Search, read and create Lucidchart and Lucidspark documents and diagrams.",
+      "tr": "Lucidchart ve Lucidspark belgelerinde ve diyagramlarında arayın, okuyun ve yenilerini oluşturun."
+    }
+  },
+  {
+    "name": "Rootly",
+    "url": "https://mcp.rootly.com/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "mcp.rootly.com",
+    "docs_url": "https://github.com/rootlyhq/rootly-mcp-server",
+    "description": {
+      "en": "Incidents, alerts, on-call schedules and retrospectives in Rootly. Signs in, or takes an API token.",
+      "tr": "Rootly'deki olaylar, uyarılar, nöbet çizelgeleri ve geriye dönük değerlendirmeler. Oturum açar ya da API belirteci alır."
+    }
+  },
+  {
+    "name": "Hex",
+    "url": "https://app.hex.tech/mcp",
+    "auth": "oauth",
+    "category": "analytics",
+    "domain": "app.hex.tech",
+    "docs_url": "https://learn.hex.tech/docs/api-integrations/mcp-server",
+    "description": {
+      "en": "Ask questions of your data in Hex, and search, open and create Hex projects.",
+      "tr": "Hex'te verilerinize soru sorun; Hex projelerinde arayın, açın ve yenilerini oluşturun."
+    }
+  },
+  {
+    "name": "Gamma",
+    "url": "https://mcp.gamma.app/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.gamma.app",
+    "docs_url": "https://developers.gamma.app/mcp/gamma-mcp-server",
+    "description": {
+      "en": "Create presentations, documents and web pages with Gamma, and edit existing ones. Uses your Gamma credits.",
+      "tr": "Gamma ile sunum, belge ve web sayfası oluşturun, mevcutlarını düzenleyin. Gamma kredilerinizi kullanır."
+    }
+  },
+  {
+    "name": "Canva",
+    "url": "https://mcp.canva.com/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.canva.com",
+    "docs_url": "https://www.canva.com/help/mcp-agent-setup/",
+    "description": {
+      "en": "Create, search and edit Canva designs, and export them.",
+      "tr": "Canva tasarımları oluşturun, arayın, düzenleyin ve dışa aktarın."
+    }
+  },
+  {
+    "name": "Mermaid",
+    "url": "https://mcp.mermaid.ai/mcp",
+    "auth": "oauth",
+    "category": "design",
+    "domain": "mcp.mermaid.ai",
+    "docs_url": "https://mermaid.ai/docs/ai/mcp-server",
+    "description": {
+      "en": "Create, check and render Mermaid diagrams, and keep them in your Mermaid account.",
+      "tr": "Mermaid diyagramları oluşturun, denetleyin ve çizdirin; Mermaid hesabınızda saklayın."
+    }
   }
 ]

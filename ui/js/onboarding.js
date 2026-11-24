@@ -12,14 +12,14 @@ export function renderOnboarding(view, done) {
     <img class="logo-mark" src="icon.png" alt="">
     <h1>${t('welcome_title')}</h1>
     <p>${t('welcome_desc')}</p>
-    <div class="field"><label class="label">${t('your_name')}</label><input class="input" data-f="name" value="${esc(store.settings.nickname || '')}"></div>
+    <div class="field"><label class="label" for="ob-name">${t('your_name')}</label><input class="input" id="ob-name" data-f="name" value="${esc(store.settings.nickname || '')}"></div>
     <div class="field" data-f="acct"><span class="spinner"></span></div>
     <div class="muted small" style="text-align:center;margin:0 0 14px">${t('acct_or_key')}</div>
-    <div class="field"><label class="label">${t('api_key')}</label><input class="input mono" data-f="key" type="password" placeholder="sk-ant-…" autocomplete="off">
+    <div class="field"><label class="label" for="ob-key">${t('api_key')}</label><input class="input mono" id="ob-key" data-f="key" type="password" placeholder="sk-ant-…" autocomplete="off">
       <div class="help">${t('api_key_help')} <a href="https://console.anthropic.com/settings/keys">${t('get_key')} ${icon('external', 12)}</a></div></div>
     <details style="margin-bottom:18px"><summary class="muted small" style="cursor:pointer">${t('advanced')}</summary>
-      <div class="field" style="margin-top:10px"><label class="label">${t('base_url')}</label><input class="input mono" data-f="base" value="${esc(store.settings.base_url || 'https://api.anthropic.com')}"><div class="help">${t('base_url_help')}</div></div>
-      <div class="field"><label class="label">${t('language')}</label><select class="select" data-f="lang">${LANGUAGES.map((l) => `<option value="${l.id}" ${l.id === (store.settings.language || 'auto') ? 'selected' : ''}>${l.name}</option>`).join('')}</select></div>
+      <div class="field" style="margin-top:10px"><label class="label" for="ob-base">${t('base_url')}</label><input class="input mono" id="ob-base" data-f="base" value="${esc(store.settings.base_url || 'https://api.anthropic.com')}"><div class="help">${t('base_url_help')}</div></div>
+      <div class="field"><label class="label" for="ob-lang">${t('language')}</label><select class="select" id="ob-lang" data-f="lang">${LANGUAGES.map((l) => `<option value="${l.id}" ${l.id === (store.settings.language || 'auto') ? 'selected' : ''}>${l.name}</option>`).join('')}</select></div>
     </details>
     <div data-f="err"></div>
     <button class="btn lg" data-f="go" style="width:100%">${t('continue_btn')}</button>

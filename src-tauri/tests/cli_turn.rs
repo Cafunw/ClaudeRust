@@ -10,9 +10,11 @@ use clauderust_lib::claudecode::{self, Cmd};
 use clauderust_lib::db::{Db, Message};
 use clauderust_lib::engine;
 use clauderust_lib::error::AppResult;
+use clauderust_lib::render;
 use clauderust_lib::state::{AppState, PermissionReply};
 use clauderust_lib::util::new_id;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
@@ -26,7 +28,8 @@ use tokio_util::sync::CancellationToken;
 /// its arguments, every line it reads and how it exited to `log.jsonl`. Steps: `["out", line]` writes a
 /// line, `["err", text]` writes to stderr, `["read", pattern]` waits for a line that has the pattern's
 /// fields, `["exit", code]` exits, `["stay"]` keeps it running after its input ends (as a background
-/// process of the CLI's can). Then, as the CLI does, it ends when its input does.
+/// process of the CLI's can), `["sleep", ms]` waits. Then, as the CLI does, it ends when its input does.
+/// Input that isn't JSON (a title's conversation) is logged as its text.
 const FAKE_CLI: &str = r#"
 const fs = require("fs");
 const path = require("path");
@@ -41,7 +44,7 @@ const input = [];
 let closed = false;
 let wake = () => {};
 require("readline").createInterface({ input: process.stdin })
-  .on("line", (l) => { const v = JSON.parse(l); log({ in: v }); input.push(v); wake(); })
+  .on("line", (l) => { let v; try { v = JSON.parse(l); } catch { v = l; } log({ in: v }); input.push(v); wake(); })
   .on("close", () => { closed = true; wake(); });
 const like = (v, p) => (p !== null && typeof p === "object" ? v != null && Object.keys(p).every((k) => like(v[k], p[k])) : v === p);
 const until = async (ready) => { while (!ready()) { if (closed) process.exit(3); await new Promise((r) => (wake = r)); } };
@@ -53,6 +56,7 @@ const flushed = () => Promise.all([process.stdout, process.stderr].map((s) => ne
     else if (op === "read") { let i = -1; await until(() => (i = input.findIndex((v) => like(v, arg))) >= 0); input.splice(0, i + 1); }
     else if (op === "exit") { await flushed(); process.exit(arg); }
     else if (op === "stay") setInterval(() => {}, 1 << 30);
+    else if (op === "sleep") await new Promise((r) => setTimeout(r, arg));
   }
   while (!closed) await new Promise((r) => (wake = r));
 })();
@@ -701,5 +705,189 @@ fn a_workflow_keeps_the_cli_open_and_its_stop_reaches_the_cli() {
         assert!(path[2].meta["duration_ms"].is_u64(), "the wall time of a turn that waited on a workflow");
         assert_eq!(h.cli.runs()[0].exit, Some(0));
         assert!(!h.st.cc_ctl.lock().contains_key(&h.conv));
+    });
+}
+
+// ------------------------------------------------------------- what the API engine shows too
+
+fn artifact(id: &str, body: &str, update: bool) -> String {
+    format!("<antArtifact identifier=\"{id}\" type=\"text/html\" title=\"Page\"{}>{body}</antArtifact>", if update { " command=\"update\"" } else { "" })
+}
+
+/// The Artifacts page's rows of the test's conversation: (identifier, the latest version's content).
+fn gallery(h: &Harness) -> Vec<(String, String)> {
+    let mut g: Vec<_> = h.st.db.artifact_list(100).unwrap().into_iter().filter(|a| a.conversation_id == h.conv).map(|a| (a.identifier, a.content)).collect();
+    g.sort();
+    g
+}
+
+/// The turn the window shows for these messages.
+fn rendered(msgs: &[Message]) -> Value {
+    let (live, streaming, names) = (HashMap::new(), HashSet::new(), HashMap::new());
+    let ctx = render::RenderCtx { math: false, live_tools: &live, streaming_tools: &streaming, mcp_names: &names, streaming_msg: None };
+    render::assistant_turn(&msgs.iter().collect::<Vec<_>>(), &ctx, &mut render::ArtifactTracker::default())
+}
+
+#[test]
+fn a_turns_artifacts_go_to_the_gallery_and_leave_with_the_chat() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        let search = json!({"type": "tool_use", "id": "toolu_1", "name": "WebSearch", "input": {"query": "q"}});
+        // an artifact before a tool call and its update in the answer after it; then a resumed turn makes another
+        let first = vec![
+            read_user(),
+            init(&sid),
+            assistant(&sid, "msg_1", "uuid-1", json!([{"type": "text", "text": format!("Here: {}", artifact("page", "<p>v1</p>", false))}, search])),
+            tool_result(&sid, "uuid-2", "toolu_1", "No results."),
+            assistant(&sid, "msg_2", "uuid-3", text(&format!("Better: {}", artifact("page", "<old_str>v1</old_str><new_str>v2</new_str>", true)))),
+            result(&sid, 0.01),
+        ];
+        let second = vec![read_user(), init(&sid), assistant(&sid, "msg_3", "uuid-4", text(&artifact("notes", "<p>n</p>", false))), result(&sid, 0.02)];
+        h.cli.script(vec![first, second]);
+        h.turn("Make a page", None).await.unwrap();
+        assert_eq!(gallery(&h), [("page".to_string(), "<p>v2</p>".to_string())], "the update applied to the version before it");
+        assert_eq!(h.st.db.search("Here", 5).unwrap().len(), 1, "every answer of the turn is searched, not only its last");
+        h.transcript(&sid, 0.01);
+        h.turn("And notes", None).await.unwrap();
+        assert!(h.cli.runs()[1].has(&["--resume", &sid]));
+        assert_eq!(gallery(&h).iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["notes", "page"]);
+        h.st.db.conv_delete(&h.conv).unwrap();
+        assert!(gallery(&h).is_empty(), "the chat's artifacts go with it");
+    });
+}
+
+#[test]
+fn a_continued_reply_keeps_its_artifact() {
+    block_on(async {
+        let h = Harness::new("code");
+        let sid = new_id();
+        let cut = vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Part one.")), json!(["exit", 1])];
+        let rest = vec![read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text(&artifact("page", "<p>done</p>", false))), result(&sid, 0.02)];
+        h.cli.script(vec![cut, rest]);
+        assert!(h.turn("Write a page", None).await.is_err());
+        let reply = h.path()[1].clone();
+        h.transcript(&sid, 0.01);
+        // what send_message's continue_reply starts: a turn from the reply itself
+        finish(h.start(&reply.id)).await.unwrap();
+        assert_eq!(gallery(&h), [("page".to_string(), "<p>done</p>".to_string())]);
+    });
+}
+
+#[test]
+fn thinking_comes_summarized_with_how_long_it_took() {
+    block_on(async {
+        let h = Harness::new("code");
+        let sid = new_id();
+        let start = json!({"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}});
+        let thought = "Plan: read the file first.";
+        h.cli.script(vec![vec![
+            read_user(),
+            init(&sid),
+            stream(&sid, start),
+            stream(&sid, json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}})),
+            stream(&sid, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": thought}})),
+            json!(["sleep", 150]),
+            stream(&sid, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}})),
+            stream(&sid, json!({"type": "content_block_stop", "index": 0})),
+            assistant(&sid, "msg_1", "uuid-1", json!([{"type": "thinking", "thinking": thought, "signature": "sig"}])),
+            stream(&sid, json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}})),
+            stream(&sid, json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Done."}})),
+            json!(["sleep", 500]),
+            stream(&sid, json!({"type": "content_block_stop", "index": 1})),
+            assistant(&sid, "msg_1", "uuid-2", text("Done.")),
+            stream(&sid, json!({"type": "message_stop"})),
+            result(&sid, 0.01),
+        ]]);
+        h.turn("Hi", None).await.unwrap();
+        let run = &h.cli.runs()[0];
+        assert!(run.has(&["--thinking-display", "summarized"]), "{:?}", run.args);
+        let a = &h.path()[1];
+        assert_eq!((&a.content[0]["thinking"], &a.content[1]["text"]), (&json!(thought), &json!("Done.")));
+        let ms = a.content[0]["thinking_ms"].as_u64().expect("its time is stored");
+        // from its start to its stop (about 150 ms), not the reply's end (650 ms or more); the lower bound is
+        // engine.rs's test (a reader the runner delays could see the start late)
+        assert!(ms < 640, "from its start to its stop, not the reply's end: {ms}");
+        assert!(a.content[1].get("thinking_ms").is_none());
+        let part = &rendered(&h.path()[1..])["parts"][0];
+        assert_eq!((&part["kind"], &part["raw"], &part["thinking_ms"]), (&json!("thinking"), &json!(thought), &json!(ms)));
+    });
+}
+
+#[test]
+fn a_cli_without_thinking_display_runs_without_it() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        h.cli.script(vec![
+            vec![json!(["err", "error: unknown option '--thinking-display'"]), json!(["exit", 1])],
+            vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Hello")), result(&sid, 0.01)],
+            vec![read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text("Again")), result(&sid, 0.01)],
+        ]);
+        h.turn("Hi", None).await.unwrap();
+        h.turn("More", None).await.unwrap();
+        let runs = h.cli.runs();
+        assert!(runs[0].has(&["--thinking-display", "summarized"]));
+        for r in &runs[1..] {
+            assert!(!r.args.iter().any(|a| a == "--thinking-display"), "{:?}", r.args);
+        }
+        assert_eq!(h.texts(), vec![text("Hi"), text("Hello"), text("More"), text("Again")], "nothing of the refused start is stored");
+    });
+}
+
+#[test]
+fn a_web_search_shows_its_links_as_sources_and_the_answer_cites_them() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        let url = "https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html";
+        let links = json!([{"title": "Announcing Rust 1.80.0", "url": url}]);
+        let output = format!("Web search results for query: \"rust 1.80\"\n\nLinks: {links}\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.");
+        h.cli.script(vec![vec![
+            read_user(),
+            init(&sid),
+            assistant(&sid, "msg_1", "uuid-1", json!([{"type": "tool_use", "id": "toolu_1", "name": "WebSearch", "input": {"query": "rust 1.80"}}])),
+            tool_result(&sid, "uuid-2", "toolu_1", &output),
+            assistant(&sid, "msg_2", "uuid-3", text(&format!("It shipped [in July]({url})."))),
+            result(&sid, 0.01),
+        ]]);
+        h.turn("When did Rust 1.80 ship?", None).await.unwrap();
+        let t = rendered(&h.path()[1..]);
+        let search = &t["parts"][0];
+        assert_eq!((&search["kind"], &search["query"], &search["status"]), (&json!("search"), &json!("rust 1.80"), &json!("done")));
+        assert_eq!(search["results"], json!([{"title": "Announcing Rust 1.80.0", "url": url, "domain": "blog.rust-lang.org", "page_age": null}]));
+        let answer = &t["parts"][1];
+        let html = answer["html"].as_str().unwrap();
+        assert!(html.contains(&format!("in July<a class=\"cite\" href=\"{url}\" title=\"Announcing Rust 1.80.0\">blog.rust-lang.org</a>")), "{html}");
+        assert_eq!(answer["sources"], json!([{"url": url, "title": "Announcing Rust 1.80.0", "domain": "blog.rust-lang.org"}]));
+    });
+}
+
+#[test]
+fn switched_off_tools_are_denied_to_the_cli() {
+    block_on(async {
+        let h = Harness::new("code");
+        let sid = new_id();
+        let mut options = h.st.db.conv_get(&h.conv).unwrap().options;
+        options["disabled_tools"] = json!(["github__create_issue", "weather__get_forecast"]);
+        options["disabled_servers"] = json!(["my notes"]);
+        h.st.db.conv_set_options(&h.conv, &options).unwrap();
+        h.cli.script(vec![vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Hi")), result(&sid, 0.01)]]);
+        h.turn("Hi", None).await.unwrap();
+        let run = &h.cli.runs()[0];
+        // a whole server is its tools' prefix, in the characters the CLI keeps in a name
+        assert!(run.has(&["--disallowedTools", "mcp__my_notes", "mcp__github__create_issue", "mcp__weather__get_forecast"]), "{:?}", run.args);
+    });
+}
+
+#[test]
+fn a_title_comes_without_the_models_label() {
+    block_on(async {
+        let h = Harness::new("code");
+        h.cli.script(vec![vec![out(json!({"type": "result", "subtype": "success", "is_error": false, "result": "**Title:** Replace TODO comment in calc.py."}))]]);
+        let conv = h.st.db.conv_get(&h.conv).unwrap();
+        let title = claudecode::title(&h.st, &conv, "Replace the TODO in calc.py", "Done.").await;
+        assert_eq!(title.as_deref(), Some("Replace TODO comment in calc.py"));
+        assert!(h.cli.runs()[0].has(&["--model", "haiku"]));
     });
 }

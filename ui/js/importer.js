@@ -201,7 +201,7 @@ function serverImport(title, desc, source, servers, found, sec, b) {
     go.disabled = true;
     try {
       const r = await call('import_mcp_servers', { source, names: fresh.map((s) => s.name) });
-      status.textContent = t('imp_servers_added', { n: r.imported });
+      status.textContent = t(r.imported === 1 ? 'imp_servers_added_one' : 'imp_servers_added', { n: r.imported });
       b.querySelectorAll('.imp-row').forEach((row) => {
         row.classList.add('done');
         if (!row.querySelector('.badge')) row.insertAdjacentHTML('beforeend', `<span class="badge">${esc(t('imp_exists'))}</span>`);
@@ -245,7 +245,7 @@ function desktopConnectors(d) {
     b.querySelectorAll('.notice').forEach((n) => n.remove());
     try {
       const r = await call('import_desktop_extensions', { ids: [...picked] });
-      status.textContent = t('imp_ext_added', { n: (r.installed || []).length });
+      status.textContent = t((r.installed || []).length === 1 ? 'imp_ext_added_one' : 'imp_ext_added', { n: (r.installed || []).length });
       const eb = errorsBox(r.errors);
       if (eb) b.appendChild(eb);
       const failed = new Set((r.errors || []).map((e) => e.id));

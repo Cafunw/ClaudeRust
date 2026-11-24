@@ -4,6 +4,8 @@
 
 #[path = "mcp_apps.rs"]
 pub mod apps;
+#[path = "artifact_tools.rs"]
+pub mod artifact_tools;
 #[path = "mcp_elicit.rs"]
 pub mod elicit;
 #[path = "mcp_sse.rs"]
@@ -1351,9 +1353,14 @@ impl McpManager {
     /// `tools/call` of `tool` on `server` from that server's app: only a
     /// tool the server lets its apps call; the whole result.
     pub async fn app_call(&self, server: &str, tool: &str, args: &Value) -> AppResult<Value> {
-        let s = self.app_callable(server, tool).await?;
+        self.app_callable(server, tool).await?;
+        self.call_raw(server, tool, args).await
+    }
+
+    /// `tools/call` of `tool` on `server`: the whole result, as the server sent it.
+    pub async fn call_raw(&self, server: &str, tool: &str, args: &Value) -> AppResult<Value> {
         let args = if args.is_object() { args.clone() } else { json!({}) };
-        s.request("tools/call", json!({"name": tool, "arguments": args}), Duration::from_secs(120)).await
+        self.server(server).await?.request("tools/call", json!({"name": tool, "arguments": args}), Duration::from_secs(120)).await
     }
 
     /// List resources and prompts of a server (for the attach menu).

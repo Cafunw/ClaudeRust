@@ -114,17 +114,19 @@ pub fn decide(policy: &str, chat_allowed: bool, approved: bool) -> Decision {
     }
 }
 
+/// Tool calls per (page, server) in the last minute; a page is an MCP App's
+/// conversation or an artifact (artifact_tools.rs).
 #[derive(Default)]
-struct Calls(HashMap<(String, String), VecDeque<Instant>>);
+pub(crate) struct Calls(HashMap<(String, String), VecDeque<Instant>>);
 
 impl Calls {
-    fn take(&mut self, conv: &str, server: &str, now: Instant) -> AppResult<()> {
+    pub(crate) fn take(&mut self, conv: &str, server: &str, now: Instant) -> AppResult<()> {
         let q = self.0.entry((conv.into(), server.into())).or_default();
         while q.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60)) {
             q.pop_front();
         }
         if q.len() >= CALLS_PER_MINUTE {
-            return Err(AppError::msg(format!("This app called its tools {CALLS_PER_MINUTE} times in a minute: wait a moment.")));
+            return Err(AppError::msg(format!("It called {server}'s tools {CALLS_PER_MINUTE} times in a minute: wait a moment.")));
         }
         q.push_back(now);
         Ok(())

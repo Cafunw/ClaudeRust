@@ -361,7 +361,10 @@ fn a_streamed_reply_is_stored_under_the_message() {
         assert_eq!(path.len(), 2);
         let a = &path[1];
         assert_eq!((a.role.as_str(), a.parent_id.as_deref()), ("assistant", Some(user.as_str())));
-        assert_eq!(a.content, json!([{"type": "thinking", "thinking": "Let me think", "signature": "sig"}, {"type": "text", "text": "Hello world"}]));
+        // the thinking with how long it took (from its start to its stop)
+        let ms = a.content[0]["thinking_ms"].clone();
+        assert!(ms.is_u64(), "{}", a.content);
+        assert_eq!(a.content, json!([{"type": "thinking", "thinking": "Let me think", "signature": "sig", "thinking_ms": ms}, {"type": "text", "text": "Hello world"}]));
         assert_eq!(a.meta["stop_reason"], "end_turn");
         assert_eq!(a.meta["usage"], json!({"input_tokens": 10, "output_tokens": 5}));
         assert_eq!(h.st.db.search("world", 5).unwrap().len(), 1, "indexed for search");

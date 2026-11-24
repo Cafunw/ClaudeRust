@@ -1,5 +1,7 @@
 //! `window.claude.complete` for artifacts: one short answer from the fast
-//! model. The artifact's sandboxed frame can't reach the app: its request
+//! model, through the API key or, in a chat on the Claude account, one call
+//! of its CLI (claudecode::one_shot, as titles are made there), with no tools
+//! either way. The artifact's sandboxed frame can't reach the app: its request
 //! comes through ui/js/artifacts.js, which asks the person first and passes on
 //! nothing but the prompt. So the frame chooses neither the model nor a system
 //! prompt, sees nothing of any conversation, and gets back only the text.
@@ -14,6 +16,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 pub const MAX_PROMPT_CHARS: usize = 20_000;
+/// The app's system prompt for every call: the frame's prompt is only ever the user message.
+pub const SYSTEM_PROMPT: &str = "You answer one request from an artifact: a small interactive app, made by Claude, that the user is running. Do what the request asks and output only the requested content, with no preamble. This is a single-turn call without tools, so you can't ask anything back: if the request is ambiguous, make a reasonable interpretation and proceed.";
 const MAX_OUTPUT_TOKENS: u32 = 2048;
 /// Calls one artifact may make in a minute.
 const PER_ARTIFACT_PER_MINUTE: usize = 10;
@@ -62,20 +66,22 @@ fn check_prompt(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// An error when window.claude.complete can't work in `conversation_id`.
-async fn engine_supported(state: &AppState, conversation_id: &str) -> AppResult<()> {
+/// Where window.claude.complete runs for `conversation_id`: on the Claude
+/// account ("account") or the API key ("api"); an error where it can't.
+async fn engine(state: &AppState, conversation_id: &str) -> AppResult<&'static str> {
     let conv = state.db.conv_get(conversation_id)?;
-    // shortcut: the API only; the account's CLI and other providers have no one-shot call for it yet
-    if conv.model.starts_with(crate::oai::PREFIX) || crate::claudecode::uses_cli(state, &conv).await {
-        return Err(AppError::msg("window.claude.complete needs an Anthropic API key, and this conversation doesn't run on one."));
+    // shortcut: other providers' models aren't asked; add their one-shot call if artifacts there need it
+    if conv.model.starts_with(crate::oai::PREFIX) {
+        return Err(AppError::msg("window.claude.complete needs Claude, and this conversation runs on another provider."));
     }
-    Ok(())
+    Ok(if crate::claudecode::uses_cli(state, &conv).await { "account" } else { "api" })
 }
 
-/// Asked before the person is: where it can't work, nobody is asked to allow it.
+/// Asked before the person is: where it can't work, nobody is asked to allow
+/// it; else where it runs, which the question names.
 #[tauri::command]
-pub async fn artifact_complete_check(state: tauri::State<'_, Arc<AppState>>, conversation_id: String) -> AppResult<()> {
-    engine_supported(&state, &conversation_id).await
+pub async fn artifact_complete_check(state: tauri::State<'_, Arc<AppState>>, conversation_id: String) -> AppResult<&'static str> {
+    engine(&state, &conversation_id).await
 }
 
 /// Answer `prompt` for the artifact `artifact_id` of `conversation_id`, once
@@ -83,12 +89,16 @@ pub async fn artifact_complete_check(state: tauri::State<'_, Arc<AppState>>, con
 #[tauri::command]
 pub async fn artifact_complete(state: tauri::State<'_, Arc<AppState>>, conversation_id: String, artifact_id: String, prompt: String) -> AppResult<String> {
     check_prompt(&prompt).map_err(AppError::msg)?;
-    engine_supported(&state, &conversation_id).await?;
-    let client = state.client()?;
+    let account = engine(&state, &conversation_id).await? == "account";
+    // without a key the call isn't counted
+    let client = if account { None } else { Some(state.client()?) };
     LIMITS.lock().take(&conversation_id, &artifact_id, Instant::now()).map_err(AppError::msg)?;
+    let Some(client) = client else {
+        return crate::claudecode::one_shot(&state, SYSTEM_PROMPT, &prompt, MAX_OUTPUT_TOKENS, TIMEOUT).await;
+    };
     let model_id = state.settings.read().title_model.clone();
     let model = models::info(&model_id);
-    let mut body = json!({"model": model_id, "max_tokens": MAX_OUTPUT_TOKENS, "messages": [{"role": "user", "content": prompt}]});
+    let mut body = json!({"model": model_id, "max_tokens": MAX_OUTPUT_TOKENS, "system": SYSTEM_PROMPT, "messages": [{"role": "user", "content": prompt}]});
     match model.thinking {
         models::Thinking::Disableable => body["thinking"] = json!({"type": "disabled"}),
         models::Thinking::BetweenTools => body["thinking"] = json!({"type": "between_tools"}),
@@ -146,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_conversation_on_an_api_key_asks_and_a_refusal_is_not_counted() {
+    fn the_check_names_the_engine_and_another_provider_is_refused_uncounted() {
         use tauri::Manager;
         let dir = std::env::temp_dir().join(format!("cr-artifact-ai-{}", crate::util::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -156,18 +166,19 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(st.clone());
         let ask = |conv: &str, prompt: &str| tauri::async_runtime::block_on(artifact_complete(app.state(), conv.into(), "a".into(), prompt.into())).unwrap_err().to_string();
+        let check = |conv: &str| tauri::async_runtime::block_on(artifact_complete_check(app.state(), conv.into())).map_err(|e| e.to_string());
         let account = st.db.conv_create("chat", "claude-haiku-5-5", None, None, &json!({})).unwrap();
         let other_provider = st.db.conv_create("chat", &format!("{}gpt", crate::oai::PREFIX), None, None, &json!({})).unwrap();
+        // the account answers (tests/artifact_account.rs runs it), and the dialog says so
+        assert_eq!(check(&account.id).unwrap(), "account");
+        assert!(ask(&account.id, "").contains("needs a prompt"));
+        // another provider is refused, and the check the dialog waits for says the same, so nobody is asked
+        assert!(ask(&other_provider.id, "hi").contains("another provider"));
+        assert!(check(&other_provider.id).unwrap_err().contains("another provider"));
         for id in [&account.id, &other_provider.id] {
-            assert!(ask(id, "hi").contains("needs an Anthropic API key"), "{id}");
-            // the check the dialog waits for says the same, so the person is never asked
-            let check = tauri::async_runtime::block_on(artifact_complete_check(app.state(), id.to_string())).unwrap_err().to_string();
-            assert!(check.contains("needs an Anthropic API key"), "{id}");
-            assert!(ask(id, "").contains("needs a prompt"));
-            assert!(!LIMITS.lock().used.contains_key(id.as_str()));
+            assert!(!LIMITS.lock().used.contains_key(id.as_str()), "{id}");
         }
-        // on the API the check passes, and the dialog is shown
         st.settings.write().chat_engine = "api".into();
-        assert!(tauri::async_runtime::block_on(artifact_complete_check(app.state(), account.id.clone())).is_ok());
+        assert_eq!(check(&account.id).unwrap(), "api");
     }
 }

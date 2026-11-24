@@ -221,7 +221,6 @@ const en = {
   sc_palette_cmds: "Commands only",
   sc_switch_conv: "Previous / next recent conversation",
   sc_panes: "Side-panel panes",
-  sc_panes_list: "Alt+1 Changes · 2 History · 3 Plan · 4 Terminal · 5 Tasks · 6 Preview · 7 Map · 8 Files",
   sc_queue: "Queue a message while Claude works",
   sc_queue_k: "Enter (while responding)",
   sc_mention: "Mention a file or symbol",
@@ -709,7 +708,7 @@ const en = {
   ul_title: 'Plan usage limits', ul_5h: '5-hour limit', ul_week: 'Weekly · all models', ul_week_opus: 'Weekly · Opus', ul_week_sonnet: 'Weekly · Sonnet', ul_extra: 'Extra usage', ul_none: 'No usage reported yet.',
   ul_explain: 'Your Claude plan allows a certain amount of use in each 5-hour window and each week. When a limit is reached, Claude may refuse new messages until it resets; you can still try sending.',
   ul_min: '{m} min', ul_h: '{h} h', ul_h_min: '{h} h {m} min', ul_d: '{d} d', ul_d_h: '{d} d {h} h', ul_resets: 'Resets in {in} ({at})', ul_reset_now: 'Resets any moment now',
-  ul_meter_tip: 'Usage limits: {pct} of your {limit} used', ul_banner_near: 'You’re close to your {limit}.', ul_banner_over: 'You’ve reached your {limit}. You can still send, but Claude may refuse until it resets.',
+  ul_meter_tip: 'Usage limits: {pct} of {limit} used',
   // Chat (round 5, ui-chat): diagrams, read aloud, accessibility, fast mode, research, files Claude made
   mermaid_title: 'Diagram', mermaid_source: 'Show source', mermaid_diagram: 'Show diagram', ra_read: 'Read aloud', ra_stop: 'Stop reading', ra_failed: 'Read aloud couldn’t start.',
   a11y_scroll_down: 'Scroll to the latest message', a11y_prev_version: 'Previous version', a11y_next_version: 'Next version', a11y_remove_x: 'Remove {x}', turn_off_x: 'Turn off {x}',
@@ -835,6 +834,19 @@ const en = {
   errk_ed_busy: 'Another extension is being downloaded.', errk_ed_checksum: 'The download doesn’t have the SHA-256 the directory lists, so it was deleted and not installed.',
   errk_ed_no_build: 'This extension has no build for this system.', errk_ed_not_https: 'Only https downloads are allowed.', errk_ed_unknown: 'That extension isn’t in the directory.',
   errk_ed_not_downloaded: 'Only a bundle the directory downloaded can be installed this way.',
+  art_ai_body_account: '“{title}” wants to ask Claude questions on your behalf. Each question runs on your Claude account and counts toward its usage limits.',
+  art_reload: 'Reload', art_full: 'Full screen', art_full_exit: 'Exit full screen (Esc)', art_tools_title: 'Tools this artifact can use',
+  art_tool_title: 'Let this artifact use {server}?', art_call_title: 'Allow this tool call?', art_tool_body: '“{title}” wants to run “{tool}” of {server} with:',
+  art_tool_reads: 'Can only read', art_tool_changes: 'Can read and make changes',
+  art_grant_claude: 'Claude', art_grant_claude_sub: 'Asks Claude questions (window.claude.complete)', art_grant_allowed: 'Allowed for this artifact', art_grant_declined: 'Declined for this artifact',
+  art_grant_revoke: 'Revoke', art_grant_reset: 'Ask again', art_grants_note: 'What you chose here lasts until ClaudeRust restarts.', art_grants_none: 'Nothing is allowed for this artifact now.',
+  lang_auto: 'Auto (system)', ul_dismiss: 'Dismiss', ul_near: 'You’re close to {limit}.', ul_over: 'You’ve reached {limit}. You can still send, but Claude may refuse until it resets.',
+  ul_ph_5h: 'your 5-hour limit', ul_ph_week: 'your weekly limit for all models', ul_ph_week_opus: 'your weekly Opus limit', ul_ph_week_sonnet: 'your weekly Sonnet limit', ul_ph_extra: 'your extra usage limit', ul_ph_other: 'a usage limit ({limit})',
+  thought_for_s: 'Thought for {s}s', thought_for_m: 'Thought for {m}m', thought_for_m_s: 'Thought for {m}m {s}s',
+  mcp_tools_of: 'Tools of {name}', mcp_tools_off: '{off} off', mcp_server_off: 'off',
+  tools_count_one: '1 tool', imp_servers_added_one: 'Added 1 server.', imp_ext_added_one: 'Installed 1 extension.', revert_all_confirm_one: 'Revert the changed file? This discards its changes.',
+  pal_hint_chat: 'Type > for commands · ↑↓ to move · Enter to open',
+  cd_cat_media: 'Audio and video', cd_cat_automation: 'Automation', ed_cat_design: 'Design and engineering',
 };
 
 const tr = {
@@ -1059,7 +1071,6 @@ const tr = {
   sc_palette_cmds: "Yalnızca komutlar",
   sc_switch_conv: "Önceki / sonraki son sohbet",
   sc_panes: "Yan panel sekmeleri",
-  sc_panes_list: "Alt+1 Değişiklikler · 2 Geçmiş · 3 Plan · 4 Terminal · 5 Görevler · 6 Önizleme · 7 Harita · 8 Dosyalar",
   sc_queue: "Claude çalışırken mesajı sıraya koy",
   sc_queue_k: "Enter (yanıt sürerken)",
   sc_mention: "Dosya ya da sembol etiketle",
@@ -1546,7 +1557,7 @@ const tr = {
   ul_title: 'Plan kullanım sınırları', ul_5h: '5 saatlik sınır', ul_week: 'Haftalık · tüm modeller', ul_week_opus: 'Haftalık · Opus', ul_week_sonnet: 'Haftalık · Sonnet', ul_extra: 'Ek kullanım', ul_none: 'Henüz kullanım bildirilmedi.',
   ul_explain: 'Claude planınız her 5 saatlik dilimde ve her hafta belli bir kullanıma izin verir. Bir sınıra ulaşıldığında Claude, sınır sıfırlanana kadar yeni mesajları reddedebilir; yine de göndermeyi deneyebilirsiniz.',
   ul_min: '{m} dk', ul_h: '{h} sa', ul_h_min: '{h} sa {m} dk', ul_d: '{d} g', ul_d_h: '{d} g {h} sa', ul_resets: '{in} sonra sıfırlanır ({at})', ul_reset_now: 'Her an sıfırlanabilir',
-  ul_meter_tip: 'Kullanım sınırları: {limit} için {pct} kullanıldı', ul_banner_near: '{limit} dolmak üzere.', ul_banner_over: '{limit} doldu. Yine de gönderebilirsiniz, ama Claude sınır sıfırlanana kadar reddedebilir.',
+  ul_meter_tip: 'Kullanım sınırları: {limit}, {pct} dolu',
   // Sohbet (tur 5, ui-chat): diyagramlar, sesli okuma, erişilebilirlik, hızlı mod, araştırma, Claude'un dosyaları
   mermaid_title: 'Diyagram', mermaid_source: 'Kaynağı göster', mermaid_diagram: 'Diyagramı göster', ra_read: 'Sesli oku', ra_stop: 'Okumayı durdur', ra_failed: 'Sesli okuma başlatılamadı.',
   a11y_scroll_down: 'En son mesaja kaydır', a11y_prev_version: 'Önceki sürüm', a11y_next_version: 'Sonraki sürüm', a11y_remove_x: 'Kaldır: {x}', turn_off_x: 'Kapat: {x}',
@@ -1672,6 +1683,19 @@ const tr = {
   errk_ed_busy: 'Başka bir eklenti indiriliyor.', errk_ed_checksum: 'İndirilen dosyanın SHA-256 özeti dizindekiyle eşleşmiyor; silindi ve kurulmadı.',
   errk_ed_no_build: 'Bu eklentinin bu sistem için derlemesi yok.', errk_ed_not_https: 'Yalnızca https indirmelerine izin verilir.', errk_ed_unknown: 'Bu eklenti dizinde yok.',
   errk_ed_not_downloaded: 'Bu yolla yalnızca dizinin indirdiği bir paket kurulabilir.',
+  art_ai_body_account: '“{title}” sizin adınıza Claude’a soru sormak istiyor. Her soru Claude hesabınızda çalışır ve kullanım sınırlarınıza sayılır.',
+  art_reload: 'Yeniden yükle', art_full: 'Tam ekran', art_full_exit: 'Tam ekrandan çık (Esc)', art_tools_title: 'Bu artifact’in kullanabileceği araçlar',
+  art_tool_title: 'Bu artifact {server} bağlayıcısını kullanabilsin mi?', art_call_title: 'Bu araç çağrısına izin verilsin mi?', art_tool_body: '“{title}”, {server} sunucusunun “{tool}” aracını şununla çalıştırmak istiyor:',
+  art_tool_reads: 'Yalnızca okuyabilir', art_tool_changes: 'Okuyabilir ve değişiklik yapabilir',
+  art_grant_claude: 'Claude', art_grant_claude_sub: 'Claude’a soru sorar (window.claude.complete)', art_grant_allowed: 'Bu artifact için izin verildi', art_grant_declined: 'Bu artifact için reddedildi',
+  art_grant_revoke: 'İzni kaldır', art_grant_reset: 'Yeniden sor', art_grants_note: 'Burada seçtikleriniz ClaudeRust yeniden başlayana kadar geçerli.', art_grants_none: 'Bu artifact için şu an hiçbir şeye izin verilmedi.',
+  lang_auto: 'Otomatik (sistem)', ul_dismiss: 'Kapat', ul_near: '{limit} dolmak üzere.', ul_over: '{limit} doldu. Yine de gönderebilirsiniz, ama Claude sınır sıfırlanana kadar reddedebilir.',
+  ul_ph_5h: '5 saatlik sınırınız', ul_ph_week: 'tüm modeller için haftalık sınırınız', ul_ph_week_opus: 'haftalık Opus sınırınız', ul_ph_week_sonnet: 'haftalık Sonnet sınırınız', ul_ph_extra: 'ek kullanım sınırınız', ul_ph_other: 'bir kullanım sınırınız ({limit})',
+  thought_for_s: '{s} sn düşündü', thought_for_m: '{m} dk düşündü', thought_for_m_s: '{m} dk {s} sn düşündü',
+  mcp_tools_of: '{name} araçları', mcp_tools_off: '{off} kapalı', mcp_server_off: 'kapalı',
+  tools_count_one: '1 araç', imp_servers_added_one: '1 sunucu eklendi.', imp_ext_added_one: '1 eklenti kuruldu.', revert_all_confirm_one: 'Değişen dosya geri alınsın mı? Değişiklikleri silinir.',
+  pal_hint_chat: 'Komutlar için > · gezinmek için ↑↓ · açmak için Enter',
+  cd_cat_media: 'Ses ve video', cd_cat_automation: 'Otomasyon', ed_cat_design: 'Tasarım ve mühendislik',
 };
 
 const dicts = { en, tr };
@@ -1697,7 +1721,7 @@ export function tOr(key, fallback) {
 }
 
 export const LANGUAGES = [
-  { id: 'auto', name: 'Auto' },
+  { id: 'auto', get name() { return t('lang_auto'); } },
   { id: 'en', name: 'English' },
   { id: 'tr', name: 'Türkçe' },
 ];

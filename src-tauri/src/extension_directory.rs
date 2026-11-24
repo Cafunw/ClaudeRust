@@ -1,7 +1,9 @@
 //! "Browse extensions": a curated list of public `.mcpb` releases, shipped in
 //! the binary (extension_directory.json) and never fetched. Each entry is a
 //! publisher's own GitHub release asset, its size and SHA-256 as GitHub's
-//! release API gave them on 2026-11-22. A bundle is downloaded only when the
+//! release API gave them on 2026-11-22 and 2026-11-24 (only stable releases
+//! whose bundle carries its own code: none that fetches the server from npm or
+//! PyPI when it starts). A bundle is downloaded only when the
 //! user presses Install, must have that exact hash, and is installed only
 //! after the user confirmed the usual preview.
 
@@ -13,8 +15,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const LIST: &str = include_str!("extension_directory.json");
-pub const CATEGORIES: [&str; 6] = ["dev", "data", "web", "productivity", "cloud", "security"];
-/// The largest bundle in the list is 64 MB.
+pub const CATEGORIES: [&str; 7] = ["dev", "data", "web", "productivity", "cloud", "security", "design"];
+/// The largest bundle in the list is 63 MB.
 const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
 /// Where GitHub sends a release download.
 const GITHUB_CDN: [&str; 3] = ["objects.githubusercontent.com", "release-assets.githubusercontent.com", "github-releases.githubusercontent.com"];
@@ -219,10 +221,14 @@ mod tests {
                 assert!(!e[k].as_str().unwrap_or_default().trim().is_empty(), "{id}: {k}");
             }
             assert!(CATEGORIES.contains(&e["category"].as_str().unwrap_or_default()), "{id}: category");
+            // the dialog says what each one needs installed (ed_needs_<runtime>); a binary needs nothing
+            assert!(["node", "uv", "python", "binary"].contains(&e["runtime"].as_str().unwrap_or_default()), "{id}: runtime");
             for lang in ["en", "tr"] {
                 assert!(!e["description"][lang].as_str().unwrap_or_default().trim().is_empty(), "{id}: description.{lang}");
             }
             let repo = e["repository"].as_str().unwrap();
+            // the links the dialog opens are https, and the bundles come from the publisher's GitHub repository
+            assert!(repo.starts_with("https://github.com/") && e["homepage"].as_str().unwrap().starts_with("https://"), "{id}: links");
             let assets = e["assets"].as_array().unwrap_or_else(|| panic!("{id}: assets"));
             assert!(!assets.is_empty());
             for a in assets {

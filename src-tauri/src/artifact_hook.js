@@ -51,5 +51,13 @@
     delete: function (key, shared) { return call('delete', [key, !!shared]); },
     list: function (prefix, shared) { return call('list', [prefix, !!shared]); }
   };
-  window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };
+  window.claude = {
+    complete: function (prompt) { return call('complete', [prompt]); },
+    // a connector's tool, once the user allows it: resolves to {content, structuredContent, isError}
+    callMcpTool: function (name, args) { return call('callMcpTool', [name, args]); }
+  };
+  // Esc the page leaves alone takes the app out of full screen
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !e.defaultPrevented) window.parent.postMessage({ __artifact: 'escape' }, '*');
+  });
 })();

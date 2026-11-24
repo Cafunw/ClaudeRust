@@ -8,7 +8,7 @@ import { openLink } from './artifact_link.js';
 import { copyText, decorate, artifactKindText } from './parts.js';
 import { storageCall } from './artifact_storage.js';
 import { resolveVersions } from './artifact_update.js';
-import { createConsent, createComplete, fixMessage, errorText } from './artifact_bridge.js';
+import { createConsent, createGrants, createComplete, createToolCall, toolScope, toolError, fixMessage, errorText } from './artifact_bridge.js';
 import { shownArtifact } from './branch_panel.js';
 import { reopenId, wrapTab } from './artifact_sheet.js';
 import { errorText as failureText } from './neterr.js';
@@ -17,6 +17,10 @@ let panel = null;
 let renderTimer = null;
 let renderSeq = 0;
 let fetching = null; // { panel, id } of the document request under way
+// the panel covers the whole window (Esc, or the toolbar's button, leaves it)
+let full = false;
+// icons.js has no "minimize": the toolbar's way out of full screen
+const MINIMIZE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>';
 
 function aside() { return $('#artifact-panel'); }
 
@@ -80,7 +84,9 @@ export function close() {
   if (panel) lastShown = { convId: panel.convId, identifier: panel.identifier };
   const back = panel && aside().contains(document.activeElement);
   panel = null;
+  full = false;
   const el = aside();
+  el.classList.remove('full');
   el.classList.add('hidden');
   el.innerHTML = '';
   const scrim = $('#artifact-scrim');
@@ -92,6 +98,12 @@ export function close() {
 }
 
 export function isOpen() { return !!panel; }
+
+function setFull(on) {
+  full = on;
+  aside().classList.toggle('full', on);
+  render();
+}
 
 /** The topbar's toggle shows whether the panel is open. */
 function pressed(on) {
@@ -155,6 +167,21 @@ async function render() {
     seg.querySelectorAll('button').forEach((b) => b.onclick = () => { panel.view = b.dataset.v; render(); });
     head.appendChild(seg);
   }
+  if (view === 'preview' && a.complete && a.type !== 'text/markdown') {
+    const reload = h(`<button class="icon-btn" data-k="reload" title="${esc(t('art_reload'))}" aria-label="${esc(t('art_reload'))}">${icon('refreshCw', 16)}</button>`);
+    reload.onclick = () => { panel.lastDocKey = null; render(); };
+    head.appendChild(reload);
+  }
+  const scope = `${panel.convId}/${a.identifier}`;
+  if (grantsOf(scope).length) {
+    const tools = h(`<button class="icon-btn" data-k="tools" aria-haspopup="dialog" title="${esc(t('art_tools_title'))}" aria-label="${esc(t('art_tools_title'))}">${icon('plug', 16)}</button>`);
+    tools.onclick = () => openGrants(scope);
+    head.appendChild(tools);
+  }
+  const fullLabel = esc(t(full ? 'art_full_exit' : 'art_full'));
+  const fullB = h(`<button class="icon-btn ap-full${full ? ' on' : ''}" data-k="full" aria-pressed="${full}" title="${fullLabel}" aria-label="${fullLabel}">${full ? MINIMIZE : icon('maximize', 16)}</button>`);
+  fullB.onclick = () => setFull(!full);
+  head.appendChild(fullB);
   const copyB = h(`<button class="icon-btn" data-k="copy" title="${t('copy')}" aria-label="${t('copy')}">${icon('copy', 16)}</button>`);
   copyB.onclick = async () => { await copyText(a.content); copyB.innerHTML = icon('check', 16); setTimeout(() => (copyB.innerHTML = icon('copy', 16)), 1400); };
   const dl = h(`<button class="icon-btn" data-k="download" title="${t('download')}" aria-label="${t('download')}">${icon('download', 16)}</button>`);
@@ -268,18 +295,18 @@ function frameError(frame, d) {
   if (a && `${a.identifier}@${a.version}` === key) drawAlert(a);
 }
 
-function askConsent(scope, title) {
+function askConsent(scope, { title, engine }) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); m.close(); } };
     const footer = [
-      button(t('elicit_decline'), '', () => finish('decline')),
+      button(t('deny'), '', () => finish('decline')),
       button(t('allow_once'), '', () => finish('once')),
       button(t('art_ai_allow_artifact'), 'primary', () => finish('always')),
     ];
     const m = modal({
       title: t('art_ai_title'),
-      body: `<p style="margin:4px 0 6px;font-size:14.5px;line-height:1.5">${esc(t('art_ai_body', { title }))}</p>`,
+      body: `<p style="margin:4px 0 6px;font-size:14.5px;line-height:1.5">${esc(t(engine === 'account' ? 'art_ai_body_account' : 'art_ai_body', { title }))}</p>`,
       footer,
       onClose: () => { if (!done) { done = true; resolve(null); } },
     });
@@ -287,11 +314,97 @@ function askConsent(scope, title) {
 }
 
 /** window.claude.complete of a frame (its dataset): the prompt is all it chooses (artifact_ai.rs). */
+const aiConsent = createConsent(askConsent);
 const complete = createComplete({
   check: (f) => call('artifact_complete_check', { conversationId: f.conv }),
-  allowed: createConsent(askConsent),
+  allowed: aiConsent,
   run: (f, prompt) => call('artifact_complete', { conversationId: f.conv, artifactId: f.artifact, prompt }),
 });
+
+// tool dialogs, from every artifact, one at a time
+let toolAsking = Promise.resolve();
+
+/** May the artifact run tool `c` ({ server, tool, read_only, title }) with `input`?
+ *  'once', 'always' (only offered with `always`), 'decline', or null when dismissed. */
+function askTool(c, input, always) {
+  const ask = () => new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); m.close(); } };
+    const footer = [button(t('deny'), '', () => finish('decline')), button(t('allow_once'), always ? '' : 'primary', () => finish('once'))];
+    if (always) footer.push(button(t('art_ai_allow_artifact'), 'primary', () => finish('always')));
+    const m = modal({
+      title: t(always ? 'art_tool_title' : 'art_call_title', { server: c.server }),
+      body: `<p style="margin:4px 0 8px;font-size:14.5px;line-height:1.5">${esc(t('art_tool_body', { title: c.title, tool: c.tool, server: c.server }))}</p>
+        <pre class="mono small" style="max-height:220px;overflow:auto;margin:0 0 8px">${esc(JSON.stringify(input, null, 2).slice(0, 2000))}</pre>
+        <p class="small muted" style="margin:0">${esc(t(c.read_only ? 'art_tool_reads' : 'art_tool_changes'))}</p>`,
+      footer,
+      onClose: () => { if (!done) { done = true; resolve(null); } },
+    });
+  });
+  const next = toolAsking.then(ask, ask);
+  toolAsking = next.catch(() => {});
+  return next;
+}
+
+// the connectors each artifact asked for: scope -> Map(server -> Map(tool -> read only))
+const toolsSeen = new Map();
+const toolGrants = createGrants((scope, c) => askTool(c, c.input, true));
+
+/** window.claude.callMcpTool of a frame ({ ...its dataset, frame }): the tool and its
+ *  arguments are all it chooses; it runs under the tool's policy (mcp/artifact_tools.rs). */
+const toolCall = createToolCall({
+  check: async (f, name) => {
+    const c = await call('artifact_tool_check', { conversationId: f.conv, artifactId: f.artifact, name });
+    if (!toolsSeen.has(f.scope)) toolsSeen.set(f.scope, new Map());
+    const seen = toolsSeen.get(f.scope);
+    if (!seen.has(c.server)) seen.set(c.server, new Map());
+    seen.get(c.server).set(c.tool, c.read_only);
+    return c;
+  },
+  grants: toolGrants,
+  askCall: async (f, c, input) => (await askTool({ ...c, title: f.title }, input, false)) === 'once',
+  run: async (f, name, input, approved) => {
+    // the panel closed or moved on while the person was asked
+    if (!f.frame.isConnected) throw new Error('The artifact is no longer shown.');
+    return call('artifact_tool_call', { conversationId: f.conv, name, arguments: input, approved });
+  },
+});
+
+/** What artifact `scope` was allowed (or refused) to use: asking Claude, and each connector. */
+function grantsOf(scope) {
+  const out = [];
+  const ai = aiConsent.grants.chosen(scope);
+  if (ai) out.push({ name: t('art_grant_claude'), sub: t('art_grant_claude_sub'), state: ai, revoke: () => aiConsent.grants.revoke(scope) });
+  for (const [server, tools] of toolsSeen.get(scope) || []) {
+    const key = toolScope(scope, server);
+    const state = toolGrants.chosen(key);
+    const reads = [...tools.values()].every(Boolean);
+    if (state) out.push({ name: server, sub: `${[...tools.keys()].join(', ')} · ${t(reads ? 'art_tool_reads' : 'art_tool_changes')}`, state, revoke: () => toolGrants.revoke(key) });
+  }
+  return out;
+}
+
+/** "Tools this artifact can use": each grant of artifact `scope`, and a way to take it back. */
+function openGrants(scope) {
+  const body = h('<div class="ap-grants"></div>');
+  const m = modal({ title: t('art_tools_title'), body });
+  const draw = () => {
+    const rows = grantsOf(scope);
+    body.innerHTML = `<p class="small muted" style="margin:0 0 6px">${esc(t(rows.length ? 'art_grants_note' : 'art_grants_none'))}</p>`;
+    for (const g of rows) {
+      const row = h(`<div class="ap-grant"><div class="grow"><div class="t">${esc(g.name)}</div><div class="small muted">${esc(g.sub)}</div><div class="small">${esc(t(g.state === 'always' ? 'art_grant_allowed' : 'art_grant_declined'))}</div></div></div>`);
+      row.appendChild(button(t(g.state === 'always' ? 'art_grant_revoke' : 'art_grant_reset'), 'sm', () => {
+        g.revoke();
+        draw();
+        if (panel) render();
+        const to = body.querySelector('button') || m.el.querySelector('[data-close]');
+        if (to) to.focus();
+      }));
+      body.appendChild(row);
+    }
+  };
+  draw();
+}
 
 function bindResizer(r) {
   r.addEventListener('mousedown', (e) => {
@@ -364,15 +477,16 @@ window.addEventListener('workspace-opened', () => { if (panel) close(); });
 // an open menu or dialog closes first
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !panel || e.defaultPrevented || document.querySelector('.modal-scrim, .popover')) return;
+  if (full) { e.preventDefault(); setFull(false); return; }
   const at = e.target;
   const field = at && (at.isContentEditable || at.tagName === 'TEXTAREA' || (at.tagName === 'INPUT' && at.type !== 'checkbox'));
   if (aside().contains(at) || (sheet.matches && !field)) { e.preventDefault(); close(); }
 }, true);
 
-// the sheet of a narrow window keeps Tab inside it, as a dialog does (the dimmed chat behind it isn't reachable)
+// the sheet of a narrow window and the full-screen view keep Tab inside, as a dialog does (the chat behind isn't reachable)
 const sheetControls = () => [...aside().querySelectorAll('button:not(:disabled), a[href], input, select, textarea, iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => x.getClientRects().length);
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Tab' || !panel || !sheet.matches || !aside().contains(e.target)) return;
+  if (e.key !== 'Tab' || !panel || !(sheet.matches || full) || !aside().contains(e.target)) return;
   const all = sheetControls();
   const to = wrapTab(all.length, all.indexOf(e.target), e.shiftKey);
   if (to >= 0) { e.preventDefault(); all[to].focus(); }
@@ -380,7 +494,7 @@ document.addEventListener('keydown', (e) => {
 // (Tab out of the preview's frame never reaches the keydown above: focus landing behind the sheet comes back to it)
 let focusInSheet = false;
 document.addEventListener('focusin', (e) => {
-  if (!panel || !sheet.matches) { focusInSheet = false; return; }
+  if (!panel || !(sheet.matches || full)) { focusInSheet = false; return; }
   if (aside().contains(e.target)) { focusInSheet = true; return; }
   // a menu or dialog the sheet opened is above it
   if (e.target.closest && e.target.closest('.popover, .modal-scrim, .toast-root')) return;
@@ -388,17 +502,22 @@ document.addEventListener('focusin', (e) => {
 });
 
 // what the previewed artifact asks of the app (only from our own frame):
-// window.storage and window.claude.complete calls, its errors and links
+// window.storage and window.claude calls, its errors, links and Esc
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || (d.__artifact !== 'call' && d.__artifact !== 'error' && d.__artifact !== 'link')) return;
+  if (!d || !['call', 'error', 'link', 'escape'].includes(d.__artifact)) return;
   const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
   if (!frame || !panel) return;
   // the banner above the frame shows it: the page draws no overlay of its own (artifact_hook.js)
   if (d.__artifact === 'error') { e.source.postMessage({ __artifact: 'error-ack' }, '*'); frameError(frame, d); return; }
   if (d.__artifact === 'link') { openLink(d.url); return; }
+  if (d.__artifact === 'escape') { if (full) setFull(false); return; }
   const reply = (r) => e.source.postMessage({ __artifact: 'reply', id: d.id, ...r }, '*');
   const fail = (err) => reply({ error: String((err && err.message) || err) });
-  if (d.op === 'complete') { complete(frame.dataset, d.args).then((result) => reply({ result }), fail); return; }
+  // the toolbar shows what was allowed (or refused) on the way
+  const redraw = () => { if (panel) render(); };
+  if (d.op === 'complete') { complete(frame.dataset, d.args).then((result) => reply({ result }), fail).finally(redraw); return; }
+  // as Claude Desktop's artifacts get it: a refusal or failure is a result with isError, never a rejection
+  if (d.op === 'callMcpTool') { toolCall({ ...frame.dataset, frame }, d.args).then((result) => reply({ result }), (err) => reply({ result: toolError(err) })).finally(redraw); return; }
   try { reply({ result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }); } catch (err) { fail(err); }
 });

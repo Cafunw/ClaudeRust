@@ -674,7 +674,9 @@ mod tests {
         ] {
             let d = build_document(kind, content, false);
             assert!(d.contains("window.parent.postMessage({ __artifact: 'error', message: message, stack: stack, blocked: blocked || null }, '*');"), "{kind}");
-            assert!(d.contains("window.claude = { complete: function (prompt) { return call('complete', [prompt]); } };"), "{kind}");
+            assert!(d.contains("complete: function (prompt) { return call('complete', [prompt]); },"), "{kind}");
+            assert!(d.contains("callMcpTool: function (name, args) { return call('callMcpTool', [name, args]); }"), "{kind}");
+            assert!(d.contains("window.parent.postMessage({ __artifact: 'escape' }, '*')"), "{kind}");
         }
         // React's own errors (Babel, a missing export) carry their stack to the app
         assert!(build_document("application/vnd.ant.react", "x", false).contains("String(e), error: e }"));

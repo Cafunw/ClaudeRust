@@ -53,15 +53,27 @@ fs.mkdirSync(logs, { recursive: true });
 const devLog = path.join(logs, 'dev.log');
 const out = fs.openSync(devLog, 'w');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'clauderust-e2e-config-'));
+// The debugging port goes in the window's own WebView2 arguments, not in
+// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: a Windows runner's WebView2 never
+// applied that variable. CLAUDERUST_OFFSCREEN keeps the copy off-screen.
+const merged = JSON.parse(fs.readFileSync(config, 'utf8'));
+const windows = merged.app?.windows || JSON.parse(fs.readFileSync(path.join(root, 'src-tauri', 'tauri.conf.json'), 'utf8')).app.windows;
+// wry's defaults (these arguments replace them), and painting while outside every monitor
+const browserArgs = `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --autoplay-policy=no-user-gesture-required --remote-debugging-port=${PORT}`;
+// a JSON merge patch replaces arrays whole: every window entry in full
+merged.app = { ...merged.app, windows: windows.map((w) => ({ ...w, additionalBrowserArgs: browserArgs })) };
+const mergedConfig = path.join(logs, 'tauri.e2e.conf.json');
+fs.writeFileSync(mergedConfig, JSON.stringify(merged, null, 2));
 const env = {
   ...process.env,
   CLAUDERUST_API_KEY: 'sk-ant-test',
-  WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+  CLAUDERUST_OFFSCREEN: '1',
   CLAUDE_CONFIG_DIR: home,
 };
+delete env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS;
 const tauri = path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
-console.log(`Starting the dev copy (${path.relative(root, config)}); its output: ${devLog}`);
-const dev = spawn(process.execPath, [tauri, 'dev', '--no-watch', '--config', config], {
+console.log(`Starting the dev copy (${path.relative(root, config)}, debugging port ${PORT} in its window config); its output: ${devLog}`);
+const dev = spawn(process.execPath, [tauri, 'dev', '--no-watch', '--config', mergedConfig], {
   cwd: root, env, stdio: ['ignore', out, out], detached: process.platform !== 'win32',
 });
 let exited = null;
@@ -110,6 +122,15 @@ function processInfo() {
   return spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).stdout.trim();
 }
 
+/** The debugging flag on this copy's WebView2 browser process (the one without --type= in the copy's data folder). */
+function browserFlag() {
+  if (process.platform !== 'win32') return '';
+  const identifier = JSON.parse(fs.readFileSync(config, 'utf8')).identifier;
+  const ps = `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -notmatch '--type=' -and $_.CommandLine -like '*\\${identifier}\\EBWebView*' } | ForEach-Object { if ($_.CommandLine -match '--remote-debugging-port=\\d+') { $Matches[0] } else { 'ABSENT' } }`;
+  const flag = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }).stdout.trim() || 'no browser process';
+  return `browser process debugging flag: ${flag}; WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS for the copy: ${env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS ?? 'unset'}`;
+}
+
 /** What the debugging port answers and how many WebView2 processes exist, for the heartbeat. */
 async function portState() {
   const t = await targets();
@@ -141,7 +162,7 @@ try {
     }
     await sleep(1000);
   }
-  console.log(`The dev copy is up after ${Math.round((Date.now() - t0) / 1000)} s; running the tests.`);
+  console.log(`The dev copy is up after ${Math.round((Date.now() - t0) / 1000)} s; ${browserFlag()}; running the tests.`);
   const files = fs.readdirSync(path.join(root, 'ui', 'e2e')).filter((f) => f.endsWith('.test.mjs')).map((f) => path.join('ui', 'e2e', f));
   // CLAUDERUST_E2E_REQUIRED: a test that would skip fails instead
   code = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit', env: { ...process.env, CLAUDERUST_E2E_REQUIRED: '1', CLAUDERUST_E2E_PORT: String(PORT) } }).status ?? 1;

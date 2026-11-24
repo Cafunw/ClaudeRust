@@ -95,13 +95,18 @@ function focusables(root) {
 }
 
 const topDialog = () => { const s = document.querySelectorAll('.modal-scrim'); return s.length ? s[s.length - 1].querySelector('.modal') : null; };
+// a panel a narrow window shows over a dimmed page (the sidebar, the side panel, the artifact sheet): its scrim is shown
+const openSheet = () => {
+  const s = [...document.querySelectorAll('.sidebar-scrim, .ws-scrim, .ap-scrim')].find((x) => getComputedStyle(x).display !== 'none');
+  return s ? (s.classList.contains('sidebar-scrim') ? s.previousElementSibling : s.nextElementSibling) : null;
+};
 
 // (not in the Node tests, which have no DOM)
 if (typeof MutationObserver !== 'undefined') {
-  // Tab and Shift+Tab stay inside the top dialog
+  // Tab and Shift+Tab stay inside the top dialog, or a sheet over the dimmed page
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab' || e.defaultPrevented || document.querySelector('.popover')) return;
-    const dlg = topDialog();
+    const dlg = topDialog() || openSheet();
     if (!dlg) return;
     const list = focusables(dlg);
     const to = trapStep(list.length, list.indexOf(document.activeElement), e.shiftKey);

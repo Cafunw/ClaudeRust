@@ -2,7 +2,7 @@
 // conversations of the mode, account menu.
 import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
-import { call, isMac } from './api.js';
+import { call } from './api.js';
 import { store, emit, on, displayName, loadLocal, saveLocal } from './store.js';
 import { $, esc, h, showMenu, initials, errorToast, snapshot, sameSnapshot, promptDialog, confirmDialog, modal, relTime, convTitle } from './util.js';
 import { conversationMenu } from './chat.js';
@@ -82,7 +82,7 @@ export function mountSidebar() {
   store.appMode = store.appMode || savedMode();
   el.innerHTML = `
     <div class="sidebar-top">
-      <button class="icon-btn" data-act="toggle" title="${t('collapse')}" aria-label="${t('collapse')}">${icon('sidebar', 18)}</button>
+      <button class="icon-btn" data-act="toggle" title="${t('collapse')}${keymap.shown('sidebar') ? ` (${keymap.shown('sidebar')})` : ''}" aria-label="${t('collapse')}">${icon('sidebar', 18)}</button>
       <span class="brand">ClaudeRust</span>
       <div class="mode-switch" role="tablist">
         <button role="tab" data-mode="chat" title="${t('mode_chat')}" aria-label="${t('mode_chat')}">${icon('chat', 16)}</button>
@@ -147,12 +147,17 @@ export function mountSidebar() {
 function renderNav() {
   const nav = $('#sidebar .nav');
   if (!nav) return;
-  const mod = isMac ? '⌘' : 'Ctrl+';
-  document.querySelectorAll('#sidebar [data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === store.appMode));
-  const row = (nav, ic, label, kbd = '') => `<button class="nav-item" data-nav="${nav}">${icon(ic, 18)}<span class="label">${label}</span>${kbd ? `<span class="kbd">${kbd}</span>` : ''}</button>`;
+  document.querySelectorAll('#sidebar [data-mode]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.mode === store.appMode);
+    b.setAttribute('aria-selected', String(b.dataset.mode === store.appMode));
+  });
+  // the folded rail hides the label: the name and tooltip carry it
+  const row = (nav, ic, label, kbd = '') => `<button class="nav-item" data-nav="${nav}" aria-label="${esc(label)}" title="${esc(kbd ? `${label} (${kbd})` : label)}">${icon(ic, 18)}<span class="label">${esc(label)}</span>${kbd ? `<span class="kbd" aria-hidden="true">${kbd}</span>` : ''}</button>`;
+  const newKey = keymap.shown('new_chat');
+  const findKey = keymap.shown('palette');
   nav.innerHTML = store.appMode === 'code'
-    ? row('code', 'plus', t('new_session'), `${mod}⇧O`) + row('search', 'search', t('sc_search'), `${mod}K`) + row('routines', 'clock', t('rt_title'))
-    : row('new', 'plus', t('new_chat'), `${mod}⇧O`) + row('search', 'search', t('sc_search'), `${mod}K`) + row('projects', 'folder', t('projects')) + row('artifacts', 'layers', t('artifacts'));
+    ? row('code', 'plus', t('new_session'), newKey) + row('search', 'search', t('sc_search'), findKey) + row('routines', 'clock', t('rt_title'))
+    : row('new', 'plus', t('new_chat'), newKey) + row('search', 'search', t('sc_search'), findKey) + row('projects', 'folder', t('projects')) + row('artifacts', 'layers', t('artifacts'));
   highlight();
 }
 
@@ -196,7 +201,10 @@ function renderUserCard() {
   if (!card) return;
   const name = displayName() || t('you');
   const plan = store.settings.has_api_key ? t('api_plan') : store.settings.chat_engine === 'claude-code' ? t('acct_plan') : store.settings.code_engine === 'claude-code' ? 'Claude Code' : t('no_key');
-  card.innerHTML = `<span class="avatar">${esc(initials(name))}</span><span class="meta"><span class="name ellipsis">${esc(store.settings.full_name || name)}</span><span class="plan ellipsis">· ${esc(plan)}</span></span><span class="chev">${icon('chevDown', 12)}</span>`;
+  // the folded rail shows the avatar alone
+  card.setAttribute('aria-label', `${store.settings.full_name || name} · ${plan}`);
+  card.title = card.getAttribute('aria-label');
+  card.innerHTML = `<span class="avatar" aria-hidden="true">${esc(initials(name))}</span><span class="meta"><span class="name ellipsis">${esc(store.settings.full_name || name)}</span><span class="plan ellipsis">· ${esc(plan)}</span></span><span class="chev">${icon('chevDown', 12)}</span>`;
 }
 
 function accountMenu(anchor) {
@@ -204,7 +212,7 @@ function accountMenu(anchor) {
     { header: store.settings.full_name || displayName() || 'ClaudeRust' },
     ...(pendingUpdate() ? [{ label: t('upd_menu', { v: pendingUpdate().version }), icon: 'download', onClick: showUpdates }, { sep: true }] : []),
     ...(incognitoSupported() ? [{ label: t('incog_new'), icon: 'eyeOff', right: keymap.shown('incognito'), onClick: newIncognitoChat }] : []),
-    { label: t('settings'), icon: 'settings', right: isMac ? '⌘,' : 'Ctrl+,', onClick: () => emit('open-settings', 'general') },
+    { label: t('settings'), icon: 'settings', right: keymap.shown('settings'), onClick: () => emit('open-settings', 'general') },
     { label: t('language'), icon: 'lang', keepOpen: true, onClick: () => showMenu(anchor, LANGUAGES.map((l) => ({
       label: l.name, checked: (store.settings.language || 'auto') === l.id,
       onClick: () => emit('save-settings', { language: l.id }),
@@ -393,10 +401,11 @@ async function showArchived(kind) {
 
 function highlight() {
   const r = store.route;
+  // the page shown is said, not only drawn
+  const mark = (b, on) => { b.classList.toggle('active', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); };
   document.querySelectorAll('#sidebar [data-nav]').forEach((b) => {
     const n = b.dataset.nav;
-    b.classList.toggle('active', r.name === n || (n === 'projects' && r.name === 'project'));
+    mark(b, r.name === n || (n === 'projects' && r.name === 'project'));
   });
-  document.querySelectorAll('#sidebar .chat-link').forEach((b) => b.classList.toggle('active', r.name === 'chat' && r.params && r.params.id === b.dataset.id));
-  void currentLanguage;
+  document.querySelectorAll('#sidebar .chat-link').forEach((b) => mark(b, !!(r.name === 'chat' && r.params && r.params.id === b.dataset.id)));
 }

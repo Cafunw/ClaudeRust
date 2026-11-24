@@ -1,6 +1,6 @@
 // Settings modal.
 import { icon } from './icons.js';
-import { t, LANGUAGES } from './i18n.js';
+import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
 import { $, esc, h, modal, button, toast, errorToast, confirmDialog } from './util.js';
@@ -50,11 +50,15 @@ export function openSettings(tab = 'general') {
   const root = h(`<div class="settings"><nav class="settings-nav"></nav><div class="settings-body"></div></div>`);
   const nav = $('.settings-nav', root);
   const body = $('.settings-body', root);
-  for (const [id, ic, label] of TABS) {
-    const b = h(`<button class="nav-item" data-tab="${id}" title="${esc(t(label))}">${icon(ic, 16)}<span class="label">${esc(t(label))}</span></button>`);
-    b.onclick = () => show(id);
-    nav.appendChild(b);
-  }
+  const drawNav = () => {
+    nav.innerHTML = '';
+    for (const [id, ic, label] of TABS) {
+      const b = h(`<button class="nav-item" data-tab="${id}" title="${esc(t(label))}" aria-label="${esc(t(label))}">${icon(ic, 16)}<span class="label">${esc(t(label))}</span></button>`);
+      b.onclick = () => show(id);
+      nav.appendChild(b);
+    }
+  };
+  drawNav();
   // what the shown tab subscribed to, undone when another tab is shown or Settings closes
   const leaving = [];
   const leave = () => { for (const f of leaving.splice(0)) f(); };
@@ -79,7 +83,27 @@ export function openSettings(tab = 'general') {
   // redraw for changes made elsewhere, but not under the user's cursor: a
   // field being typed in would lose its text
   const typing = () => { const a = document.activeElement; return !!(a && body.contains(a) && a.matches('input, textarea, select')); };
-  const offSettings = on('settings-changed', () => { if (['account', 'appearance'].includes(active) && !typing()) show(active); });
+  let lang = currentLanguage();
+  // the field last used (the app behind the dialog is redrawn too, and may take the focus meanwhile)
+  let lastKey = null;
+  body.addEventListener('focusin', (e) => { lastKey = e.target.dataset ? e.target.dataset.key : null; });
+  const offSettings = on('settings-changed', () => {
+    if (lang !== currentLanguage()) {
+      // a new language redraws the whole dialog at once, keeping the place and the focused field
+      lang = currentLanguage();
+      const a = document.activeElement;
+      const key = (a && body.contains(a) && a.dataset.key) || lastKey;
+      const top = body.scrollTop;
+      m.el.querySelector('.modal-head h2').textContent = t('settings');
+      m.el.querySelector('[data-close]').setAttribute('aria-label', t('close'));
+      drawNav();
+      show(active);
+      body.scrollTop = top;
+      if (key) body.querySelector(`[data-key="${key}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    if (['account', 'appearance'].includes(active) && !typing()) show(active);
+  });
   // Slow MCP servers finish starting in the background.
   const offMcp = onBackend('mcp-changed', () => { if (active === 'developer' && !typing()) show(active); });
   const off = () => { offSettings(); offMcp.then((u) => u()); };
@@ -111,7 +135,7 @@ function toggle(key) {
 }
 
 function select(key, options) {
-  const sel = h(`<select class="select" style="width:auto;min-width:min(200px,100%);max-width:100%">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(store.settings[key]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
+  const sel = h(`<select class="select" data-key="${esc(key)}" style="width:auto;min-width:min(200px,100%);max-width:100%">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(store.settings[key]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
   sel.addEventListener('change', () => save({ [key]: sel.value }));
   return sel;
 }
@@ -568,7 +592,7 @@ const RENDER = {
 function serverCard(s, redraw, status) {
   const disabled = (store.settings.disabled_mcp_servers || []).includes(s.name) || s.status === 'disabled';
   const card = h(`<div class="server"><div class="head">${icon('plug', 16)}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
-    <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t('tools_count', { n: s.tools.length }) : ''}</div></div>
+    <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t(s.tools.length === 1 ? 'tools_count_one' : 'tools_count', { n: s.tools.length }) : ''}</div></div>
     <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
     ${s.transport === 'http' ? `<button class="icon-btn sm" data-a="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">${icon('edit', 15)}</button><button class="icon-btn sm" data-a="remove" title="${esc(t('cc_remove'))}" aria-label="${esc(t('cc_remove'))}">${icon('trash', 15)}</button>` : ''}
     <label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(t('enabled'))} · ${esc(s.name)}" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);

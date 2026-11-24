@@ -92,7 +92,7 @@ function draw(el, ctx) {
   const bb = head.querySelector('.branch-btn');
   if (bb) bb.onclick = (ev) => branchMenu(ev.currentTarget, el, ctx);
   const revertAll = async () => {
-    if (!(await confirmDialog(t('revert_all_confirm', { n: files.length }), { okLabel: t('revert_all') }))) return;
+    if (!(await confirmDialog(t(files.length === 1 ? 'revert_all_confirm_one' : 'revert_all_confirm', { n: files.length }), { okLabel: t('revert_all') }))) return;
     try { await call('change_revert', { conversationId: ctx.convId, paths: files.map((f) => f.path) }); } catch (e) { errorToast(e); }
     load(el, ctx);
   };

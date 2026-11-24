@@ -12,7 +12,7 @@ use std::sync::Arc;
 const LIST: &str = include_str!("connector_directory.json");
 
 pub const AUTHS: [&str; 3] = ["oauth", "bearer", "none"];
-pub const CATEGORIES: [&str; 11] = ["dev", "cloud", "projects", "docs", "search", "payments", "crm", "support", "design", "data", "analytics"];
+pub const CATEGORIES: [&str; 13] = ["dev", "cloud", "projects", "docs", "search", "payments", "crm", "support", "design", "data", "analytics", "media", "automation"];
 
 /// `u` as compared with a configured server's URL: parsed (scheme and host in
 /// lower case, default port dropped), without a trailing slash.

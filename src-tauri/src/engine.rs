@@ -175,12 +175,14 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
     let eager = first_party;
     let opts = &conv.options;
     let disabled_servers = opt_strs(opts, "disabled_servers");
+    // the chat's own switches for single tools, by API name (`server__tool`)
+    let disabled_tools = opt_strs(opts, "disabled_tools");
     let mcp_tools: Vec<_> = st
         .mcp
         .tools()
         .await
         .into_iter()
-        .filter(|t| !disabled_servers.contains(&t.server))
+        .filter(|t| !disabled_servers.contains(&t.server) && !disabled_tools.contains(&t.api_name))
         .filter(|t| {
             settings
                 .tool_policies
@@ -364,6 +366,15 @@ pub fn sanitize_assistant(content: &Value, answered: &HashSet<String>) -> Vec<Va
         match t {
             "thinking" => {
                 if b["signature"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+                    continue;
+                }
+                // the time we noted is ours: the API takes no other field
+                if b.get("thinking_ms").is_some() {
+                    let mut b = b.clone();
+                    if let Some(o) = b.as_object_mut() {
+                        o.remove("thinking_ms");
+                    }
+                    out.push(b);
                     continue;
                 }
             }
@@ -1322,7 +1333,9 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
             // still calls (`Client::stream`), so the last change before a pause
             // is saved and shown, once
             let (mut unsaved, mut unshown) = (false, false);
+            let mut clock = ThinkingClock::default();
             let mut on_event = |acc: &Accumulator, changed: Option<usize>| {
+                clock.saw(&acc.blocks, changed);
                 if changed.is_some() {
                     (unsaved, unshown) = (true, true);
                 }
@@ -1358,7 +1371,8 @@ async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, 
                     break;
                 }
                 Ok(out) => {
-                    let acc = out.acc;
+                    let mut acc = out.acc;
+                    clock.stamp(&mut acc.blocks);
                     // the same when the overload arrives as an error event in
                     // the stream, before any content
                     if let Some(e) = &out.error {
@@ -1704,6 +1718,35 @@ async fn run_oai<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
     }
 }
 
+/// When each thinking block of a streaming message started and last changed (its stop is a change), so the stored
+/// block says how long it thought: `thinking_ms`, the UI's "Thought for 12s".
+#[derive(Default)]
+pub(crate) struct ThinkingClock(std::collections::BTreeMap<usize, (Instant, Instant)>);
+
+impl ThinkingClock {
+    /// The accumulator just changed block `changed` of `blocks`.
+    pub(crate) fn saw(&mut self, blocks: &[Value], changed: Option<usize>) {
+        if let Some(i) = changed.filter(|&i| blocks.get(i).is_some_and(|b| b["type"] == "thinking")) {
+            let now = Instant::now();
+            self.0.entry(i).or_insert((now, now)).1 = now;
+        }
+    }
+
+    /// How long each thinking block took, in the order they came.
+    pub(crate) fn durations(&self) -> Vec<u64> {
+        self.0.values().map(|(from, to)| to.duration_since(*from).as_millis() as u64).collect()
+    }
+
+    /// The thinking blocks of `blocks` with how long each took.
+    pub(crate) fn stamp(&self, blocks: &mut [Value]) {
+        for (&i, (from, to)) in &self.0 {
+            if let Some(b) = blocks.get_mut(i).and_then(Value::as_object_mut) {
+                b.insert("thinking_ms".into(), json!(to.duration_since(*from).as_millis() as u64));
+            }
+        }
+    }
+}
+
 pub(crate) fn all_tool_ids(content: &Value) -> HashSet<String> {
     content
         .as_array()
@@ -1755,10 +1798,19 @@ pub(crate) fn save_artifacts(st: &AppState, conv_id: &str, msg_id: &str, text: &
             title: a.title,
             language: a.language,
             content: a.content,
-            created_at: now_ms(),
+            created_at: artifact_time(),
             conversation_title: None,
         });
     }
+}
+
+/// A gallery row's time, after every earlier one's: the gallery tells versions apart by it, and a turn of the
+/// account engine stores the versions of all its messages at once.
+fn artifact_time() -> i64 {
+    static LAST: parking_lot::Mutex<i64> = parking_lot::Mutex::new(0);
+    let mut last = LAST.lock();
+    *last = now_ms().max(*last + 1);
+    *last
 }
 
 // ------------------------------------------------------------- tools
@@ -2129,19 +2181,23 @@ async fn title_via_api(st: &AppState, user_text: &str, assistant_text: &str) -> 
         .filter_map(|b| b["text"].as_str())
         .collect::<Vec<_>>()
         .join("");
-    let t = text
-        .lines()
-        .find(|l| !l.trim().is_empty())?
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'' || c == '*' || c == '#')
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-    if t.is_empty() {
-        None
-    } else {
-        Some(crate::util::truncate_chars(&t, 80))
-    }
+    clean_title(&text)
+}
+
+/// The title in a model's reply, on every title path: its first line that says one, without quotes, markdown, a
+/// "Title:" label or closing punctuation, at most 80 characters. None when there's none.
+pub fn clean_title(reply: &str) -> Option<String> {
+    let deco = |c: char| c.is_whitespace() || "\"'*#“”‘’«»".contains(c);
+    reply.lines().find_map(|line| {
+        let mut t = line.trim_matches(deco);
+        if let Some((label, rest)) = t.split_once([':', '：']) {
+            if matches!(label.trim_matches(deco).to_lowercase().as_str(), "title" | "chat title" | "başlık" | "başlik" | "baslik") {
+                t = rest.trim_matches(deco);
+            }
+        }
+        let t = t.trim_end_matches(|c: char| deco(c) || ".,;:。".contains(c));
+        (!t.is_empty()).then(|| crate::util::truncate_chars(t, 80))
+    })
 }
 
 #[cfg(test)]
@@ -2152,6 +2208,52 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cr-state-{}", crate::util::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")))
+    }
+
+    #[test]
+    fn a_title_is_the_replys_first_line_without_its_label() {
+        assert_eq!(clean_title("\n\"Soft Boiled Eggs.\"\nmore").as_deref(), Some("Soft Boiled Eggs"));
+        assert_eq!(clean_title("## **Az Pişmiş Yumurta**").as_deref(), Some("Az Pişmiş Yumurta"));
+        assert_eq!(clean_title("Title: Replace TODO comment in calc.py").as_deref(), Some("Replace TODO comment in calc.py"));
+        assert_eq!(clean_title("**Title:** \"Rust lifetimes\".").as_deref(), Some("Rust lifetimes"));
+        assert_eq!(clean_title("Başlık: Yumurta haşlama").as_deref(), Some("Yumurta haşlama"));
+        assert_eq!(clean_title("TITLE:\n\nGarden plans").as_deref(), Some("Garden plans"));
+        // a colon that is the title's own stays
+        assert_eq!(clean_title("Rust: ownership basics").as_deref(), Some("Rust: ownership basics"));
+        assert_eq!(clean_title("Why does it fail?").as_deref(), Some("Why does it fail?"));
+        assert_eq!(clean_title(&"x".repeat(100)), Some(crate::util::truncate_chars(&"x".repeat(100), 80)));
+        assert_eq!(clean_title("  \n\"\"\n"), None);
+        assert_eq!(clean_title("Title:"), None);
+        assert_eq!(clean_title(""), None);
+    }
+
+    #[test]
+    fn a_thinking_block_is_stamped_with_how_long_it_took_and_never_sent_back_with_it() {
+        let mut acc = Accumulator::default();
+        let mut clock = ThinkingClock::default();
+        let mut feed = |acc: &mut Accumulator, ev: Value| {
+            let changed = acc.apply(&ev).unwrap();
+            clock.saw(&acc.blocks, changed);
+        };
+        feed(&mut acc, json!({"type": "message_start", "message": {"id": "m", "content": []}}));
+        let started = Instant::now();
+        feed(&mut acc, json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}));
+        feed(&mut acc, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hm"}}));
+        std::thread::sleep(Duration::from_millis(30));
+        feed(&mut acc, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "s"}}));
+        feed(&mut acc, json!({"type": "content_block_stop", "index": 0}));
+        let block = started.elapsed().as_millis() as u64;
+        feed(&mut acc, json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}));
+        std::thread::sleep(Duration::from_millis(30));
+        feed(&mut acc, json!({"type": "content_block_stop", "index": 1}));
+        clock.stamp(&mut acc.blocks);
+        let ms = acc.blocks[0]["thinking_ms"].as_u64().unwrap();
+        // from its start to its stop, not to the end of the message (30 ms later); no upper bound a slow runner could pass
+        assert!(ms >= 30 && ms <= block, "{ms} of {block}");
+        assert!(acc.blocks[1].get("thinking_ms").is_none(), "only thinking is timed");
+        assert_eq!(clock.durations(), [ms]);
+        let sent = sanitize_assistant(&Value::Array(acc.content()), &HashSet::new());
+        assert_eq!(sent[0], json!({"type": "thinking", "thinking": "hm", "signature": "s"}));
     }
 
     #[test]

@@ -4,7 +4,7 @@ import * as slash from './slash.js';
 import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
 import { t, tOr } from './i18n.js';
-import { call } from './api.js';
+import { call, isMac } from './api.js';
 import { store, modelInfo, emit, rememberModel } from './store.js';
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast, modal, button } from './util.js';
 
@@ -119,6 +119,7 @@ export function createComposer(opts) {
     fast: !!store.settings.fast_mode,
     style: 'normal',
     disabled_servers: [],
+    disabled_tools: [],
     permission_mode: store.settings.code_permission_mode || 'default',
     ...(opts.initial || {}),
   };
@@ -231,17 +232,18 @@ export function createComposer(opts) {
       return;
     }
     sendBtn.classList.remove('queue');
-    sendBtn.title = '';
     if (running && !(waiting && (ta.value.trim() || attachments.length))) {
       sendBtn.disabled = false;
       sendBtn.classList.add('stop');
       sendIcon('stop');
       sendBtn.setAttribute('aria-label', t('stop'));
+      sendBtn.title = `${t('stop')} (Esc)`;
       return;
     }
     sendBtn.classList.remove('stop');
     sendIcon('arrowUp');
     sendBtn.setAttribute('aria-label', t('send'));
+    sendBtn.title = `${t('send')} (${store.settings.send_on_enter !== false ? 'Enter' : `${isMac ? '⌘' : 'Ctrl'}+Enter`})`;
     sendBtn.disabled = busy || (!ta.value.trim() && !attachments.length) || attachments.some((a) => a.loading);
   }
 
@@ -455,17 +457,50 @@ export function createComposer(opts) {
       items.push({ sep: true }, { header: 'MCP' });
       for (const s of servers) {
         const on = !(st.disabled_servers || []).includes(s.name);
-        const row = h(`<label class="menu-item" style="cursor:pointer">${icon('plug', 16)}<span class="mtext">${esc(s.name)}<span class="sub">${t('tools_count', { n: s.tools.length })}</span></span><span class="switch"><input type="checkbox" ${on ? 'checked' : ''}><span class="track"></span></span></label>`);
+        const off = offTools(s).length;
+        const n = s.tools.length;
+        const sub = t(n === 1 ? 'tools_count_one' : 'tools_count', { n }) + (off ? ` · ${t('mcp_tools_off', { off })}` : '');
+        // the row opens the server's tools (a switch each); the switch turns the whole server on or off
+        const row = h(`<div class="menu-item mcp-row"><button class="mcp-open" aria-haspopup="menu" title="${esc(t('mcp_tools_of', { name: s.name }))}">${icon('plug', 16)}<span class="mtext">${esc(s.name)}<span class="sub">${esc(sub)}</span></span>${icon('chevRight', 14)}</button><label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(s.name)}" ${on ? 'checked' : ''}><span class="track"></span></label></div>`);
         row.querySelector('input').addEventListener('change', (e) => {
           const set = new Set(st.disabled_servers || []);
           if (e.target.checked) set.delete(s.name); else set.add(s.name);
           persist({ disabled_servers: [...set] });
         });
+        row.querySelector('.mcp-open').onclick = () => serverTools(anchor, s);
         items.push({ element: row });
       }
     }
     if (!items.length) items.push({ label: t('nothing_here'), disabled: true });
     showMenu(anchor, items, { placement: 'top-start', width: 280 });
+  }
+
+  // a tool is named as the engines know it: "server__tool" (its api_name)
+  const toolId = (s, tool) => tool.api_name || `${s.name}__${tool.name}`;
+  const offTools = (s) => s.tools.filter((tool) => (st.disabled_tools || []).includes(toolId(s, tool)));
+
+  /** The tools of MCP server `s` in this chat, a switch each (stored in the chat's `disabled_tools`). */
+  function serverTools(anchor, s) {
+    const serverOn = !(st.disabled_servers || []).includes(s.name);
+    const items = [
+      { label: t('back'), icon: 'arrowLeft', keepOpen: true, onClick: () => toolsMenu(anchor) },
+      { header: serverOn ? s.name : `${s.name} · ${t('mcp_server_off')}` },
+    ];
+    for (const tool of s.tools) {
+      const id = toolId(s, tool);
+      const on = !(st.disabled_tools || []).includes(id);
+      const row = h(`<label class="menu-item" style="cursor:pointer"><span class="mtext">${esc(tool.title || tool.name)}${tool.description ? `<span class="sub ellipsis">${esc(tool.description)}</span>` : ''}</span><span class="switch"><input type="checkbox" aria-label="${esc(tool.title || tool.name)}" ${on ? 'checked' : ''} ${serverOn ? '' : 'disabled'}><span class="track"></span></span></label>`);
+      row.querySelector('input').addEventListener('change', (e) => {
+        const set = new Set(st.disabled_tools || []);
+        if (e.target.checked) set.delete(id); else set.add(id);
+        persist({ disabled_tools: [...set] });
+      });
+      items.push({ element: row });
+    }
+    if (!s.tools.length) items.push({ label: t('nothing_here'), disabled: true });
+    showMenu(anchor, items, { placement: 'top-start', width: 300 });
+    // the keyboard goes on in the new menu
+    document.querySelector('.popover input:not(:disabled), .popover button')?.focus();
   }
 
   /** A still of the screen or window picked in the system's share picker, as a PNG attachment. */
@@ -599,7 +634,8 @@ export function createComposer(opts) {
   const api = {
     el,
     state: st,
-    focus() { ta.focus(); const n = ta.value.length; ta.setSelectionRange(n, n); },
+    // not from behind an open dialog (a view redrawn under Settings), which keeps the keyboard
+    focus() { if (document.querySelector('.modal-scrim')) return; ta.focus(); const n = ta.value.length; ta.setSelectionRange(n, n); },
     setRunning(r, w) { running = r; waiting = !!(r && w); updateSend(); },
     /** Running, but idle on a Claude Code workflow (a message goes straight in). */
     waiting: () => waiting,

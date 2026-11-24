@@ -22,7 +22,7 @@ export function searchToggle(view) {
   const head = $('.page-head', view);
   if (!box || !head) return;
   box.classList.add('hidden');
-  const b = h(`<button class="icon-btn" aria-label="${esc(t('sc_search'))}">${icon('search', 16)}</button>`);
+  const b = h(`<button class="icon-btn" title="${esc(t('sc_search'))}" aria-label="${esc(t('sc_search'))}">${icon('search', 16)}</button>`);
   b.onclick = () => { box.classList.toggle('hidden'); if (!box.classList.contains('hidden')) $('input', box).focus(); };
   head.insertBefore(b, $('.btn', head));
 }
@@ -273,7 +273,7 @@ export function position(el, anchor, placement) {
 export function modal({ title, body, footer, wide = false, onClose, cls = '' }) {
   const scrim = h('<div class="modal-scrim"></div>');
   const m = h(`<div class="modal ${wide ? 'wide' : ''} ${cls}" role="dialog" aria-modal="true">
-    ${title !== undefined ? `<div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-close aria-label="${t('close')}">${icon('x', 18)}</button></div>` : ''}
+    ${title !== undefined ? `<div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-close title="${t('close')}" aria-label="${t('close')}">${icon('x', 18)}</button></div>` : ''}
     <div class="modal-body"></div>
     ${footer ? '<div class="modal-foot"></div>' : ''}
   </div>`);

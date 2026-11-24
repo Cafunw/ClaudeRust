@@ -486,6 +486,8 @@ pub fn run() {
             mcp::apps::mcp_app_info,
             mcp::apps::mcp_app_open,
             mcp::apps::mcp_app_call,
+            mcp::artifact_tools::artifact_tool_check,
+            mcp::artifact_tools::artifact_tool_call,
             skills::skills_list,
             skills::skill_set_enabled,
             skills::skill_pick_file,

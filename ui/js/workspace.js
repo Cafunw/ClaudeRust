@@ -8,6 +8,7 @@ import { icon } from './icons.js';
 import { h, esc } from './util.js';
 import { loadLocal, saveLocal } from './store.js';
 import { nextTab } from './panes/rows.js';
+import { isMac } from './api.js';
 
 const panes = [];          // { id, label, icon, mount(el, ctx), show?(ctx), hide?(), dispose?(convId), badge?(ctx) }
 let ctx = null;            // { convId, cwd, conv }
@@ -23,6 +24,14 @@ export function registerPane(p) {
 }
 
 export function isOpen() { return open && !!ctx; }
+
+const shownPanes = () => panes.filter((p) => !p.visible || p.visible(ctx));
+/** The panes in the order of their tabs: Alt+1… open them in this order. */
+export function tabOrder() { return shownPanes().map((p) => p.id); }
+/** "Alt+3" (⌥3 on macOS) for the n-th tab, from 1; '' past the 8th. */
+export function paneKey(n) { return n >= 1 && n <= 8 ? `${isMac ? '⌥' : 'Alt+'}${n}` : ''; }
+/** "Alt+1 Changes · Alt+2 History · …" for the shortcut sheet. */
+export function paneHints() { return shownPanes().slice(0, 8).map((p, i) => `${paneKey(i + 1)} ${p.label()}`).join(' · '); }
 export function context() { return ctx; }
 export function activePane() { return active; }
 
@@ -92,10 +101,11 @@ function renderTabs() {
   const el = aside();
   const tabs = el && el.querySelector('.ws-tabs');
   if (!tabs || !ctx) return;
-  const html = panes.filter((p) => !p.visible || p.visible(ctx)).map((p) => {
+  const html = shownPanes().map((p, i) => {
     const badge = p.badge ? p.badge(ctx) : '';
     const on = p.id === active;
-    return `<button class="ws-tab ${on ? 'on' : ''}" role="tab" aria-selected="${on}" tabindex="${on ? 0 : -1}" data-pane="${p.id}" title="${esc(p.label())}">${icon(p.icon, 14)}<span>${esc(p.label())}</span>${badge ? `<span class="ws-badge">${esc(String(badge))}</span>` : ''}</button>`;
+    const key = paneKey(i + 1);
+    return `<button class="ws-tab ${on ? 'on' : ''}" role="tab" aria-selected="${on}" tabindex="${on ? 0 : -1}" data-pane="${p.id}" title="${esc(key ? `${p.label()} (${key})` : p.label())}"${key ? ` aria-keyshortcuts="Alt+${i + 1}"` : ''}>${icon(p.icon, 14)}<span>${esc(p.label())}</span>${badge ? `<span class="ws-badge">${esc(String(badge))}</span>` : ''}</button>`;
   }).join('');
   // drawn again only when something changed (the badges are asked for every
   // 2 s): a tab drawn again under the keyboard loses its focus
@@ -167,8 +177,10 @@ function render() {
   for (const [, pe] of els) pe.classList.add('hidden');
   if (!visible) { for (const p of panes) p.hide && p.hide(); return; }
   if (!el.querySelector('.ws-head')) {
-    el.innerHTML = `<div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${esc(t('ws_resize'))}" aria-valuemin="${MIN_W}"></div><div class="ws-head"><div class="ws-tabs" role="tablist" aria-label="${esc(t('ws_toggle'))}"></div><div class="grow"></div><button class="icon-btn ws-close" title="${esc(t('close'))}" aria-label="${esc(t('close'))}">${icon('x', 16)}</button></div><div class="ws-body" role="tabpanel"></div>`;
+    el.innerHTML = `<div class="resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-valuemin="${MIN_W}"></div><div class="ws-head"><button class="ap-back">${icon('arrowLeft', 16)}<span></span></button><div class="ws-tabs" role="tablist"></div><div class="grow"></div><button class="icon-btn ws-close">${icon('x', 16)}</button></div><div class="ws-body" role="tabpanel"></div>`;
     el.querySelector('.ws-close').onclick = closeAndReturn;
+    // "Back to chat": the sheet's way out in a narrow window, as on the artifact sheet (CSS shows it there)
+    el.querySelector('.ap-back').onclick = closeAndReturn;
     bindTabs(el.querySelector('.ws-tabs'));
     bindResizer(el, el.querySelector('.resizer'));
     // Esc leaves the sheet a narrow window shows (a field, the terminal or a menu keeps its own Esc)
@@ -180,6 +192,13 @@ function render() {
       closeAndReturn();
     });
   }
+  // labelled at every draw: the head stays across a change of language
+  el.querySelector('.resizer').setAttribute('aria-label', t('ws_resize'));
+  el.querySelector('.ws-tabs').setAttribute('aria-label', t('ws_toggle'));
+  el.querySelector('.ap-back').title = t('art_back');
+  el.querySelector('.ap-back span').textContent = t('art_back');
+  el.querySelector('.ws-close').title = t('close');
+  el.querySelector('.ws-close').setAttribute('aria-label', t('close'));
   if (!sheet()) setWidth(el, loadLocal().workspaceWidth || DEFAULT_W);
   if (!panes.some((p) => p.id === active)) active = panes[0] && panes[0].id;
   renderTabs();
@@ -252,7 +271,7 @@ window.addEventListener('resize', () => {
 
 /** The topbar button that opens/closes the panel. */
 export function toggleButton() {
-  const b = h(`<button class="icon-btn ws-toggle ${isOpen() ? 'on' : ''}" title="${t('ws_toggle')} (Ctrl+\`)" aria-label="${esc(t('ws_toggle'))}" aria-pressed="${isOpen()}">${icon('sidebar', 17)}</button>`);
+  const b = h(`<button class="icon-btn ws-toggle ${isOpen() ? 'on' : ''}" title="${esc(keymap.shown('workspace') ? `${t('ws_toggle')} (${keymap.shown('workspace')})` : t('ws_toggle'))}" aria-label="${esc(t('ws_toggle'))}" aria-pressed="${isOpen()}">${icon('sidebar', 17)}</button>`);
   b.style.transform = 'scaleX(-1)';
   b.onclick = () => toggle();
   return b;

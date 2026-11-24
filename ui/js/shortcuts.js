@@ -9,7 +9,6 @@ import * as workspace from './workspace.js';
 import * as keymap from './keymap.js';
 
 const MOD = isMac ? '⌘' : 'Ctrl';
-const PANES = ['changes', 'history', 'plan', 'terminal', 'tasks', 'preview', 'map', 'files'];
 
 // most recently used conversations, newest first
 const mru = [];
@@ -34,10 +33,14 @@ window.addEventListener('keydown', (e) => {
     emit('navigate', { name: 'chat', params: { id: mru[cycle.index] } });
     return;
   }
-  // Alt+1..8: side-panel panes of a code session
-  if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-8]$/.test(e.key) && workspace.context()) {
+  // Alt+1..8: side-panel panes of a code session, in the order of their tabs
+  // (the key's code: ⌥1 types "¡" on macOS)
+  const digit = /^Digit([1-8])$/.exec(e.code || '');
+  if (e.altKey && !e.ctrlKey && !e.metaKey && digit && workspace.context()) {
+    const pane = workspace.tabOrder()[+digit[1] - 1];
+    if (!pane) return;
     e.preventDefault();
-    workspace.toggle(PANES[+e.key - 1]);
+    workspace.toggle(pane);
     return;
   }
   if (keymap.matches(e, 'shortcuts')) { e.preventDefault(); openShortcuts(); }
@@ -53,7 +56,7 @@ export function openShortcuts() {
     [t('sc_sidebar'), keymap.shown('sidebar')],
     [t('settings'), keymap.shown('settings')],
     [t('ws_toggle'), keymap.shown('workspace')],
-    [t('sc_panes'), 'Alt+1 … Alt+8'],
+    [t('sc_panes'), `${workspace.paneKey(1)} … ${workspace.paneKey(Math.min(8, workspace.tabOrder().length))}`],
     [t('sc_send'), 'Enter'],
     [t('sc_newline'), 'Shift+Enter'],
     [t('sc_queue'), t('sc_queue_k')],
@@ -72,7 +75,7 @@ export function openShortcuts() {
   modal({
     title: t('sc_sheet_title'),
     body: `<table class="kv shortcuts">${rows.map(([a, k]) => `<tr><td>${esc(a)}</td><td><kbd>${esc(k)}</kbd></td></tr>`).join('')}</table>
-      <p class="muted small" style="margin-top:10px">${esc(t('sc_panes_list'))}</p><p class="muted small">${esc(t('sc_customize'))}</p>`,
+      <p class="muted small" style="margin-top:10px">${esc(workspace.paneHints())}</p><p class="muted small">${esc(t('sc_customize'))}</p>`,
   });
 }
 

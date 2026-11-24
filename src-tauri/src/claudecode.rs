@@ -219,17 +219,23 @@ pub async fn auth_logout(override_path: &str) -> AppResult<()> {
     }
 }
 
-/// A short title for a conversation that runs on the Claude account (no API key to ask), from the CLI's
-/// smallest model: one call with no tools, settings or saved session, no thinking, at most 64 tokens out and
-/// about 600 in. None when the conversation doesn't run through the CLI or the call fails.
+/// A short title for a conversation that runs on the Claude account (no API key to ask): one `one_shot` call,
+/// at most 64 tokens out and about 600 in. None when the conversation doesn't run through the CLI or the call fails.
 pub async fn title(st: &AppState, conv: &crate::db::Conversation, user_text: &str, assistant_text: &str) -> Option<String> {
     if !uses_cli(st, conv).await {
         return None;
     }
-    let cli = find_cli(&st.settings.read().claude_code_path)?;
+    let text = format!("<conversation>\nUser: {}\n\nAssistant: {}\n</conversation>", truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
+    crate::engine::clean_title(&one_shot(st, crate::prompts::TITLE_PROMPT, &text, 64, Duration::from_secs(45)).await.ok()?)
+}
+
+/// One answer from the CLI's smallest model on the Claude account (titles, an artifact's `window.claude.complete`):
+/// no tools, settings, saved session or thinking, at most `max_tokens` out, `input` on stdin.
+pub async fn one_shot(st: &AppState, system: &str, input: &str, max_tokens: u32, timeout: Duration) -> AppResult<String> {
+    let cli = find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::coded("cli_not_installed", Value::Null, "Claude Code isn't installed."))?;
     let args: Vec<String> = [
         "-p", "--model", "haiku", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
-        "--disable-slash-commands", "--no-session-persistence", "--system-prompt", crate::prompts::TITLE_PROMPT,
+        "--disable-slash-commands", "--no-session-persistence", "--system-prompt", system,
     ]
     .iter()
     .map(|s| s.to_string())
@@ -239,25 +245,20 @@ pub async fn title(st: &AppState, conv: &crate::db::Conversation, user_text: &st
     for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
         cmd.env_remove(k);
     }
-    cmd.env("MAX_THINKING_TOKENS", "0").env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64");
-    let mut child = cmd.spawn().ok()?;
-    // the conversation goes in on stdin: no command-line quoting for what the person wrote
-    let text = format!("<conversation>\nUser: {}\n\nAssistant: {}\n</conversation>", truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
-    let mut stdin = child.stdin.take()?;
-    let _ = stdin.write_all(text.as_bytes()).await;
-    drop(stdin);
-    let out = tokio::time::timeout(Duration::from_secs(45), child.wait_with_output()).await.ok()?.ok()?;
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    if v["is_error"] == true {
-        return None;
+    cmd.env("MAX_THINKING_TOKENS", "0").env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_tokens.to_string());
+    let mut child = cmd.spawn().map_err(|e| AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display())))?;
+    // what the person wrote goes in on stdin: no command-line quoting for it
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes()).await;
     }
-    clean_title(v["result"].as_str()?)
-}
-
-/// The title in a model's reply: its first line without quotes, markdown or a closing period.
-fn clean_title(reply: &str) -> Option<String> {
-    let t = reply.lines().find(|l| !l.trim().is_empty())?.trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '*' | '#')).trim_end_matches('.');
-    (!t.is_empty()).then(|| truncate_chars(t, 80))
+    let out = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| AppError::coded("cli_timeout", json!({"s": timeout.as_secs()}), "Claude took too long to answer."))??;
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    match v["result"].as_str() {
+        Some(r) if v["is_error"] != true => Ok(r.to_string()),
+        r => Err(AppError::coded("claude_code", Value::Null, format!("Claude Code couldn't answer: {}", truncate_chars(r.unwrap_or_default(), 300)))),
+    }
 }
 
 /// An empty folder of ours where chat conversations run the CLI, so no
@@ -471,6 +472,8 @@ struct TurnState {
     /// gets its own row.
     current: Option<(String, usize)>,
     streaming: Option<(usize, Accumulator)>,
+    /// how long the streaming message's thinking blocks took, for its stored blocks
+    thinking: crate::engine::ThinkingClock,
     first_id: Option<String>,
     siblings: Value,
     tracker: ArtifactTracker,
@@ -597,7 +600,13 @@ enum Outcome {
     ResumeLost,
     /// A message was stored as the CLI went away and no turn took it: its own turn.
     Next(String),
+    /// The CLI refused a flag the app can do without (`OLD_CLIS`); nothing was stored.
+    Again,
 }
+
+/// CLIs, by path, too old for `--thinking-display` (they exit on an unknown option).
+/// shortcut: kept until the app restarts, so updating such a CLI gets summaries only after a restart.
+static OLD_CLIS: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::Mutex::new(Vec::new());
 
 pub async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
     crate::shellenv::ready().await;
@@ -608,6 +617,7 @@ pub async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &s
             // Start over in a new session that gets the earlier conversation as context.
             Outcome::ResumeLost => fresh = true,
             Outcome::Next(next) => (id, fresh) = (next, false),
+            Outcome::Again => {}
         }
     }
 }
@@ -1092,6 +1102,10 @@ async fn run_once<R: Runtime>(
         args.push(fb);
     }
     args.extend(cli_session_flags(&conv.options, &conv.model, chat, !chat || settings.thinking_default, &st.data_dir));
+    // without it a print-mode CLI gets the API's default for newer models: thinking with no text ("omitted")
+    if !OLD_CLIS.lock().contains(&cli) {
+        args.extend(["--thinking-display".to_string(), "summarized".to_string()]);
+    }
     let ultracode_asked = conv.options["ultracode"] == true && !chat && crate::models::info(&conv.model).ultracode;
     let fast_asked = conv.options["fast"] == true && crate::models::info(&conv.model).fast_price.is_some();
     let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
@@ -1175,6 +1189,14 @@ async fn run_once<R: Runtime>(
         args.push("--allowedTools".into());
         args.extend(rules);
     }
+    // the conversation's switched-off servers and tools (`server__tool`), as the API engine leaves them out: a chat's
+    // aren't in its tool list either, a code session's are those of the CLI's own MCP servers
+    let mut off: Vec<String> = opt_strs("disabled_servers").iter().map(|s| format!("mcp__{}", cli_safe(s))).collect();
+    off.extend(opt_strs("disabled_tools").iter().map(|t| format!("mcp__{t}")));
+    if !off.is_empty() {
+        args.push("--disallowedTools".into());
+        args.extend(off);
+    }
 
     let history = if with_history { history_context(&path[..path.len().saturating_sub(1)]) } else { String::new() };
     let (files, file_keys) = unsent_files(project_files, held);
@@ -1251,6 +1273,7 @@ async fn run_once<R: Runtime>(
         rows: vec![],
         current: None,
         streaming: None,
+        thinking: Default::default(),
         first_id: None,
         siblings: json!({"index": 0, "count": 1, "ids": []}),
         tracker: view::tracker_for(&path[..turn_start]),
@@ -1372,6 +1395,7 @@ async fn run_once<R: Runtime>(
                     rows: vec![],
                     current: None,
                     streaming: None,
+                    thinking: Default::default(),
                     first_id: None,
                     siblings: json!({"index": 0, "count": 1, "ids": []}),
                     tracker: view::tracker_for(&upto[..from]),
@@ -1526,8 +1550,12 @@ async fn run_once<R: Runtime>(
                         let mut acc = Accumulator::default();
                         let _ = acc.apply(se);
                         ts.streaming = Some((idx, acc));
+                        ts.thinking = Default::default();
                     } else if let Some((_, acc)) = ts.streaming.as_mut() {
-                        let _ = acc.apply(se);
+                        if let Ok(changed) = acc.apply(se) {
+                            ts.thinking.saw(&acc.blocks, changed);
+                            ts.thinking.stamp(&mut acc.blocks);
+                        }
                         if se["type"] == "message_stop" {
                             ts.streaming = None;
                         }
@@ -1537,7 +1565,7 @@ async fn run_once<R: Runtime>(
                 "assistant" if top_level => {
                     let msg = &ev["message"];
                     let api_id = msg["id"].as_str().unwrap_or("").to_string();
-                    let blocks = msg["content"].as_array().cloned().unwrap_or_default();
+                    let mut blocks = msg["content"].as_array().cloned().unwrap_or_default();
                     let idx = match &ts.current {
                         Some((id, i)) if *id == api_id => *i,
                         _ => {
@@ -1546,6 +1574,11 @@ async fn run_once<R: Runtime>(
                             i
                         }
                     };
+                    // the CLI writes each block as it ends, in order: its thinking blocks take the stream's times in turn
+                    let had = ts.rows[idx].content.as_array().map_or(0, |c| c.iter().filter(|b| b["type"] == "thinking").count());
+                    for (b, ms) in blocks.iter_mut().filter(|b| b["type"] == "thinking").zip(ts.thinking.durations().into_iter().skip(had)) {
+                        b["thinking_ms"] = json!(ms);
+                    }
                     let row = &mut ts.rows[idx];
                     let mut stored = row.content.as_array().cloned().unwrap_or_default();
                     stored.extend(blocks);
@@ -1757,6 +1790,14 @@ async fn run_once<R: Runtime>(
         None => {}
     }
     let error = error.map(|e| turn_error(e, &st.usage_limits.lock()));
+    // a CLI from before --thinking-display refuses to start with it: once more without it, from now on
+    if ts.rows.len() == seeded && !interrupted && !delivered && err_text.contains("--thinking-display") && !OLD_CLIS.lock().contains(&cli) {
+        OLD_CLIS.lock().push(cli);
+        // nothing ran: the session's tip is where it was
+        let tip = conv.options["cc_tip"].clone();
+        update_conv_options(st, conv_id, |o| o["cc_tip"] = tip);
+        return Ok(Outcome::Again);
+    }
     if !fresh && ts.rows.len() == seeded && !interrupted && !delivered {
         let text = format!("{} {}", error.as_ref().map(|e| e.to_string()).unwrap_or_default(), err_text);
         if is_resume_lost(&text) {
@@ -1856,8 +1897,12 @@ fn settle_rows(
         row.meta["budget_stop"] = b.clone();
     }
     st.db.msg_update(&row.id, &row.content, &row.meta)?;
-    let text = render::plain_text(&row.content);
-    let _ = st.db.fts_index(conv_id, &row.id, &text);
+    // each answer of the turn is searched and its artifacts go to the gallery, as the API engine does with its messages
+    for r in ts.rows.iter().filter(|r| r.role == "assistant") {
+        let text = render::plain_text(&r.content);
+        let _ = st.db.fts_index(conv_id, &r.id, &text);
+        crate::engine::save_artifacts(st, conv_id, &r.id, &text);
+    }
     Ok(true)
 }
 
@@ -2083,7 +2128,7 @@ mod tests {
         for r in &rows {
             st.db.msg_insert(r).unwrap();
         }
-        let mut ts = TurnState { rows, current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
+        let mut ts = TurnState { rows, current: None, streaming: None, thinking: Default::default(), first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
         assert!(settle_rows(&st, &conv.id, &mut ts, &None, None, false, None, None).unwrap());
         let reasons: Vec<Value> = ts.rows.iter().map(|r| st.db.msg_get(&r.id).unwrap().meta["stop_reason"].clone()).collect();
         assert_eq!(reasons, vec![json!("tool_use"), Value::Null, json!("end_turn"), json!("max_tokens"), json!("end_turn")]);
@@ -2120,7 +2165,7 @@ mod tests {
         let conv = st.db.conv_create("chat", "m", None, None, &json!({})).unwrap();
         let reply = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([{"type": "text", "text": "Not logged in · Please run /login"}]), meta: json!({"engine": ENGINE}), created_at: 1 };
         st.db.msg_insert(&reply).unwrap();
-        let mut ts = TurnState { rows: vec![reply.clone()], current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
+        let mut ts = TurnState { rows: vec![reply.clone()], current: None, streaming: None, thinking: Default::default(), first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
         let e = turn_error("Not logged in · Please run /login".into(), &Value::Null);
         assert!(settle_rows(&st, &conv.id, &mut ts, &Some(said), None, false, Some(&e), None).unwrap());
         let stored = st.db.msg_get(&reply.id).unwrap();
@@ -2358,15 +2403,6 @@ mod tests {
     }
 
     #[test]
-    fn a_title_is_the_replys_first_line() {
-        assert_eq!(clean_title("\n\"Soft Boiled Eggs.\"\nmore").as_deref(), Some("Soft Boiled Eggs"));
-        assert_eq!(clean_title("## **Az Pişmiş Yumurta**").as_deref(), Some("Az Pişmiş Yumurta"));
-        assert_eq!(clean_title(&"x".repeat(100)), Some(truncate_chars(&"x".repeat(100), 80)));
-        assert_eq!(clean_title("  \n\"\"\n"), None);
-        assert_eq!(clean_title(""), None);
-    }
-
-    #[test]
     fn a_workflow_is_recorded_from_its_events() {
         let mut list = vec![];
         let started = json!({"subtype": "task_started", "task_id": "w1", "task_type": "local_workflow", "workflow_name": "audit", "description": "Audit it"});
@@ -2476,7 +2512,7 @@ mod tests {
         let streamed = json!({"input_tokens": 2, "output_tokens": 74});
         let row = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([]), meta: json!({"engine": ENGINE, "usage": streamed}), created_at: 1 };
         st.db.msg_insert(&row).unwrap();
-        let mut ts = TurnState { rows: vec![row], current: None, streaming: None, first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.00514374 };
+        let mut ts = TurnState { rows: vec![row], current: None, streaming: None, thinking: Default::default(), first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.00514374 };
         // what the CLI reported at a budget stop on a resumed session: the running total, and no usage
         let r = json!({"subtype": "error_max_budget_usd", "total_cost_usd": 0.00578797, "usage": {"input_tokens": 0, "output_tokens": 0}});
         assert!(settle_rows(&st, &conv.id, &mut ts, &Some(r), None, false, None, None).unwrap());

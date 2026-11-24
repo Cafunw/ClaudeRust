@@ -152,6 +152,44 @@ fn domain_of(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
+/// The results of Claude Code's WebSearch, from its output (`Web search results for query: "…"`, then a
+/// `Links: [{"title", "url"}, …]` line per search), as the API engine's search lists them. None for any other output.
+fn cli_search_results(text: &str) -> Option<Vec<Value>> {
+    if !text.starts_with("Web search results for query") {
+        return None;
+    }
+    let mut out: Vec<Value> = vec![];
+    for links in text.lines().filter_map(|l| l.strip_prefix("Links: ")) {
+        let Ok(Value::Array(links)) = serde_json::from_str::<Value>(links) else { continue };
+        for l in links {
+            let url = l["url"].as_str().unwrap_or_default();
+            if crate::markdown::safe_url(url).is_some_and(|u| u.starts_with("http")) && !out.iter().any(|r| r["url"] == url) {
+                out.push(json!({"title": l["title"].as_str().unwrap_or(url), "url": url, "domain": domain_of(url), "page_age": null}));
+            }
+        }
+    }
+    Some(out)
+}
+
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<a href="([^"]*)"(?: title="[^"]*")?>(.*?)</a>"#).unwrap());
+
+/// Links in rendered text to one of `web`'s pages as citations: the link's words, then the page's chip (as the
+/// API's cited text has), and the page among `sources`.
+fn cite_links(html: &str, web: &[(String, String)], sources: &mut Vec<(String, String)>) -> String {
+    LINK_RE
+        .replace_all(html, |c: &regex::Captures| {
+            let href = c[1].replace("&amp;", "&");
+            let Some((u, t)) = web.iter().find(|(u, _)| *u == href || u.trim_end_matches('/') == href.trim_end_matches('/')) else {
+                return c[0].to_string();
+            };
+            if !sources.iter().any(|(s, _)| s == u) {
+                sources.push((u.clone(), t.clone()));
+            }
+            format!("{}<a class=\"cite\" href=\"{}\" title=\"{}\">{}</a>", &c[2], escape_html(u), escape_html(t), escape_html(&domain_of(u)))
+        })
+        .to_string()
+}
+
 #[derive(Default, Clone)]
 struct TextAcc {
     raw: String,
@@ -217,7 +255,8 @@ fn artifact_card(a: &artifacts::ArtifactSpec, version: u32) -> String {
 
 /// `live`: the text ends with a block that is still streaming, so its last
 /// part changes on every update and isn't worth a place in the render cache.
-fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, artifacts_out: &mut Vec<Value>, live: bool) -> Option<Value> {
+/// `web`: search results whose links in the text become citations (the account engine's).
+fn finish_text(mut acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, artifacts_out: &mut Vec<Value>, live: bool, web: &[(String, String)]) -> Option<Value> {
     if acc.raw.trim().is_empty() {
         return None;
     }
@@ -262,6 +301,9 @@ fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, art
             .to_string();
     } else if html.contains('\u{E000}') {
         html = CITE_RE.replace_all(&html, "").to_string();
+    }
+    if !web.is_empty() && html.contains("<a href=") {
+        html = cite_links(&html, web, &mut acc.sources);
     }
     let sources: Vec<Value> = acc
         .sources
@@ -545,6 +587,8 @@ struct TurnBuilder {
     overload: Option<Value>,
     first_assistant: Option<Head>,
     first_message: Option<Head>,
+    /// the account engine's search results so far (url, title): its answer's links to them are cited
+    web: Vec<(String, String)>,
 }
 
 impl TurnBuilder {
@@ -575,13 +619,14 @@ impl TurnBuilder {
             overload: self.overload.clone(),
             first_assistant: self.first_assistant.clone(),
             first_message: self.first_message.clone(),
+            web: self.web.clone(),
         }
     }
 
     fn flush_text(&mut self, ctx: &RenderCtx) {
         if let Some(acc) = self.text.take() {
             let live = std::mem::take(&mut self.text_live);
-            if let Some(p) = finish_text(acc, ctx, &mut self.tracker, &mut self.artifacts, live) {
+            if let Some(p) = finish_text(acc, ctx, &mut self.tracker, &mut self.artifacts, live, &self.web) {
                 self.parts.push(p);
             }
         }
@@ -655,11 +700,16 @@ impl TurnBuilder {
                             markdown::render(s, opts)
                         }
                     };
+                    // how long it thought (engine::ThinkingClock): the part's blocks together
+                    let ms = b["thinking_ms"].as_u64();
                     if let Some(prev) = self.parts.last_mut().filter(|p| p["kind"] == "thinking") {
                         let raw = format!("{}\n\n{}", prev["raw"].as_str().unwrap_or(""), t);
                         prev["html"] = Value::String(md(raw.trim()));
                         prev["raw"] = Value::String(raw);
                         prev["streaming"] = json!(live);
+                        if let Some(ms) = ms {
+                            prev["thinking_ms"] = json!(prev["thinking_ms"].as_u64().unwrap_or(0) + ms);
+                        }
                     } else {
                         let mut part = json!({
                             "kind": "thinking",
@@ -668,6 +718,9 @@ impl TurnBuilder {
                             "streaming": live,
                         });
                         part["html"] = Value::String(md(t));
+                        if let Some(ms) = ms {
+                            part["thinking_ms"] = json!(ms);
+                        }
                         self.parts.push(part);
                     }
                 }
@@ -684,6 +737,17 @@ impl TurnBuilder {
                         }
                         None => (pending_tool_status(&id, ctx, is_streaming), Value::Null),
                     };
+                    // Claude Code's web search, done: its links are a search's results, as the API engine's are
+                    if let Some(found) = (name == "WebSearch" && status == "done").then(|| cli_search_results(result["text"].as_str().unwrap_or(""))).flatten() {
+                        for r in &found {
+                            let url = r["url"].as_str().unwrap_or_default();
+                            if !self.web.iter().any(|(u, _)| u == url) {
+                                self.web.push((url.to_string(), r["title"].as_str().unwrap_or(url).to_string()));
+                            }
+                        }
+                        self.parts.push(json!({"kind": "search", "id": id, "query": b["input"]["query"], "status": "done", "results": found, "error": null}));
+                        continue;
+                    }
                     self.parts.push(json!({
                         "kind": "tool",
                         "id": id,
@@ -1003,6 +1067,56 @@ mod tests {
             meta,
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn the_account_engines_web_search_lists_its_links_and_cites_them() {
+        let links = r#"[{"title":"Rust 1.80","url":"https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html"},{"title":"bad","url":"javascript:alert(1)"},{"title":"Docs","url":"https://doc.rust-lang.org/std/?q=a&b=c"}]"#;
+        let output = format!("Web search results for query: \"rust 1.80\"\n\nLinks: {links}\n\nSome text.\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.");
+        let cc = || json!({"engine": crate::claudecode::ENGINE});
+        let path = [
+            msg("a1", "assistant", json!([{"type": "tool_use", "id": "t1", "name": "WebSearch", "input": {"query": "rust 1.80"}}]), cc()),
+            msg("u1", "user", json!([{"type": "tool_result", "tool_use_id": "t1", "content": output}]), json!({"tool_results": true})),
+            msg("a2", "assistant", text_content("It shipped [in July](https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html); see [the docs](https://doc.rust-lang.org/std/?q=a&b=c) and [elsewhere](https://example.com).\n\n`[x](https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html)`"), cc()),
+        ];
+        let (lt, st, mn) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg: None };
+        let refs: Vec<&Message> = path.iter().collect();
+        let t = assistant_turn(&refs, &ctx, &mut ArtifactTracker::default());
+        let search = &t["parts"][0];
+        assert_eq!((&search["kind"], &search["query"], &search["status"]), (&json!("search"), &json!("rust 1.80"), &json!("done")));
+        let urls: Vec<&str> = search["results"].as_array().unwrap().iter().map(|r| r["url"].as_str().unwrap()).collect();
+        assert_eq!(urls, ["https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html", "https://doc.rust-lang.org/std/?q=a&b=c"], "unsafe links left out");
+        assert_eq!(search["results"][0]["domain"], "blog.rust-lang.org");
+        let html = t["parts"][1]["html"].as_str().unwrap();
+        assert!(html.contains("It shipped in July<a class=\"cite\" href=\"https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html\" title=\"Rust 1.80\">blog.rust-lang.org</a>"), "{html}");
+        assert!(html.contains("the docs<a class=\"cite\""), "{html}");
+        assert!(html.contains("<a href=\"https://example.com\">elsewhere</a>"), "a page it didn't find stays a link: {html}");
+        assert!(html.contains("<code>[x](https://blog"), "code is left alone: {html}");
+        assert_eq!(t["parts"][1]["sources"].as_array().unwrap().len(), 2);
+        // any other output (an error, a search still running) stays the tool's card
+        let failed = [path[0].clone(), msg("u1", "user", json!([{"type": "tool_result", "tool_use_id": "t1", "content": "Error: rate limited", "is_error": true}]), json!({"tool_results": true}))];
+        let refs: Vec<&Message> = failed.iter().collect();
+        assert_eq!(assistant_turn(&refs, &ctx, &mut ArtifactTracker::default())["parts"][0]["kind"], "tool");
+        assert_eq!(cli_search_results("Web search results for query: \"q\"\n\nNo links found."), Some(vec![]));
+    }
+
+    #[test]
+    fn a_thinking_part_says_how_long_it_thought() {
+        let path = [
+            msg("a1", "assistant", json!([{"type": "thinking", "thinking": "a", "thinking_ms": 1200}, {"type": "thinking", "thinking": "b", "thinking_ms": 300}, {"type": "text", "text": "x"}]), json!({})),
+            msg("a2", "assistant", json!([{"type": "thinking", "thinking": "c"}]), json!({})),
+        ];
+        let (lt, st, mn) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg: None };
+        let refs: Vec<&Message> = path.iter().collect();
+        let parts = assistant_turn(&refs, &ctx, &mut ArtifactTracker::default())["parts"].clone();
+        assert_eq!(parts[0]["thinking_ms"], 1500, "the blocks of one part together");
+        assert!(parts[2].get("thinking_ms").is_none(), "none noted (an older reply): none said");
+    }
+
+    fn text_content(t: &str) -> Value {
+        json!([{"type": "text", "text": t}])
     }
 
     #[test]
