@@ -79,6 +79,9 @@ function region(assertive) {
   return el;
 }
 
+/** How long words stay in a live region after they were put there: long enough to be read out. */
+export const SAID_MS = 7000;
+
 /** Say `text` to a screen reader (`assertive`: interrupting, for errors). */
 export function announce(text, assertive = false) {
   const el = region(assertive);
@@ -86,12 +89,49 @@ export function announce(text, assertive = false) {
   // emptied first, so the same words said twice are announced twice
   el.textContent = '';
   setTimeout(() => { el.textContent = text; }, 30);
+  // and again once said: an answered prompt (in the language of the moment) doesn't stay in the page
+  clearTimeout(el.saidTimer);
+  el.saidTimer = setTimeout(() => { el.textContent = ''; }, SAID_MS);
+}
+
+/** Empty the live regions (the language changed: what they hold is in the old one). */
+export function clearAnnouncements() {
+  if (regions) for (const el of Object.values(regions)) { clearTimeout(el.saidTimer); el.textContent = ''; }
+}
+
+/** The control Tab (`shift`: Shift+Tab) moves to from `at` when it would leave the page (on to
+ *  <body>): the first (last) of `list` when `at` is its last (first) one, else null (the browser's own step). */
+export function wrapStep(list, at, shift) {
+  if (!list.length) return null;
+  const [first, last] = [list[0], list[list.length - 1]];
+  if (shift ? at === first : at === last) return shift ? last : first;
+  return null;
+}
+
+/** How a control is told from its neighbours, the same for a copy of it drawn again: its kind
+ *  (tag, first class), data, name and role (`withTitle`: and its tooltip). */
+export function controlKey(el, withTitle) {
+  const attrs = [...el.attributes].filter((a) => a.name.startsWith('data-') || a.name === 'aria-label' || a.name === 'role' || (withTitle && a.name === 'title'));
+  return [el.tagName, el.classList[0] || '', ...attrs.map((a) => `${a.name}=${a.value}`).sort()].join(' ');
+}
+
+/** The one control of `list` that is a copy of `old` (same key with its tooltip, else without), or null. */
+export function copyOf(old, list) {
+  for (const withTitle of [true, false]) {
+    const k = controlKey(old, withTitle);
+    const same = list.filter((x) => x !== old && controlKey(x, withTitle) === k);
+    if (same.length) return same.length === 1 ? same[0] : null;
+  }
+  return null;
 }
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), iframe';
 
+/** A stop of Tab: shown, and not taken out of the order (a list's rows other than its current one). */
+export const tabStop = (el) => el.tabIndex >= 0 && el.getClientRects().length > 0;
+
 function focusables(root) {
-  return [...root.querySelectorAll(FOCUSABLE)].filter((el) => el.getClientRects().length > 0 || el === document.activeElement);
+  return [...root.querySelectorAll(FOCUSABLE)].filter((el) => tabStop(el) || el === document.activeElement);
 }
 
 const topDialog = () => { const s = document.querySelectorAll('.modal-scrim'); return s.length ? s[s.length - 1].querySelector('.modal') : null; };
@@ -107,7 +147,13 @@ if (typeof MutationObserver !== 'undefined') {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab' || e.defaultPrevented || document.querySelector('.popover')) return;
     const dlg = topDialog() || openSheet();
-    if (!dlg) return;
+    if (!dlg) {
+      // past the page's last control Tab comes round to its first (and Shift+Tab back): never on to <body>
+      const all = [...document.querySelectorAll(FOCUSABLE)];
+      const to = wrapStep([all.find(tabStop), all.findLast(tabStop)].filter(Boolean), document.activeElement, e.shiftKey);
+      if (to) { e.preventDefault(); to.focus(); }
+      return;
+    }
     const list = focusables(dlg);
     const to = trapStep(list.length, list.indexOf(document.activeElement), e.shiftKey);
     if (!list.length) { e.preventDefault(); return; }
@@ -117,9 +163,27 @@ if (typeof MutationObserver !== 'undefined') {
   // the last place focus was outside menus and dialogs: where it goes back
   // to when a dialog closes and the element that opened it is gone (an item
   // of a menu, say)
+  // (both weak: a chat closed with its composer focused must not keep its whole DOM alive)
   let lastOutside = null;
+  // where the focused control sits: when a redraw replaces it (a title that arrived, a list
+  // drawn again), focus goes to its new copy instead of falling to <body>
+  let ancestors = [];
   document.addEventListener('focusin', (e) => {
-    if (e.target instanceof Element && !e.target.closest('.popover, .modal-scrim')) lastOutside = e.target;
+    if (e.target instanceof Element && !e.target.closest('.popover, .modal-scrim')) lastOutside = new WeakRef(e.target);
+    ancestors = [];
+    for (let p = e.target.parentElement; p; p = p.parentElement) ancestors.push(new WeakRef(p));
+  }, true);
+  document.addEventListener('focusout', (e) => {
+    const lost = e.target;
+    const path = ancestors.map((r) => r.deref()).filter(Boolean);
+    // (menus and dialogs give focus back themselves)
+    if (e.relatedTarget || !(lost instanceof Element) || path.some((p) => p.matches('.popover, .modal-scrim'))) return;
+    requestAnimationFrame(() => {
+      if (lost.isConnected || (document.activeElement || document.body) !== document.body) return;
+      const scope = path.find((p) => p.isConnected);
+      const to = scope && copyOf(lost, focusables(scope));
+      if (to) to.focus({ preventScroll: true });
+    });
   }, true);
 
   new MutationObserver((muts) => {
@@ -135,12 +199,14 @@ if (typeof MutationObserver !== 'undefined') {
         requestAnimationFrame(() => {
           if (document.activeElement && document.activeElement !== document.body) return;
           const d = topDialog();
-          const to = d ? focusables(d)[0] : lastOutside && lastOutside.isConnected ? lastOutside : null;
+          const last = lastOutside && lastOutside.deref();
+          const to = d ? focusables(d)[0] : last && last.isConnected ? last : null;
           if (to) to.focus({ preventScroll: true });
         });
       }
     }
   }).observe(document.body || document.documentElement, { childList: true });
+  new MutationObserver(clearAnnouncements).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
 }
 
 // toasts are said as they appear: errors at once, the rest politely

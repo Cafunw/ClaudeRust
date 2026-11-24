@@ -38,14 +38,19 @@ export async function renderSkills(body, tab) {
   body.append(actions, list);
   const project = () => pick.value || null;
 
+  // the folder picked last wins: an earlier, slower list is dropped
+  let drawn = 0;
   const draw = async () => {
+    const mine = ++drawn;
     list.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
     let skills;
     try { skills = await call('skills_list', { project: project() }); } catch (e) {
+      if (mine !== drawn) return;
       list.replaceChildren(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('sk_unavailable') : errorText(e))}</div>`));
       actions.querySelectorAll('button').forEach((b) => { b.disabled = notRegistered(e); });
       return;
     }
+    if (mine !== drawn) return;
     list.replaceChildren();
     if (!skills.length) list.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('book', 28)}<div style="margin-top:8px">${esc(t('sk_none'))}</div></div>`));
     for (const s of skills) list.appendChild(card(s, project(), draw));

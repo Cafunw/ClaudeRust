@@ -169,6 +169,13 @@ pub fn split(text: &str) -> Vec<Segment> {
                     }));
                     break;
                 }
+                // opened again before it closed (a reply stopped mid-artifact and continued in the same text,
+                // engine.rs join_blocks, may start it over or update it): this one ends there, cut off
+                if let Some(o) = body.find(OPEN_TAG).filter(|&o| body.find(CLOSE_TAG).is_none_or(|k| o < k)) {
+                    out.push(Segment::Artifact(ArtifactSpec { identifier, kind, title, language, content: strip_fence(&body[..o]), complete: false, update }));
+                    rest = &body[o..];
+                    continue;
+                }
                 match body.find(CLOSE_TAG) {
                     Some(k) => {
                         let content = strip_fence(&body[..k]);
@@ -240,22 +247,35 @@ pub fn apply_update(content: &str, body: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// `a` as a version of its own: an update's edits applied to `base`, the
+/// version before it (None when there is none or they don't apply), taking
+/// its type, and its title unless it has one, as ui/js/artifact_update.js does.
+pub fn resolve(base: Option<&ArtifactSpec>, a: ArtifactSpec) -> Option<ArtifactSpec> {
+    if !a.update {
+        return Some(a);
+    }
+    let base = base?;
+    let content = apply_update(&base.content, &a.content).ok()?;
+    Some(ArtifactSpec { content, kind: base.kind.clone(), language: base.language.clone(), update: false, title: if a.title.is_empty() { base.title.clone() } else { a.title }, ..a })
+}
+
 /// The latest complete version of `identifier` in `texts` (a branch's
 /// assistant messages, oldest first), its updates applied.
 pub fn latest_version<I: IntoIterator<Item = String>>(texts: I, identifier: &str) -> Option<ArtifactSpec> {
-    let mut last: Option<ArtifactSpec> = None;
+    // what an update edits is the version before, finished or not (a reply stopped, then continued), as in the panel
+    let mut base: Option<ArtifactSpec> = None;
+    let mut last = None;
     for text in texts {
         for s in split(&text) {
-            let Segment::Artifact(mut a) = s else { continue };
-            if a.identifier != identifier || !a.complete {
+            let Segment::Artifact(a) = s else { continue };
+            if a.identifier != identifier {
                 continue;
             }
-            if a.update {
-                let Some(base) = &last else { continue };
-                let Ok(content) = apply_update(&base.content, &a.content) else { continue };
-                a = ArtifactSpec { content, kind: base.kind.clone(), language: base.language.clone(), update: false, title: if a.title.is_empty() { base.title.clone() } else { a.title }, ..a };
+            let Some(a) = resolve(base.as_ref(), a) else { continue };
+            if a.complete {
+                last = Some(a.clone());
             }
-            last = Some(a);
+            base = Some(a);
         }
     }
     last
@@ -782,6 +802,20 @@ mod tests {
             Segment::Artifact(a) => assert!(!a.update),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn an_artifact_opened_again_before_it_closed_was_cut_off_there() {
+        // a reply stopped mid-artifact, continued with an update of it in the same text
+        let t = "<antArtifact identifier=\"s\" type=\"text/markdown\" title=\"S\">\nOnce upon<antArtifact identifier=\"s\" command=\"update\">\n<old_str>Once upon</old_str>\n<new_str>Once upon a time.</new_str>\n</antArtifact> Done.";
+        let arts: Vec<ArtifactSpec> = split(t).into_iter().filter_map(|s| if let Segment::Artifact(a) = s { Some(a) } else { None }).collect();
+        assert_eq!(arts.iter().map(|a| (a.content.as_str(), a.complete, a.update)).collect::<Vec<_>>(), [("Once upon", false, false), ("<old_str>Once upon</old_str>\n<new_str>Once upon a time.</new_str>", true, true)]);
+        assert_eq!(split(t).last(), Some(&Segment::Markdown(" Done.".into())));
+        // the update edits the version cut off, and keeps its type
+        let v = latest_version([t.to_string()], "s").unwrap();
+        assert_eq!((v.content.as_str(), v.kind.as_str(), v.title.as_str(), v.complete), ("Once upon a time.", "text/markdown", "S", true));
+        // still open as it streams: not cut off
+        assert!(matches!(&split("<antArtifact identifier=\"s\" type=\"text/markdown\">\nOnce</antArt")[0], Segment::Artifact(a) if !a.complete && a.content == "Once"));
     }
 
     fn edit(pairs: &[(&str, &str)]) -> String {

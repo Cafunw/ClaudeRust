@@ -1,9 +1,9 @@
 // App bootstrap, routing, global events and shortcuts.
-import { t, setLanguage, currentLanguage } from './i18n.js';
+import { setLanguage, currentLanguage } from './i18n.js';
 import { call, on as onBackend, isMac } from './api.js';
 import { onTurn } from './turnstream.js';
 import { store, on, emit, loadLocal, saveLocal } from './store.js';
-import { $, closeMenu, errorToast, toast } from './util.js';
+import { $, closeMenu, convTitle, errorToast, toast } from './util.js';
 import { mountSidebar, refreshSidebarSoon, toggleSidebar } from './sidebar.js';
 import { renderNewChat } from './home.js';
 import * as chat from './chat.js';
@@ -24,6 +24,7 @@ import './findbar.js';
 import './updates.js';
 import './mcp_elicit.js';
 import './quote.js';
+import './memory_trim.js';
 import './todos_ui.js';
 import './panes/changes.js';
 import './panes/worktree_actions.js';
@@ -215,14 +216,17 @@ function bindBackend() {
     refreshSidebarSoon();
     const c = chat.current();
     if (c && c.id === p.conversation_id) {
-      // the record only (title, options), not the rendered conversation
-      call('conversation_meta', { id: c.id }).then((conv) => {
+      // the record only (title, options), not the rendered conversation: taken from a
+      // get_conversation about to be sent (a turn's end reloads the chat), else asked for
+      const record = chat.refreshing(c.id) ? chat.fetchConversation(c.id).then((d) => d.conversation) : call('conversation_meta', { id: c.id });
+      record.then((conv) => {
         const cc = chat.current();
         if (!cc || cc.id !== c.id) return;
         cc.conv = conv;
         document.title = conv.title || 'ClaudeRust';
         const tt = document.querySelector('.topbar .title-btn .t');
-        if (tt) tt.textContent = conv.title || t('new_chat');
+        // the button's tooltip (its accessible description) follows the new title too
+        if (tt) { tt.textContent = convTitle(conv); tt.parentElement.title = tt.textContent; }
         if (cc.composer && conv.options && conv.options.permission_mode) cc.composer.setState({ permission_mode: conv.options.permission_mode });
       }).catch(() => {});
     }

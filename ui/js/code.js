@@ -29,8 +29,8 @@ export async function renderCode(view, params = {}) {
       <button class="icon-btn" data-act="routines" title="${esc(t('rt_title'))}" aria-label="${esc(t('rt_title'))}">${icon('clock', 16)}</button>
       <button class="icon-btn" data-act="import" title="${esc(t('imp_cc_btn'))}" aria-label="${esc(t('imp_cc_btn'))}">${icon('download', 16)}</button>
       <button class="icon-btn" data-act="sessions" title="${esc(t('sessions'))}" aria-label="${esc(t('sessions'))}">${icon('list', 16)}</button></div>
-    <div class="code-stage">
-      <div class="env-card"><span class="env-mark">${spark(24)}</span><div class="env-list"></div>
+    <div class="code-stage"><span class="env-mark">${spark(24)}</span>
+      <div class="env-card"><div class="env-list"></div>
         <button class="env-choose" data-act="folder">${icon('folder', 14)}<span class="grow">${esc(t('choose_folder'))}</span>${icon('chevDown', 12)}</button></div>
       <button class="env-card env-wt" data-act="wt"></button>
     </div>
@@ -116,7 +116,8 @@ export async function renderCode(view, params = {}) {
     },
   });
   composer.el.classList.add('dock');
-  $('.composer-bar', composer.el).prepend(envRow);
+  // after the "+" the box shows (CSS places it there), so Tab meets it before the row under the box
+  $('[data-act=attach]', composer.el).after(envRow);
   $('.composer-slot', view).appendChild(composer.el);
   drawEnv();
   if (params.text) composer.setText(params.text);
@@ -130,8 +131,8 @@ export async function renderSessions(view) {
   if (store.route !== route || route.name !== 'sessions') return;
   view.innerHTML = `<div class="page"><div class="page-inner">
     <div class="page-head wrap"><h1>${t('sessions')}</h1><div class="grow"></div>
-      <button class="btn" data-act="routines">${icon('clock', 14)} ${t('rt_title')}</button>
-      <button class="btn" data-act="import">${icon('download', 14)} ${t('imp_cc_btn')}</button>
+      <button class="btn sess-sec" data-act="routines" title="${esc(t('rt_title'))}" aria-label="${esc(t('rt_title'))}">${icon('clock', 14)}<span class="lbl"> ${esc(t('rt_title'))}</span></button>
+      <button class="btn sess-sec" data-act="import" title="${esc(t('imp_cc_btn'))}" aria-label="${esc(t('imp_cc_btn'))}">${icon('download', 14)}<span class="lbl"> ${esc(t('imp_cc_btn'))}</span></button>
       <button class="btn primary" data-act="new">${icon('plus', 16)} ${t('new_session')}</button></div>
     <div class="sessions"></div></div></div>`;
   $('[data-act=import]', view).onclick = () => emit('open-settings', 'import');

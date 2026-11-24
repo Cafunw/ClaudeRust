@@ -33,7 +33,7 @@ export async function openUsage(days = 30) {
     const tot = u.totals;
     m.body.innerHTML = '';
     const body = h(`<div class="usage-dash">
-      <div class="seg-row"><div class="segmented">${[7, 30, 90].map((x) => `<button data-d="${x}" class="${x === d ? 'on' : ''}">${t('usage_days', { n: x })}</button>`).join('')}</div></div>
+      <div class="seg-row"><div class="segmented" role="group">${[7, 30, 90].map((x) => `<button data-d="${x}" class="${x === d ? 'on' : ''}" aria-pressed="${x === d}">${t('usage_days', { n: x })}</button>`).join('')}</div></div>
       <div class="usage-kpis">
         <div><b>${money(tot.cost_usd)}</b><span>${t('cost')}</span></div>
         <div><b>${fmtTokens(tot.input_tokens)}</b><span>${t('input_tokens')}</span></div>

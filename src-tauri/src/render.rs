@@ -220,7 +220,9 @@ impl TextAcc {
     }
 }
 
-/// An artifact version as a turn lists it (`artifacts`).
+/// An artifact version as a turn lists it (`artifacts`). One left open is
+/// `interrupted` (a Stop, an error, the app closed) unless it is still being
+/// written, which only `finish_text` knows.
 pub fn artifact_json(a: artifacts::ArtifactSpec, version: u32) -> Value {
     let mut v = json!({
         "identifier": a.identifier,
@@ -236,18 +238,22 @@ pub fn artifact_json(a: artifacts::ArtifactSpec, version: u32) -> Value {
     if a.update {
         v["update"] = Value::Bool(true);
     }
+    if !a.complete {
+        v["interrupted"] = Value::Bool(true);
+    }
     // moved in: `json!` would copy it, and it is most of the artifact
     v["content"] = Value::String(a.content);
     v
 }
 
-fn artifact_card(a: &artifacts::ArtifactSpec, version: u32) -> String {
+/// `data-complete`: "false" while it is written (ui/js/parts.js says so, app.css pulses it), "partial" when `cut`.
+fn artifact_card(a: &artifacts::ArtifactSpec, version: u32, cut: bool) -> String {
     format!(
         "<div class=\"artifact-card\" role=\"button\" tabindex=\"0\" data-identifier=\"{id}\" data-version=\"{v}\" data-kind=\"{k}\" data-complete=\"{c}\"><div class=\"artifact-card-icon\"></div><div class=\"artifact-card-text\"><div class=\"artifact-card-title\">{t}</div><div class=\"artifact-card-sub\">{label}</div></div></div>",
         id = escape_html(&a.identifier),
         v = version,
         k = escape_html(&a.kind),
-        c = a.complete,
+        c = if cut { "partial" } else if a.complete { "true" } else { "false" },
         t = escape_html(if a.title.is_empty() { &a.identifier } else { &a.title }),
         label = escape_html(&artifacts::kind_label(&a.kind, a.language.as_deref())),
     )
@@ -278,8 +284,14 @@ fn finish_text(mut acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker,
             Segment::Markdown(md) => add(markdown::render(&md, opts)),
             Segment::Artifact(a) => {
                 let v = tracker.next(&a.identifier);
-                add(artifact_card(&a, v));
-                artifacts_out.push(artifact_json(a, v));
+                // one left open is still being written only at the end of a text that streams
+                let cut = !a.complete && !(live && i == last);
+                add(artifact_card(&a, v, cut));
+                let mut j = artifact_json(a, v);
+                if let (false, Some(o)) = (cut, j.as_object_mut()) {
+                    o.remove("interrupted");
+                }
+                artifacts_out.push(j);
             }
         }
     }
@@ -1041,6 +1053,24 @@ mod tests {
     }
 
     #[test]
+    fn an_artifact_left_open_is_interrupted_unless_it_is_still_being_written() {
+        let (lt, st, mn) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let half = json!([{"type": "text", "text": "Here. <antArtifact identifier=\"s\" type=\"text/markdown\" title=\"S\"># Sto"}]);
+        let m = msg("a", "assistant", half, json!({"stopped": true}));
+        let state = |streaming_msg| {
+            let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg };
+            let t = assistant_turn(&[&m], &ctx, &mut ArtifactTracker::default());
+            let card = t["parts"][0]["html"].as_str().unwrap().split("data-complete=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+            (card, t["artifacts"][0]["interrupted"].clone())
+        };
+        assert_eq!(state(Some("a")), ("false".to_string(), Value::Null), "while it streams");
+        // stopped, failed, or the app restarted: shown as such, not as being made
+        assert_eq!(state(None), ("partial".to_string(), json!(true)));
+        // a turn that streams on in another message: this one was cut off
+        assert_eq!(state(Some("b")), ("partial".to_string(), json!(true)));
+    }
+
+    #[test]
     fn an_image_result_shows_the_image_without_the_clis_note_about_it() {
         let img = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}});
         let note = |t: &str| json!({"type": "text", "text": t});
@@ -1623,31 +1653,34 @@ pub(crate) mod reference {
         }
     }
 
-    fn artifact_card(a: &artifacts::ArtifactSpec, version: u32) -> String {
+    fn artifact_card(a: &artifacts::ArtifactSpec, version: u32, cut: bool) -> String {
         format!(
             "<div class=\"artifact-card\" role=\"button\" tabindex=\"0\" data-identifier=\"{id}\" data-version=\"{v}\" data-kind=\"{k}\" data-complete=\"{c}\"><div class=\"artifact-card-icon\"></div><div class=\"artifact-card-text\"><div class=\"artifact-card-title\">{t}</div><div class=\"artifact-card-sub\">{label}</div></div></div>",
             id = escape_html(&a.identifier),
             v = version,
             k = escape_html(&a.kind),
-            c = a.complete,
+            c = if cut { "partial".to_string() } else { a.complete.to_string() },
             t = escape_html(if a.title.is_empty() { &a.identifier } else { &a.title }),
             label = escape_html(&artifacts::kind_label(&a.kind, a.language.as_deref())),
         )
     }
 
-    fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, artifacts_out: &mut Vec<Value>) -> Option<Value> {
+    fn finish_text(acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker, artifacts_out: &mut Vec<Value>, live: bool) -> Option<Value> {
         if acc.raw.trim().is_empty() {
             return None;
         }
         let mut html = String::new();
         let opts = Opts { math: ctx.math, breaks: true };
-        for seg in artifacts::split(&acc.raw) {
+        let segments = artifacts::split(&acc.raw);
+        let last = segments.len().saturating_sub(1);
+        for (i, seg) in segments.into_iter().enumerate() {
             match seg {
                 Segment::Markdown(md) => html.push_str(&markdown::render(&md, opts)),
                 Segment::Artifact(a) => {
                     let v = tracker.next(&a.identifier);
-                    html.push_str(&artifact_card(&a, v));
-                    artifacts_out.push(json!({
+                    let cut = !a.complete && !(live && i == last);
+                    html.push_str(&artifact_card(&a, v, cut));
+                    let mut j = json!({
                         "identifier": a.identifier,
                         "version": v,
                         "type": a.kind,
@@ -1658,7 +1691,11 @@ pub(crate) mod reference {
                         "label": artifacts::kind_label(&a.kind, a.language.as_deref()),
                         "previewable": artifacts::is_previewable(&a.kind),
                         "ext": artifacts::extension(&a.kind, a.language.as_deref()),
-                    }));
+                    });
+                    if cut {
+                        j["interrupted"] = json!(true);
+                    }
+                    artifacts_out.push(j);
                 }
             }
         }
@@ -1800,6 +1837,8 @@ pub(crate) mod reference {
         let mut parts: Vec<Value> = vec![];
         let mut artifacts_out: Vec<Value> = vec![];
         let mut text: Option<TextAcc> = None;
+        // the pending text ends with the last block of the streaming message
+        let mut text_live = false;
         let mut msg_ids = vec![];
         let mut streaming = false;
         let mut usage_in = 0u64;
@@ -1816,7 +1855,7 @@ pub(crate) mod reference {
         macro_rules! flush_text {
             () => {
                 if let Some(acc) = text.take() {
-                    if let Some(p) = finish_text(acc, ctx, tracker, &mut artifacts_out) {
+                    if let Some(p) = finish_text(acc, ctx, tracker, &mut artifacts_out, std::mem::take(&mut text_live)) {
                         parts.push(p);
                     }
                 }
@@ -1862,6 +1901,7 @@ pub(crate) mod reference {
                 match b["type"].as_str().unwrap_or("") {
                     "text" => {
                         text.get_or_insert_with(TextAcc::default).push_block(b);
+                        text_live = is_streaming && last_block;
                     }
                     "thinking" | "redacted_thinking" => {
                         flush_text!();

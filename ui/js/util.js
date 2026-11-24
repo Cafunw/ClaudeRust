@@ -199,7 +199,10 @@ export function closeMenu() {
   if (openMenu) {
     const m = openMenu;
     openMenu = null;
+    // the keyboard was in the menu: it goes back to the control that opened it, not to <body>
+    const hadFocus = m.el.contains(document.activeElement);
     m.el.remove();
+    if (hadFocus && m.anchor && m.anchor.isConnected) m.anchor.focus({ preventScroll: true });
     if (m.anchor) m.anchor.setAttribute('aria-expanded', 'false');
     document.removeEventListener('mousedown', m.outside, true);
     document.removeEventListener('keydown', m.key, true);

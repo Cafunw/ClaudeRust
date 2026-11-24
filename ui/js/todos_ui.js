@@ -20,7 +20,7 @@ async function openTodos(ctx) {
   const draw = () => {
     const shown = kind ? items.filter((i) => i.kind === kind) : items;
     body.innerHTML = '';
-    const filters = h(`<div class="todos-filters segmented"><button data-k="" class="${kind ? '' : 'on'}">${esc(t('todos_all'))} ${items.length}</button>${KINDS.filter((k) => counts[k]).map((k) => `<button data-k="${k}" class="${kind === k ? 'on' : ''}">${k} ${counts[k]}</button>`).join('')}</div>`);
+    const filters = h(`<div class="todos-filters segmented" role="group"><button data-k="" class="${kind ? '' : 'on'}" aria-pressed="${!kind}">${esc(t('todos_all'))} ${items.length}</button>${KINDS.filter((k) => counts[k]).map((k) => `<button data-k="${k}" class="${kind === k ? 'on' : ''}" aria-pressed="${kind === k}">${k} ${counts[k]}</button>`).join('')}</div>`);
     filters.querySelectorAll('button').forEach((b) => { b.onclick = () => { kind = b.dataset.k; draw(); }; });
     body.appendChild(filters);
     if (!shown.length) { body.appendChild(h(`<div class="pane-empty">${icon('check', 22)}<div>${esc(t('todos_none'))}</div></div>`)); return; }

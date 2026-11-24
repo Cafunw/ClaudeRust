@@ -50,6 +50,7 @@ export function resolveVersions(list) {
       identifier: v.identifier,
       version: v.version,
       complete: v.complete,
+      interrupted: v.interrupted,
       update: true,
       title: v.title || base.title,
       content: r.content,

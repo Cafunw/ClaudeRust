@@ -78,6 +78,7 @@ pub mod usage;
 pub mod util;
 pub mod view;
 pub mod watch;
+pub mod webview_memory;
 pub mod window_theme;
 pub mod worktree;
 
@@ -99,6 +100,7 @@ pub fn show_main(app: &AppHandle) {
         let _ = w.show();
         display::ensure_on_screen_soon(&w);
         let _ = w.set_focus();
+        webview_memory::sync(&w);
     }
 }
 
@@ -413,6 +415,7 @@ pub fn run() {
                     }
                 });
             }
+            mcp::reload_on_outside_edits(handle.clone(), st.clone());
 
             match build_tray(&handle) {
                 Ok(()) => TRAY_OK.store(true, std::sync::atomic::Ordering::SeqCst),
@@ -455,6 +458,12 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
+            // minimised, hidden or shown again: WebView2's memory target follows (webview_memory.rs)
+            if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
+                if let Some(w) = window.app_handle().get_webview_window("main") {
+                    webview_memory::sync(&w);
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let keep = window
                     .app_handle()
@@ -465,6 +474,9 @@ pub fn run() {
                 if (keep && tray) || cfg!(target_os = "macos") {
                     api.prevent_close();
                     let _ = window.hide();
+                    if let Some(w) = window.app_handle().get_webview_window("main") {
+                        webview_memory::sync(&w);
+                    }
                 } else {
                     // A hidden Quick Entry window would otherwise keep the
                     // process alive with nothing on screen.
@@ -474,6 +486,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
+            webview_memory::trim_memory,
             commands::restart_app,
             commands::third_party_licenses,
             commands::update_check,

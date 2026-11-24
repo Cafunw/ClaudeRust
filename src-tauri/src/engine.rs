@@ -1774,16 +1774,13 @@ pub(crate) fn all_tool_ids(content: &Value) -> HashSet<String> {
 }
 
 /// `a` as the gallery keeps it, its edits applied to the version in
-/// `versions` when it is an update (None when they don't apply); recorded there.
-fn resolve_artifact(versions: &mut HashMap<String, String>, mut a: crate::artifacts::ArtifactSpec) -> Option<crate::artifacts::ArtifactSpec> {
-    if !a.complete {
-        return None;
-    }
-    if a.update {
-        a.content = crate::artifacts::apply_update(versions.get(&a.identifier)?, &a.content).ok()?;
-    }
-    versions.insert(a.identifier.clone(), a.content.clone());
-    Some(a)
+/// `versions` when it is an update (None when they don't apply, or while it
+/// is incomplete); recorded there, incomplete too: a reply stopped mid-artifact
+/// and then continued may finish it with an update of what was cut off.
+fn resolve_artifact(versions: &mut HashMap<String, crate::artifacts::ArtifactSpec>, a: crate::artifacts::ArtifactSpec) -> Option<crate::artifacts::ArtifactSpec> {
+    let a = crate::artifacts::resolve(versions.get(&a.identifier), a)?;
+    versions.insert(a.identifier.clone(), a.clone());
+    a.complete.then_some(a)
 }
 
 fn artifacts_of(text: &str) -> impl Iterator<Item = crate::artifacts::ArtifactSpec> {

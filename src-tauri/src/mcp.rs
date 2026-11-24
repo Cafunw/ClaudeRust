@@ -882,20 +882,53 @@ fn roots_list(dirs: &[PathBuf]) -> Value {
     json!({"roots": roots})
 }
 
-/// Paths where the official Claude Desktop app keeps its config, for import.
+/// Where the official Claude Desktop app keeps its config, for import: in
+/// its data folder (see `desktop_dir_candidates`).
 pub fn claude_desktop_config_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
-    {
-        dirs::home_dir().map(|h| h.join("Library/Application Support/Claude/claude_desktop_config.json"))
-    }
+    let candidates = dirs::home_dir().map(|h| h.join("Library/Application Support/Claude")).into_iter().collect();
     #[cfg(target_os = "windows")]
-    {
-        dirs::config_dir().map(|d| d.join("Claude").join("claude_desktop_config.json"))
-    }
+    let candidates = desktop_dir_candidates(dirs::data_local_dir().as_deref(), dirs::config_dir().as_deref());
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        dirs::config_dir().map(|d| d.join("Claude").join("claude_desktop_config.json"))
+    let candidates = dirs::config_dir().map(|d| d.join("Claude")).into_iter().collect();
+    pick_desktop_dir(candidates).map(|d| d.join("claude_desktop_config.json"))
+}
+
+/// Claude Desktop's data folders on Windows, the current layout first: the
+/// MSIX package keeps its data in `%LOCALAPPDATA%\Claude-Data\<package
+/// family>` (leaving a `.user-data-left.*` mark in the old folders), an
+/// older MSIX build in the package's redirected `LocalCache\Roaming\Claude`,
+/// the classic installer in `%APPDATA%\Claude`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn desktop_dir_candidates(local: Option<&Path>, roaming: Option<&Path>) -> Vec<PathBuf> {
+    let children = |dir: PathBuf, prefix: &str| -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with(prefix) && e.path().is_dir())
+            .map(|e| e.path())
+            .collect();
+        found.sort();
+        found
+    };
+    let mut out = vec![];
+    if let Some(local) = local {
+        out.extend(children(local.join("Claude-Data"), "claude_"));
+        out.extend(children(local.join("Packages"), "claude_").into_iter().map(|p| p.join("LocalCache").join("Roaming").join("Claude")));
     }
+    out.extend(roaming.map(|r| r.join("Claude")));
+    out
+}
+
+/// The first folder that holds Claude Desktop's config or its extensions,
+/// else the last (classic) one, which may not exist.
+fn pick_desktop_dir(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|d| d.join("claude_desktop_config.json").is_file() || d.join("Claude Extensions").is_dir())
+        .or(candidates.last())
+        .cloned()
 }
 
 /// The text of a config file. Windows editors often start one with a byte
@@ -1087,12 +1120,87 @@ pub fn write_config(path: &Path, v: &Value) -> AppResult<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
+    let text = serde_json::to_string_pretty(&v)?;
+    std::fs::write(&tmp, &text)?;
+    // (before the rename, which is what the config watcher sees)
+    SEEN.lock().insert(path.to_path_buf(), text);
     std::fs::rename(&tmp, path)?;
     for key in gone {
         crate::mcp_oauth::secret_delete(&key);
     }
     Ok(())
+}
+
+/// The text of each config file as the app last wrote it or started its
+/// servers from it: a change to anything else was made outside the app.
+static SEEN: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> = std::sync::LazyLock::new(Default::default);
+
+fn mark_seen(path: &Path) {
+    if let Ok(text) = read_config_text(path) {
+        SEEN.lock().insert(path.to_path_buf(), text);
+    }
+}
+
+/// Was the config at `path` changed outside the app to one that can be
+/// used? A broken one (an edit half done) is left for the next save; a
+/// change is reported once.
+fn changed_outside(path: &Path) -> bool {
+    let Ok(text) = read_config_text(path) else { return false };
+    let mut seen = SEEN.lock();
+    if seen.get(path) == Some(&text) || config_problem(path).is_some() {
+        return false;
+    }
+    seen.insert(path.to_path_buf(), text);
+    true
+}
+
+/// Call `on_change` each time the config file at `path` is changed outside
+/// the app to a usable config, once its writes pause (an editor's save is
+/// one change). Watches the folder, as editors and `write_config` replace
+/// the file; the watcher lives as long as the app.
+pub fn watch_config(path: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Result<()> {
+    use notify::Watcher;
+    let (Some(dir), Some(name)) = (path.parent().map(Path::to_path_buf), path.file_name().map(|n| n.to_os_string())) else {
+        return Ok(());
+    };
+    // the file as it is now is no outside edit (the servers' first start may come later)
+    mark_seen(&path);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res {
+            if !matches!(ev.kind, notify::EventKind::Access(_)) && ev.paths.iter().any(|p| p.file_name() == Some(name.as_os_str())) {
+                let _ = tx.send(());
+            }
+        }
+    })?;
+    watcher.watch(&dir, notify::RecursiveMode::NonRecursive)?;
+    tauri::async_runtime::spawn(async move {
+        let _watcher = watcher;
+        while rx.recv().await.is_some() {
+            while let Ok(Some(())) = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await {}
+            if changed_outside(&path) {
+                on_change();
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Reload the servers when their config is edited outside the app, and say
+/// so with "mcp-config-reloaded" (Settings shows a toast).
+pub fn reload_on_outside_edits(app: tauri::AppHandle, st: Arc<crate::state::AppState>) {
+    use tauri::Emitter;
+    let path = st.mcp.config_path.clone();
+    let reload = move || {
+        let (app, st) = (app.clone(), st.clone());
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::commands::reload_mcp_in_background(&app, &st).await;
+            let _ = app.emit("mcp-config-reloaded", ());
+        });
+    };
+    if let Err(e) = watch_config(path, reload) {
+        log::warn!("can't watch the MCP config for changes: {e}");
+    }
 }
 
 pub fn ensure_config(path: &Path) -> AppResult<()> {
@@ -1145,6 +1253,7 @@ impl McpManager {
     pub async fn start_all(&self, disabled: &[String]) {
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_all().await;
+        mark_seen(&self.config_path);
         let mut cfg = read_config(&self.config_path);
         // tokens an older version, an import or a hand edit left in the clear
         if crate::mcp_oauth::STORE_PERSISTS && auth_headers(&mut cfg).any(|v| is_plain_secret(v)) {
@@ -2548,5 +2657,63 @@ for line in sys.stdin:
         let p = temp_dir("secrets-mem").join("claude_desktop_config.json");
         write_config(&p, &json!({"mcpServers": {"r": {"url": "https://x.example/mcp", "headers": {"Authorization": "Bearer abc"}}}})).unwrap();
         assert_eq!(auth(&read_config(&p), "r"), "Bearer abc");
+    }
+
+    #[test]
+    fn claude_desktop_data_is_found_in_the_msix_folder_before_the_classic_one() {
+        let base = temp_dir("desktop-dirs");
+        let (local, roaming) = (base.join("Local"), base.join("Roaming"));
+        let msix = local.join("Claude-Data").join("claude_pzs8sxrjxfjjc");
+        let package = local.join("Packages").join("Claude_pzs8sxrjxfjjc").join("LocalCache").join("Roaming").join("Claude");
+        for d in [&msix, &package, &roaming.join("Claude"), &local.join("Packages").join("Other_123")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = desktop_dir_candidates(Some(&local), Some(&roaming));
+        assert_eq!(c, vec![msix.clone(), package.clone(), roaming.join("Claude")], "the current layout first, other packages left out");
+        // folders that only mark where the data went are passed over
+        assert_eq!(pick_desktop_dir(c.clone()), Some(roaming.join("Claude")), "nothing anywhere: the classic folder");
+        std::fs::write(roaming.join("Claude").join("claude_desktop_config.json"), "{}").unwrap();
+        assert_eq!(pick_desktop_dir(c.clone()), Some(roaming.join("Claude")), "a classic install");
+        std::fs::create_dir_all(package.join("Claude Extensions")).unwrap();
+        assert_eq!(pick_desktop_dir(c.clone()), Some(package.clone()), "extensions alone mark the folder in use");
+        std::fs::write(msix.join("claude_desktop_config.json"), "{}").unwrap();
+        assert_eq!(pick_desktop_dir(c), Some(msix));
+        assert_eq!(desktop_dir_candidates(None, None), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn only_a_usable_config_written_outside_the_app_counts_as_changed() {
+        let p = temp_dir("seen").join("claude_desktop_config.json");
+        write_config(&p, &json!({"mcpServers": {}})).unwrap();
+        assert!(!changed_outside(&p), "the app's own write");
+        std::fs::write(&p, r#"{"mcpServers": {"a": {"command": "x"}}}"#).unwrap();
+        assert!(changed_outside(&p), "a hand edit");
+        assert!(!changed_outside(&p), "reported once");
+        std::fs::write(&p, r#"{"mcpServers": {"#).unwrap();
+        assert!(!changed_outside(&p), "an edit half done");
+        std::fs::write(&p, r#"{"mcpServers": {"a": {"command": "x"}}, "b": 1}"#).unwrap();
+        assert!(changed_outside(&p), "fixed again");
+        std::fs::remove_file(&p).unwrap();
+        assert!(!changed_outside(&p), "deleted");
+    }
+
+    #[tokio::test]
+    async fn the_config_watcher_reports_an_outside_edit_but_not_the_apps_own_write() {
+        let p = temp_dir("watch").join("claude_desktop_config.json");
+        write_config(&p, &json!({"mcpServers": {}})).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        watch_config(p.clone(), move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        async fn next(rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) -> Option<()> {
+            tokio::time::timeout(Duration::from_secs(4), rx.recv()).await.ok().flatten()
+        }
+        write_config(&p, &json!({"mcpServers": {"own": {"command": "x"}}})).unwrap();
+        assert_eq!(next(&mut rx).await, None, "the app's own write");
+        std::fs::write(&p, r#"{"mcpServers": {"hand": {"command": "y"}}}"#).unwrap();
+        assert_eq!(next(&mut rx).await, Some(()), "a hand edit");
+        std::fs::write(p.with_file_name("other.json"), "{}").unwrap();
+        assert_eq!(next(&mut rx).await, None, "another file in the folder");
     }
 }

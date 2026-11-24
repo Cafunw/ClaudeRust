@@ -324,9 +324,13 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 /* the effort levels in the model menu: one row as wide as the menu, no label broken over two lines */
 .segmented.fill { display: flex; }
 .segmented.fill button { flex: 1 1 auto; padding: 4px 6px; }
-.segmented button.on { background: var(--bg-4); color: var(--text-0); }
+/* the chosen option: its own fill, and a ring of 3:1 or more against the track
+   and the fill, so it reads as chosen without telling greys apart (WCAG 1.4.11;
+   ui/test/r10_settings_pages.test.mjs) */
+.segmented button.on { background: var(--bg-0); color: var(--text-0); box-shadow: inset 0 0 0 1px rgba(20, 20, 19, 0.6), var(--shadow-sm); }
+:root[data-theme="dark"] .segmented button.on { background: rgba(255, 255, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7); }
+@media (forced-colors: active) { .segmented button.on { outline: 2px solid Highlight; outline-offset: -2px; } }
 .segmented.icons button { width: 32px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-:root[data-theme="light"] .segmented button.on { background: var(--bg-0); box-shadow: var(--shadow-sm); }
 
 /* --------------------------------------------------------------- new chat */
 .welcome {
@@ -857,7 +861,7 @@ body.quick.opaque .quick-box { box-shadow: none; margin: 0 14px 6px; }
   .sidebar:not(.collapsed) { position: absolute; height: 100%; box-shadow: var(--shadow-lg); z-index: 31; }
   .sidebar:not(.collapsed):not(.hidden) + .sidebar-scrim { display: block; position: fixed; inset: 0; z-index: 30; background: var(--scrim); animation: fade .15s; }
   .chat-col { padding: 12px 14px 20px; }
-  .chat-bottom { padding: 0 12px; }
+  .chat-bottom { padding: 0 12px 6px; }
   .page-inner { padding: 20px 16px 40px; }
   .settings-nav { width: 150px; }
 }
@@ -870,12 +874,6 @@ body.quick.opaque .quick-box { box-shadow: none; margin: 0 14px 6px; }
   .setting-row { flex-wrap: wrap; }
   .setting-row .txt { flex-basis: 100%; }
   .setting-row > .input { max-width: 100%; }
-}
-/* a code session's topbar in a narrow window: the watch badge keeps its icon (and its title), the folder gives way */
-@media (max-width: 520px) {
-  .topbar .watch-badge > span:not(.wb-ok):not(.wb-err) { display: none; }
-  .topbar .watch-badge { padding: 0 8px; }
-  .topbar .crumb { min-width: 0; overflow: hidden; }
 }
 
 /* Desktop-app behaviour: chrome isn't selectable, content is. */
@@ -1384,15 +1382,23 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .topbar { min-width: 0; }
 .topbar > * { flex-shrink: 0; }
 .topbar .title-btn { flex-shrink: 1; min-width: 60px; }
-.topbar .crumb { flex-shrink: 1; min-width: 64px; overflow: hidden; }
+.topbar .crumb { overflow: hidden; }
 .topbar .crumb .ellipsis, .topbar .crumb .code-topinfo { min-width: 0; }
 .topbar .active-tool { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the title keeps the room it needs: the folder or project crumb and the worktree's branch give way
+   first (down to their icon), the title last (its whole text in the tooltip) */
+.topbar .crumb, .topbar .active-tool.wt { flex-shrink: 100; min-width: 28px; }
+/* a narrow top bar: the watch badge keeps its icon (its state in the tooltip) */
+@container (max-width: 640px) {
+  .topbar .watch-badge > span:not(.wb-ok):not(.wb-err) { display: none; }
+  .topbar .watch-badge { padding: 0 8px; }
+}
 .topbar .active-tool.eng { flex-shrink: 0; }
 /* a narrow top bar keeps the engine's icon (its name in the tooltip) and the context % (the cost in the tooltip) */
 .topbar { container-type: inline-size; }
 @container (max-width: 580px) { .topbar .active-tool.eng .lbl, .topbar .ctx-meter .cost { display: none; } }
 /* a phone-narrow code session: the title keeps the room, the folder crumb goes (the session's menu names it) */
-@container (max-width: 400px) { .topbar > .crumb, .topbar > .crumb + .muted { display: none; } }
+@container (max-width: 400px) { .topbar > .crumb, .topbar > .crumb + .muted, .topbar .ctx-meter .pct { display: none; } }
 .topbar .spacer { flex: 1 1 0; min-width: 0; }
 .hist-search .select { flex: none; width: auto; min-width: 120px; padding: 0 24px 0 8px; line-height: 26px; }
 :root[data-theme="dark"] .mode-btn.plan { color: var(--link); border-color: rgba(138, 180, 248, .35); background: rgba(138, 180, 248, .1); }
@@ -1420,7 +1426,8 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
   position: relative; width: min(320px, 100%); background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px;
   display: flex; flex-direction: column; padding: 4px; font-size: 13px; color: var(--text-1); text-align: left;
 }
-.env-mark { position: absolute; right: 10px; top: -22px; color: var(--accent); display: inline-flex; }
+/* the mark heads the stage, clear of the cards' borders */
+.env-mark { color: var(--accent); display: inline-flex; margin-bottom: 6px; }
 .env-item, .env-choose { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 7px; color: var(--text-1); width: 100%; text-align: left; }
 .env-item:hover, .env-choose:hover { background: var(--row-hover); color: var(--text-0); }
 .env-item.on { color: var(--text-0); }
@@ -1428,10 +1435,11 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .env-empty { padding: 6px 8px; color: var(--text-3); }
 .env-choose { margin-top: 2px; border-top: 1px solid var(--border); border-radius: 0 0 7px 7px; color: var(--text-0); }
 .env-choose svg:last-child { color: var(--text-2); }
-.env-card.env-wt { flex-direction: row; align-items: center; gap: 10px; height: 38px; padding: 0 12px; cursor: pointer; }
+/* the worktree card: its state, and under it the hint on a line of its own (wrapping only in a narrow window) */
+.env-card.env-wt { align-items: flex-start; gap: 2px; padding: 8px 12px; cursor: pointer; }
 .env-wt:hover { background: var(--bg-2); }
-.env-wt b { font-weight: 400; color: var(--text-0); white-space: nowrap; }
-.env-wt span { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.env-wt b { font-weight: 400; color: var(--text-0); }
+.env-wt span { color: var(--text-2); font-size: 12px; }
 .code-dock { flex-shrink: 0; padding: 0 16px 6px; }
 .code-dock .inner { max-width: var(--content-w); margin: 0 auto; }
 
@@ -1567,10 +1575,9 @@ table.dv td.no, table.dv .sign, .gr-hit .no, .sc-src, .env-empty { color: var(--
 .changes-pane .branch-btn { max-width: min(40%, 120px); min-width: 0; }
 .changes-pane .branch-btn svg { flex-shrink: 0; }
 .changes-pane .branch-btn .ellipsis { min-width: 0; }
-/* the worktree card's line wraps instead of being cut */
-.env-card.env-wt { height: auto; min-height: 38px; padding: 8px 12px; }
-.env-wt span { white-space: normal; }
 .page-head.wrap { flex-wrap: wrap; row-gap: 8px; }
+/* a narrow Sessions page: Routines and Import keep their icon (their names in the tooltip), so the head stays one row */
+@media (max-width: 600px) { .page-head .sess-sec .lbl { display: none; } }
 .project-layout > * { min-width: 0; }
 @media (max-width: 560px) {
   .cd-list .server .head { flex-wrap: wrap; }

@@ -814,6 +814,26 @@ fn a_continued_reply_keeps_its_artifact() {
 }
 
 #[test]
+fn an_artifact_cut_off_and_finished_by_an_update_reaches_the_gallery() {
+    block_on(async {
+        let h = Harness::new("code");
+        let sid = new_id();
+        let half = "<antArtifact identifier=\"page\" type=\"text/html\" title=\"Page\"><h1>Story</h1><p>Once upon";
+        let cut = vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text(half)), json!(["exit", 1])];
+        let edit = artifact("page", "<old_str>Once upon</old_str><new_str>Once upon a time.</p></new_str>", true);
+        let rest = vec![read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text(&edit)), result(&sid, 0.02)];
+        h.cli.script(vec![cut, rest]);
+        assert!(h.turn("Write a story page", None).await.is_err());
+        assert!(gallery(&h).is_empty(), "a cut-off artifact isn't kept yet");
+        let reply = h.path()[1].clone();
+        h.transcript(&sid, 0.01);
+        finish(h.start(&reply.id)).await.unwrap();
+        // the update edits the version that was cut off, as the panel shows it
+        assert_eq!(gallery(&h), [("page".to_string(), "<h1>Story</h1><p>Once upon a time.</p>".to_string())]);
+    });
+}
+
+#[test]
 fn thinking_comes_summarized_with_how_long_it_took() {
     block_on(async {
         let h = Harness::new("code");

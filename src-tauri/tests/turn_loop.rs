@@ -542,6 +542,37 @@ fn a_cut_off_reply_continues_and_ends_as_one_message() {
     });
 }
 
+/// The gallery after a reply cut off in an artifact was continued with `rest` (the API engine joins it to the reply's text).
+fn gallery_after_continuing_an_artifact(rest: &'static str) -> Vec<(String, String)> {
+    block_on(async {
+        let api = api(move |b| {
+            if asks_to_go_on(b) {
+                return Reply::Stream(reply(b, vec![text_block(0, &[rest])], "end_turn"));
+            }
+            let mut v = vec![message_start(b)];
+            v.extend(text_block(0, &["<antArtifact identifier=\"story\" type=\"text/markdown\" title=\"Story\">\n# Story\n\nOnce upon"]).into_iter().take(2));
+            Reply::Drop(v)
+        })
+        .await;
+        let h = chat(&api);
+        h.send("Write a story");
+        assert!(h.ended().await["error"]["message"].is_string());
+        engine::continue_reply(h.app.handle(), &h.st, &h.conv).await.unwrap();
+        ended_times(&h, 2).await;
+        h.st.db.artifact_list(10).unwrap().into_iter().filter(|a| a.conversation_id == h.conv).map(|a| (a.identifier, a.content)).collect()
+    })
+}
+
+#[test]
+fn an_artifact_cut_off_and_continued_reaches_the_gallery() {
+    let story = vec![("story".to_string(), "# Story\n\nOnce upon a time.".to_string())];
+    // the rest of it, in the same text
+    assert_eq!(gallery_after_continuing_an_artifact(" a time.\n</antArtifact>"), story);
+    // or it opened again as an update of what was cut off: that one ends where the update starts
+    let update = "<antArtifact identifier=\"story\" type=\"text/markdown\" title=\"Story\" command=\"update\">\n<old_str>Once upon</old_str>\n<new_str>Once upon a time.</new_str>\n</antArtifact>";
+    assert_eq!(gallery_after_continuing_an_artifact(update), story);
+}
+
 #[test]
 fn a_continuation_that_is_stopped_keeps_both_parts() {
     block_on(async {

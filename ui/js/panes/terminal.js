@@ -127,6 +127,8 @@ async function mount(el, ctx) {
   const fit = new L.FitAddon();
   term.loadAddon(fit);
   term.open(host);
+  // xterm names its input "Terminal input" in English whatever the app's language
+  if (term.textarea) term.textarea.setAttribute('aria-label', t('ws_terminal'));
   const s = { term, fit, ptyId: null, el, exited: false, convId: ctx.convId };
   sessions.set(ctx.convId, s);
   requestAnimationFrame(() => { try { fit.fit(); } catch { /* hidden */ } start(s, ctx); });

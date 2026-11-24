@@ -864,6 +864,8 @@ const en = {
   errk_artifact_edit_too_large: 'This edit is too large to save.', errk_artifact_edit_busy: 'Wait for Claude to finish, then save your edit.', errk_artifact_edit_missing: 'This artifact isn’t in the conversation shown.',
   errk_artifact_edit_untyped: 'Only slides, docs, sheets and dashboards are edited in place.', errk_artifact_export_failed: 'This artifact can’t be saved as {format}.',
   art_csp_blocked_script: 'The artifact tried to load {uri}, which isn’t one of the libraries artifacts can use (each at one version), so it was blocked.',
+  mcp_config_reloaded: 'The MCP config file changed: servers reloaded.',
+  art_interrupted: 'Interrupted', art_interrupted_note: 'This artifact was cut off before it was finished, so parts of it may be missing or not work.',
 };
 
 const tr = {
@@ -1730,6 +1732,8 @@ const tr = {
   errk_artifact_edit_too_large: 'Bu düzenleme kaydedilemeyecek kadar büyük.', errk_artifact_edit_busy: 'Claude’un bitirmesini bekleyin, sonra düzenlemenizi kaydedin.', errk_artifact_edit_missing: 'Bu artifact gösterilen sohbette yok.',
   errk_artifact_edit_untyped: 'Yalnızca slaytlar, belgeler, tablolar ve gösterge panelleri yerinde düzenlenir.', errk_artifact_export_failed: 'Bu artifact {format} olarak kaydedilemez.',
   art_csp_blocked_script: 'Artifact {uri} adresini yüklemeye çalıştı; bu, artifact’lerin kullanabileceği kütüphanelerden (her biri tek bir sürümde) biri olmadığı için engellendi.',
+  mcp_config_reloaded: 'MCP yapılandırma dosyası değişti: sunucular yeniden yüklendi.',
+  art_interrupted: 'Yarıda kesildi', art_interrupted_note: 'Bu artifact bitmeden kesildi; bazı kısımları eksik olabilir ya da çalışmayabilir.',
 };
 
 const dicts = { en, tr };

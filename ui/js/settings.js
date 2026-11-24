@@ -37,6 +37,9 @@ const TABS = [
 
 let current = null;
 
+// claude_desktop_config.json edited outside the app: its servers were reloaded
+onBackend('mcp-config-reloaded', () => toast(t('mcp_config_reloaded')));
+
 // the shortcut being recorded (Settings → Shortcuts): one at a time, and
 // never left listening once Settings closes
 let recorder = null;
@@ -75,10 +78,13 @@ export function openSettings(tab = 'general') {
     if (!RENDER[id]) id = 'general';
     active = id;
     nav.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
-    body.innerHTML = '';
+    // each showing renders into its own container: what a slow page (the
+    // Import scan) adds after another page is shown lands in a detached one
+    const page = h('<div class="settings-page"></div>');
+    body.replaceChildren(page);
     body.scrollTop = 0;
-    RENDER[id](body, { onLeave: (f) => leaving.push(f), close: () => m.close() });
-    if (section) body.querySelector(`[data-sec=${section}]`)?.scrollIntoView({ block: 'start' });
+    RENDER[id](page, { onLeave: (f) => leaving.push(f), close: () => m.close() });
+    if (section) page.querySelector(`[data-sec=${section}]`)?.scrollIntoView({ block: 'start' });
   }
   // redraw for changes made elsewhere, but not under the user's cursor: a
   // field being typed in would lose its text

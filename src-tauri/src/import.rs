@@ -200,12 +200,20 @@ fn scan_cc_session(path: &Path) -> Option<Value> {
     }))
 }
 
+/// A transcripts folder of ClaudeRust's own account chats: the CLI names it
+/// after the cwd, `<data dir>\chat-cli` of any copy (identifier
+/// `dev.clauderust.*`), every other character a '-'. They are chats of this
+/// app already, not Claude Code sessions.
+fn is_clauderust_chat(folder: &str) -> bool {
+    folder.ends_with("-chat-cli") && folder.contains("-dev-clauderust-")
+}
+
 fn cc_session_files() -> Vec<PathBuf> {
     let Some(dir) = claude_code_dir() else { return vec![] };
     let mut files = vec![];
     if let Ok(projects) = std::fs::read_dir(dir.join("projects")) {
         for p in projects.flatten() {
-            if !p.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !p.file_type().map(|t| t.is_dir()).unwrap_or(false) || is_clauderust_chat(&p.file_name().to_string_lossy()) {
                 continue;
             }
             if let Ok(entries) = std::fs::read_dir(p.path()) {
@@ -1264,5 +1272,21 @@ mod tests {
         assert!(err.contains("already running"), "{err}");
         drop(first);
         drop(ImportGuard::acquire().unwrap());
+    }
+
+    #[test]
+    fn clauderust_account_chats_are_not_offered_as_claude_code_sessions() {
+        // the folders the CLI makes for <data dir>\chat-cli of a release, a dev copy, macOS and Linux
+        for f in [
+            "C--Users-x-AppData-Roaming-dev-clauderust-desktop-chat-cli",
+            "C--Users-x-AppData-Roaming-dev-clauderust-r9files-chat-cli",
+            "-Users-x-Library-Application-Support-dev-clauderust-desktop-chat-cli",
+            "-home-x--local-share-dev-clauderust-my-copy-chat-cli",
+        ] {
+            assert!(is_clauderust_chat(f), "{f}");
+        }
+        for f in ["D--ClaudeRust", "D--work-chat-cli", "C--Users-x-dev-clauderust-notes", "C--src-dev-clauderust-chat-cli-tools"] {
+            assert!(!is_clauderust_chat(f), "{f}");
+        }
     }
 }

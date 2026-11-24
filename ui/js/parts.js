@@ -69,10 +69,15 @@ export function decorate(root) {
     const sub = c.querySelector('.artifact-card-sub');
     if (sub && !sub.dataset.ready) {
       sub.dataset.ready = '1';
-      const label = artifactKindText(sub.textContent);
-      sub.textContent = c.dataset.complete === 'false' ? `${label} · ${t('generating')}` : `${label} · ${t('click_to_open')}`;
+      sub.textContent = artifactCardSub(sub.textContent, c.dataset.complete);
     }
   });
+}
+
+/** An artifact card's second line: its kind (artifacts.rs kind_label), then whether it is being written
+ *  ("false", render.rs), was cut off ("partial": a Stop, an error, the app closed), or opens. */
+export function artifactCardSub(label, complete) {
+  return `${artifactKindText(label)} · ${t({ false: 'generating', partial: 'art_interrupted' }[complete] || 'click_to_open')}`;
 }
 
 // the kinds artifacts.rs kind_label names in English (the rest are names: HTML, SVG, React, Python…)

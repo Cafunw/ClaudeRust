@@ -187,7 +187,7 @@ export function createComposer(opts) {
     ccInfoNow(m); // asks the CLI now, so the model menu has its answer when it opens
     const thinkOn = m.thinking === 'always_on' || (canThink(m) && st.thinking);
     const ucOn = ultracodeOn(m) && ultracodeOffered(m);
-    $('[data-act=model]', el).innerHTML = `${esc(m.name)}${thinkOn && m.thinking !== 'always_on' ? ` <span class="think-flag" title="${t('extended_thinking')}">${icon('bulb', 13)}</span>` : ''}${ucOn ? ` <span class="think-flag" title="${esc(t('ultracode_d'))}">${esc(t('ultracode'))}</span>` : ''} ${icon('chevDown', 14)}`;
+    $('[data-act=model]', el).innerHTML = `${esc(m.name)}${thinkOn && m.thinking !== 'always_on' ? ` <span class="think-flag" title="${t('extended_thinking')}">${icon('bulb', 13)}<span class="sr-only">, ${esc(t('extended_thinking'))}</span></span>` : ''}${ucOn ? ` <span class="think-flag" title="${esc(t('ultracode_d'))}">${esc(t('ultracode'))}</span>` : ''} ${icon('chevDown', 14)}`;
     const toolsBtn = $('[data-act=tools]', el);
     const research = mode === 'chat' && st.research && researchOffered();
     const anyOn = (mode === 'chat' && st.web_search) || (st.style && st.style !== 'normal') || research;

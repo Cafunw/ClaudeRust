@@ -1,7 +1,7 @@
 // Conversation view: turns, streaming updates, branching, permissions.
 import { openSaveCommand } from './save_command.js';
 import { watchBadge } from './watch_ui.js';
-import { contextMeter, compactDivider } from './context_ui.js';
+import { contextMeter, compactDivider, refreshMeters } from './context_ui.js';
 import { openRewind } from './rewind.js';
 import * as workspace from './workspace.js';
 import { icon, spark } from './icons.js';
@@ -70,6 +70,9 @@ function discardIncognito(id) {
 // replace the one opened after it
 let openSeq = 0;
 
+// a turn started: the chat list changed (its order, the chat running), not the sidebar's sections (sidebar.js)
+const CHATS_ONLY = { sections: false };
+
 // get_conversation (the turns loaded so far and any after them, rendered)
 // for callers that come within a few milliseconds of each other: the end of
 // a turn brings generation-state and conversation-updated back to back, and
@@ -90,6 +93,11 @@ export function fetchConversation(id) {
   }
   return p;
 }
+
+/** Whether a get_conversation of `id` is about to be sent: what it brings is
+ *  at least as new as anything the backend said before now (main.js need not
+ *  ask for the conversation's record on a conversation-updated then). */
+export function refreshing(id) { return fetching.has(id); }
 
 export async function openConversation(id, { focus = true } = {}) {
   const seq = ++openSeq;
@@ -217,7 +225,10 @@ function renderTopbar() {
   const outline = h(`<button class="icon-btn" title="${esc(t('outline_title'))}">${icon('list', 17)}</button>`);
   outline.onclick = () => showOutline(outline);
   cur.topEl.append(outline);
-  cur.topEl.append(contextMeter(cur.id, () => { cur.composer.setText('/cost'); cur.composer.send(); }));
+  // one meter per open chat: it refreshes itself when a turn ends or the chat is compacted (context_ui.js), and the
+  // topbar is drawn on every reload; switching a branch or rewinding refresh it (refreshMeters)
+  cur.meter ||= contextMeter(cur.id, () => { cur.composer.setText('/cost'); cur.composer.send(); });
+  cur.topEl.append(cur.meter);
   const usage = h(`<button class="icon-btn" title="${t('usage')}">${icon('info', 17)}</button>`);
   usage.onclick = () => showUsage(usage);
   cur.topEl.append(usage);
@@ -400,7 +411,7 @@ async function sendInConversation(text, atts) {
     throw e;
   }
   await reload();
-  emit('conversations-changed');
+  emit('conversations-changed', CHATS_ONLY);
   return true;
 }
 
@@ -436,6 +447,7 @@ export async function reload() {
   markLast();
   rebuildArtifacts();
   renderTopbar();
+  document.title = cur.conv.title || 'ClaudeRust';
   cur.running = data.running;
   cur.composer.setRunning(!!data.running, !!data.waiting);
   scrollToBottom(false);
@@ -720,6 +732,7 @@ function branchNav(turn) {
     try {
       await call('switch_branch', { conversationId: cur.id, messageId: target });
       await reload();
+      refreshMeters(cur.id);
     } catch (e) { errorToast(e); }
   }));
   return nav;
@@ -833,6 +846,8 @@ export function showPendingCompact() {
   d.classList.add('pending');
   cur.colEl.appendChild(d);
   scrollToBottom(true);
+  // its tooltip says a compaction is pending
+  refreshMeters(cur.id);
 }
 
 function rewindTo(turn, text) {
@@ -844,6 +859,7 @@ function rewindTo(turn, text) {
     onConversationRewound: async (msgText) => {
       if (cur !== c) return;
       await reload();
+      refreshMeters(c.id);
       c.composer.setText(msgText || text);
       c.composer.focus();
     },
@@ -886,7 +902,7 @@ function startEdit(el, turn, text) {
     try {
       await call('send_message', { req: { conversation_id: cur.id, text: v, edit: true, parent_id: turn.parent_id || '' } });
       await reload();
-      emit('conversations-changed');
+      emit('conversations-changed', CHATS_ONLY);
     } catch (e) {
       errorToast(e);
       saving = false;
@@ -1060,7 +1076,7 @@ async function resumeReply() {
   if (!cur) return;
   try {
     await call('send_message', { req: { conversation_id: cur.id, text: '', continue_reply: true } });
-    emit('conversations-changed');
+    emit('conversations-changed', CHATS_ONLY);
   } catch (e) { errorToast(e); }
   await reload();
 }
@@ -1112,7 +1128,7 @@ export function onTurnEvent({ conversation_id, turn }) {
   // auto-open an artifact that's being generated
   for (const a of turn.artifacts || []) {
     const key = `${a.identifier}@${a.version}`;
-    if (turn.streaming && !a.complete && !cur.autoOpened.has(key) && store.settings.artifacts_enabled !== false) {
+    if (turn.streaming && !a.complete && !a.interrupted && !cur.autoOpened.has(key) && store.settings.artifacts_enabled !== false) {
       cur.autoOpened.add(key);
       artifacts.open(cur.id, cur.artifacts, a.identifier, a.version, { streaming: true });
     }
@@ -1201,7 +1217,7 @@ async function sendQueued(convId) {
   showQueue(convId);
   try {
     if (cur && cur.id === convId) await sendInConversation(next.text, next.atts);
-    else { await call('send_message', { req: { conversation_id: convId, text: next.text, attachment_ids: next.atts.map((a) => a.id).filter(Boolean) } }); emit('conversations-changed'); }
+    else { await call('send_message', { req: { conversation_id: convId, text: next.text, attachment_ids: next.atts.map((a) => a.id).filter(Boolean) } }); emit('conversations-changed', CHATS_ONLY); }
   } catch (e) { errorToast(e); }
 }
 

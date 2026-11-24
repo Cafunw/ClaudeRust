@@ -82,7 +82,7 @@ export function mountSidebar() {
   store.appMode = store.appMode || savedMode();
   el.innerHTML = `
     <div class="sidebar-top">
-      <button class="icon-btn" data-act="toggle" title="${t('collapse')}${keymap.shown('sidebar') ? ` (${keymap.shown('sidebar')})` : ''}" aria-label="${t('collapse')}">${icon('sidebar', 18)}</button>
+      <button class="icon-btn" data-act="toggle" title="${t('collapse')}${keymap.shown('sidebar') ? ` (${keymap.shown('sidebar')})` : ''}" aria-label="${t('collapse')}" aria-expanded="${!store.sidebarCollapsed}">${icon('sidebar', 18)}</button>
       <span class="brand">ClaudeRust</span>
       <div class="mode-switch" role="tablist">
         <button role="tab" data-mode="chat" title="${t('mode_chat')}" aria-label="${t('mode_chat')}">${icon('chat', 16)}</button>
@@ -164,6 +164,7 @@ function renderNav() {
 function setCollapsed(on) {
   store.sidebarCollapsed = on;
   $('#sidebar').classList.toggle('collapsed', on);
+  $('#sidebar [data-act=toggle]')?.setAttribute('aria-expanded', String(!on));
 }
 
 // folded by itself to make room, not by you (sidebar_room.js); not saved,
@@ -233,19 +234,22 @@ let soon = null;
 /** refreshSidebar once a burst of backend events has settled. */
 export function refreshSidebarSoon() {
   clearTimeout(soon);
-  soon = setTimeout(() => { soon = null; refreshSidebar(); }, 250);
+  // backend events (a turn, a title) change chats, never the sections
+  soon = setTimeout(() => { soon = null; refreshSidebar({ sections: false }); }, 250);
 }
 
-export async function refreshSidebar() {
+/** The chat lists, and the sections unless `opts.sections` is false (chat.js: a turn started). */
+export async function refreshSidebar(opts) {
+  const sections = !(opts && opts.sections === false);
   // a refresh still to come from refreshSidebarSoon would show nothing this
   // one won't: the events that asked for it came before this read
   clearTimeout(soon);
   soon = null;
   try {
-    const [list, chats, codes] = await Promise.all([call('list_conversations', {}), loadSections('chat'), loadSections('code')]);
+    const [list, chats, codes] = await Promise.all([call('list_conversations', {}), sections && loadSections('chat'), sections && loadSections('code')]);
     // (an incognito chat is never listed: the backend leaves it out, and so does this)
     store.conversations = list.filter((c) => !c.incognito);
-    store.sections = { chat: chats || [], code: codes || [] };
+    if (sections) store.sections = { chat: chats || [], code: codes || [] };
     // turns already running (e.g. after the window was reloaded): the
     // running/finished events only cover turns that start from now on
     for (const c of store.conversations) if (c.running) store.running.add(c.id);

@@ -40,3 +40,29 @@ export function parked(dist, view, was) {
   if (dist < PARK_NEAR * view) return false;
   return was;
 }
+
+// A closed conversation leaves the WebView holding what it drew (raster
+// tiles, glyph and image caches) until Windows runs short of memory: a moment
+// after you leave a long one, it is asked to let go (memory_trim.js). Turns
+// count, not elements: a parked turn is an empty box, but it was drawn.
+export const TRIM_TURNS = 20;
+const TRIM_WAIT = 3000;
+
+/** `left(turns)` for each view you leave, with the turns it drew: `trim` runs
+ *  once, `wait` ms after the last of a run of quick switches, if a view left
+ *  in that run drew TRIM_TURNS; while `busy()` (an answer streaming in) it
+ *  waits another round, so a purge never lands on a moving answer. */
+export function trimmer(trim, busy, wait = TRIM_WAIT) {
+  let peak = 0;
+  let timer = null;
+  const fire = () => {
+    if (busy()) { timer = setTimeout(fire, wait); return; }
+    if (peak >= TRIM_TURNS) trim();
+    peak = 0;
+  };
+  return (turns) => {
+    peak = Math.max(peak, turns);
+    clearTimeout(timer);
+    timer = setTimeout(fire, wait);
+  };
+}

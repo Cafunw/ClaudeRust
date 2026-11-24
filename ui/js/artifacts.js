@@ -15,6 +15,7 @@ import { errorText as failureText } from './neterr.js';
 // (chat.js imports this module too: reload is only called once both are loaded)
 import { reload as reloadChat } from './chat.js';
 import { renderPreview } from './artifact_preview.js';
+import { panelView } from './artifact_view.js';
 
 let panel = null;
 let renderTimer = null;
@@ -152,8 +153,8 @@ async function render() {
   const a = currentArtifact();
   if (!a) { el.innerHTML = `<div class="ap-empty">${t('no_artifacts')}</div>`; return; }
   const list = versionsOf(panel.identifier);
-  const previewable = a.previewable || a.type === 'text/markdown';
-  const view = !a.complete ? 'code' : (panel.view || (previewable ? 'preview' : 'code'));
+  // (one cut off is marked so by drawAlert)
+  const { live, previewable, view, wrap } = panelView(a, panel.view);
 
   if (!el.querySelector('.ap-head')) {
     el.innerHTML = `<div class="resizer"></div><div class="ap-head"></div><div class="ap-alert"></div><div class="ap-body"></div>`;
@@ -178,19 +179,19 @@ async function render() {
   if (list.length > 1) {
     const vb = h(`<button class="ap-version" data-k="version" aria-haspopup="menu" title="${esc(t('version'))}">v${a.version} ${icon('chevDown', 12)}</button>`);
     vb.onclick = () => showMenu(vb, list.slice().reverse().map((v) => ({
-      label: `${t('version')} ${v.version}${v === list[list.length - 1] ? ` · ${t('latest')}` : ''}`,
+      label: `${t('version')} ${v.version}${v === list[list.length - 1] ? ` · ${t('latest')}` : ''}${!v.complete && v.interrupted ? ` · ${t('art_interrupted')}` : ''}`,
       checked: v.version === a.version,
       onClick: () => { panel.version = v.version; panel.followLatest = v === list[list.length - 1]; render(); },
     })), { width: 200 });
     head.appendChild(vb);
   }
   head.appendChild(h('<div class="grow"></div>'));
-  if (previewable && a.complete) {
+  if (previewable && !live) {
     const seg = h(`<div class="segmented" role="group">${['preview', 'code'].map((v) => `<button data-v="${v}" data-k="${v}" class="${view === v ? 'on' : ''}" aria-pressed="${view === v}">${t(v === 'code' ? 'code_view' : 'preview')}</button>`).join('')}</div>`);
     seg.querySelectorAll('button').forEach((b) => b.onclick = () => { panel.view = b.dataset.v; render(); });
     head.appendChild(seg);
   }
-  if (view === 'preview' && a.complete && a.type !== 'text/markdown') {
+  if (view === 'preview' && a.type !== 'text/markdown') {
     const reload = h(`<button class="icon-btn" data-k="reload" title="${esc(t('art_reload'))}" aria-label="${esc(t('art_reload'))}">${icon('refreshCw', 16)}</button>`);
     reload.onclick = () => { panel.lastDocKey = null; render(); };
     head.appendChild(reload);
@@ -234,7 +235,7 @@ async function render() {
   // older ones stale, so a slow highlighter showed nothing until the end)
   // (only for the same artifact: one switched to is drawn right away)
   const myId = a.identifier;
-  if (!a.complete && fetching && fetching.panel === panel && fetching.id === myId) { panel.again = true; return; }
+  if (live && fetching && fetching.panel === panel && fetching.id === myId) { panel.again = true; return; }
   panel.lastDocKey = docKey;
   const seq = ++renderSeq;
   // stale: a newer render started, the panel closed or shows another artifact
@@ -279,8 +280,8 @@ async function render() {
       const code = await call('highlight_code', { code: a.content, language: langFor(a) });
       if (stale()) return;
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-      body.innerHTML = `<div class="code-block"><pre><code class="hl-code">${code}</code></pre></div>`;
-      if (!a.complete && atBottom) body.scrollTop = body.scrollHeight;
+      body.innerHTML = `<div class="code-block"><pre><code class="hl-code"${wrap ? ' style="white-space:pre-wrap;overflow-wrap:anywhere"' : ''}>${code}</code></pre></div>`;
+      if (live && atBottom) body.scrollTop = body.scrollHeight;
     }
   } catch (e) {
     if (!stale()) body.innerHTML = `<div class="ap-empty">${esc(failureText(e))}</div>`;
@@ -300,6 +301,14 @@ const fixesSent = new Set();
 function drawAlert(a) {
   const slot = aside().querySelector('.ap-alert');
   if (!slot) return;
+  // a version cut off: says so, rather than the errors that follow from what it lacks
+  if (!a.complete && a.interrupted) {
+    const cut = `cut|${a.identifier}@${a.version}`;
+    if (slot.dataset.key === cut) return;
+    slot.dataset.key = cut;
+    slot.innerHTML = `<div class="notice warn" role="status" style="margin:8px 10px 0">${icon('alert', 15)}<div class="grow small">${esc(t('art_interrupted_note'))}</div></div>`;
+    return;
+  }
   const err = a.error ? { kind: 'update', message: a.error } : panel.errors.get(`${a.identifier}@${a.version}`);
   const key = err ? `${panel.convId}/${a.identifier}@${a.version}|${err.message}` : '';
   const shown = err && !fixesSent.has(key) ? key : '';
