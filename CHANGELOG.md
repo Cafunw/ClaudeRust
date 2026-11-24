@@ -3,6 +3,137 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.8] - 2026-11-24
+
+Artifacts, thinking summaries and web sources in chats on your Claude
+account, artifacts that can use your connectors, a switch for each tool,
+larger extension and connector directories, and a sweep of the interface.
+
+**Chats**
+- Chats on your Claude account save their artifacts: the Artifacts page
+  lists them, and deleting the chat removes them.
+- On your Claude account, thinking shows its summary instead of an empty
+  block. A Claude Code too old to send summaries runs without them.
+- A finished thinking block says how long it took ("Thought for 12s"),
+  with an API key and on your Claude account. Thinking that came without
+  any text can't be opened.
+- On your Claude account a web search shows as a "Searched the web" step,
+  and the answer gets citation chips and a list of sources.
+- Generated chat titles no longer start with a "Title:" label.
+- In a chat's *Search and tools* menu, each MCP server's row opens its
+  tools, with a switch for each. A tool switched off isn't offered to
+  Claude in that chat, and the row says how many are off.
+
+**Artifacts**
+- Artifacts that ask Claude questions (`window.claude.complete`) also work
+  on your Claude account. Each question runs on a small model with no
+  tools and counts toward your plan's usage limits; the dialog that asks
+  your permission says so.
+- Artifacts can call the tools of your MCP connectors
+  (`window.claude.callMcpTool`). The first call to a connector asks
+  whether this artifact may use it: Deny, Allow once or Allow for this
+  artifact. Tools blocked in your connector settings stay blocked, tools
+  set to Ask still ask at every call, and a connector or tool switched off
+  in the chat is refused. The plug button in the artifact's toolbar shows
+  *Tools this artifact can use*, where each permission can be revoked.
+- An artifact can be shown full screen (Esc leaves it), and a *Reload*
+  button starts it again.
+
+**Directories**
+- *Browse extensions* lists 50 releases (was 16) in 7 categories, adding
+  *Design and engineering*. Each is a stable release whose bundle carries
+  its own code; two that fetched their server from npm or PyPI when they
+  started were removed.
+- *Browse connectors* lists 78 connectors (was 48) in 13 categories,
+  adding *Automation* and *Audio and video*.
+
+**Interface**
+- The icons of the folded sidebar have names and tooltips with their
+  shortcuts, and its user card says who you are and which plan you use.
+- The find bar (Ctrl+F) no longer covers the match it shows.
+- Below 900 px the Code side panel opens as a sheet over a dimmed chat,
+  with *Back to chat*. Tab stays inside it, and inside the artifact sheet
+  and the narrow sidebar.
+- The usage-limit banner reads as a sentence ("You're close to your
+  weekly limit for all models.") and can be dismissed; it comes back at a
+  new level, for another limit or in a new window.
+- Changing the language in Settings redraws Settings in the new language
+  at once, keeping your place. "Auto (system)" is named in the interface
+  language.
+- Alt+1 to Alt+8 open the Code side panel's tabs in the order they are
+  shown, also on macOS, and the tabs' tooltips and the shortcut sheet say
+  which key opens which.
+- A reply that failed has no Good/Bad buttons, and an error that names an
+  install site (claude.com/claude-code, nodejs.org, python.org, uv's docs)
+  links to it.
+- Sidebar rows and shortcut hints meet WCAG AA contrast in both themes, at
+  rest, on hover and when selected.
+- Smaller fixes: tooltips on the Send/Stop button (with its key), the
+  pages' search buttons and the dialogs' close buttons; tooltips and menus
+  show your own shortcuts instead of fixed ones; counts of one read "1
+  tool", "Added 1 server."; the search palette offers @ for files only in
+  Code sessions; the Code top bar no longer overflows at 420 px; the
+  composer no longer takes the focus from an open dialog; screen readers
+  hear the current page and chat, the onboarding fields' labels and the
+  names of Settings' icon-only tabs.
+
+**Development**
+- The end-to-end test copy gets its WebView2 debugging port through its
+  window configuration instead of an environment variable, which the
+  WebView2 of a GitHub runner ignored. A normal build has no debugging
+  port. The CI end-to-end job counts toward the result again.
+
+**Known limits**
+- Some features of Claude Desktop can't be offered: Anthropic's own
+  account connectors, publishing an artifact, and picking private Google
+  Drive files (the app has no Google sign-in). MCP sampling is not
+  supported.
+- The CI end-to-end job had not yet run on a GitHub runner with the new
+  port delivery when this was written. The same 15 tests pass on a
+  development machine.
+- `window.claude.complete` on your Claude account was tried only with a
+  stand-in for Claude Code, not against the account.
+- What you allow an artifact (a connector, or asking Claude) lasts until
+  the app restarts or the page reloads; then the artifact asks again. An
+  artifact can't be opened in its own window yet, and Tab pressed inside
+  an artifact can still leave the narrow sheet.
+- With both an API key and the Claude account as the chat engine, titles
+  are made with the API key first, so they use API credit.
+- The Node.js download was tried only against a local test server, not
+  against nodejs.org. Installing from the extension directory was tried
+  only against local test servers; the listed releases' addresses, sizes
+  and SHA-256 come from GitHub's release API and were not downloaded.
+- The GitHub and Google link sources were tried only against local test
+  servers, and Google's export formats were not checked against Google.
+  Files that aren't shared by link can't be read.
+- Drafting a style was tried with an API key against a stand-in, not on
+  your Claude account.
+- Some messages from the engine are still English in the Turkish
+  interface: the engine-busy texts, its crash text, errors when
+  continuing a reply, its notifications, the success text when a
+  worktree's changes are applied, and the diagnostics' labels.
+- Update notices cover only extensions the directory lists.
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply. A release build was not measured.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- An MCP App page can reach the hosts its server declares without asking
+  you first. MCP Apps are shown inline only: no side panel or full
+  screen, and an app can't update what Claude knows.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs, so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.7] - 2026-11-22
 
 A Node.js for desktop extensions, an extension directory and signature
