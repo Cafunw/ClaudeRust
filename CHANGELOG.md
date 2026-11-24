@@ -3,6 +3,154 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.9] - 2026-11-24
+
+Slides, docs, sheets and dashboards as artifacts, artifacts that read the
+chat's files, previews of attachments, generated titles and project
+search on your Claude account, tools loaded when needed, and the app's
+own menus and dialogs in your language.
+
+**Artifacts**
+- Four new kinds of artifact. *Slides*: a deck you page through, with
+  click steps and speaker notes, presented full screen (Esc returns) and
+  printed to PDF. *Docs*: a formatted document. *Sheets*: a spreadsheet
+  with formulas that sorts by column. *Dashboard*: KPI tiles, charts and
+  tables drawn from Claude's data.
+- Slides, docs and sheets are edited in place: change the words, notes or
+  cells and Save, and every save is a new version in the version menu.
+  Claude sees your edited version in the next reply.
+- Each kind downloads in its own formats: a deck as PDF or a presentation
+  (.html), a doc as Word (.docx), PDF, Markdown or a web page, a sheet as
+  CSV, a dashboard as JSON.
+- The Artifacts page shows what each artifact looks like instead of its
+  source: pages and decks drawn with nothing in them running, a sheet's
+  first cells, a dashboard's figures and chart, a doc's start. React
+  components and diagrams show their title and first heading.
+- Artifacts load only the libraries the app lists, each at its one
+  version. Anything else is blocked, and the artifact says which address
+  it tried.
+- Artifacts can read the files attached to their chat
+  (`window.fs.readFile`), by name, as text or bytes. Files of other chats
+  and files on the disk can't be read.
+
+**Attachments**
+- A click on an attachment, in the composer or in a sent message, opens a
+  preview: a PDF in the built-in viewer, an image at full size, text and
+  code highlighted, and Word, Excel, PowerPoint, OpenDocument, EPUB and RTF
+  files as the text Claude reads. The preview has *Open* (in the system's
+  app) and *Download*; sent attachments also open with the keyboard.
+- OpenDocument texts (.odt), EPUB books and RTF files can be attached;
+  Claude gets their text.
+
+**Chats**
+- Chats on your Claude account get a generated title. Claude Code makes it
+  with a small model, which counts toward your plan's usage limits.
+- On your Claude account, a project too large to send whole is searched,
+  as with an API key: Claude gets its index and a search tool.
+- On your Claude account, an image an MCP tool returns shows as the image,
+  without Claude Code's note about where it stored it.
+- *Tool access* in a chat's *Search and tools* menu: *Load tools when
+  needed* sends only each MCP tool's name, and Claude loads the ones it
+  needs, so they take less of the context; *Load all tools up front*
+  sends them all. A chat with more than 20 MCP tools loads them when
+  needed unless you choose otherwise. A loaded tool still asks for your
+  permission as before.
+- A *Learning* style: Claude acts as a tutor, guiding you step by step
+  with questions and hints, and gives the full answer when you ask.
+- The arrows between a message's versions are always shown, not only on
+  hover.
+- Searching chats finds those that hold every word you type, in any
+  order, ignoring case and accents; I, İ and ı match each other.
+
+**Extensions**
+- Installed extensions from the directory are checked for a newer version
+  after the app starts and then once a day, and a notice says how many
+  have one.
+- *Update extensions automatically* (Settings → Developer, off by
+  default) installs those updates by itself, but only for bundles signed
+  by a trusted publisher that ask for no new settings. The others you
+  update from their card, with the preview as before.
+
+**Language**
+- The tray menu, Quick Entry's title, the dialog shown when the database
+  can't be opened and the file types in the system's file pickers follow
+  the app's language, and the tray menu changes as soon as you change it.
+- Turkish wording fixes: much more of the interface addresses you
+  formally, and sentences such as the project capacity and the permission
+  card's server read naturally.
+
+**Development**
+- Test copies of the app open in the background, off the screen, and
+  never take the focus from the window you are using.
+- End-to-end tests now also cover chats on the Claude account, against a
+  stand-in for Claude Code: streaming, the generated title, an artifact
+  and a permission card.
+- The CI end-to-end job ran on a GitHub runner for 0.1.8 and passed, so
+  0.1.8's note that it had not run yet is out of date.
+
+**Known limits**
+- Some features of Claude Desktop can't be offered: Anthropic's own
+  account connectors, publishing an artifact, and picking private Google
+  Drive files (the app has no Google sign-in). MCP sampling is not
+  supported.
+- On your Claude account each reply starts Claude Code again (it isn't
+  kept running for the chat), and a reply doesn't go on after the app
+  quits.
+- There is no *Design* artifact, decks are 16:9 only, and the version
+  menu doesn't mark a version you edited as yours.
+- After you edit an artifact in place, the next reply on your Claude
+  account starts a new Claude Code session with the conversation sent
+  again, so that reply doesn't use the prompt cache.
+- In a doc saved as .docx, lists are typed bullets and numbers rather
+  than Word lists, and links are styled text that can't be clicked.
+- Printing decks and docs to PDF, the save dialogs of downloads, *Open*
+  and *Download* in an attachment's preview, and the tray menu itself
+  were not tried by hand, because they open the system's own windows.
+- Searching a large project on your Claude account was tried only with a
+  stand-in for Claude Code, and so was `window.claude.complete` there.
+- What you allow an artifact (a connector, or asking Claude) lasts until
+  the app restarts or the page reloads; then the artifact asks again. An
+  artifact can't be opened in its own window yet, and Tab pressed inside
+  an artifact can still leave the narrow sheet.
+- With both an API key and the Claude account as the chat engine, titles
+  are made with the API key first, so they use API credit.
+- The Node.js download was tried only against a local test server, not
+  against nodejs.org. Installing and updating from the extension
+  directory were tried only against local test servers; the listed
+  releases' addresses, sizes and SHA-256 come from GitHub's release API
+  and were not downloaded. Update notices cover only extensions the
+  directory lists.
+- The GitHub and Google link sources were tried only against local test
+  servers, and Google's export formats were not checked against Google.
+  Files that aren't shared by link can't be read.
+- Drafting a style was tried with an API key against a stand-in, not on
+  your Claude account.
+- Some messages are still English in the Turkish interface: the engine's
+  busy texts, its crash text, errors when continuing a reply, its
+  notifications, the success text when a worktree's changes are applied,
+  the diagnostics' labels, and the error detail in the dialog shown when
+  the database can't be opened.
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply. A release build was not measured.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- An MCP App page can reach the hosts its server declares without asking
+  you first. MCP Apps are shown inline only: no side panel or full
+  screen, and an app can't update what Claude knows.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs (at fixed versions), so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.8] - 2026-11-24
 
 Artifacts, thinking summaries and web sources in chats on your Claude
