@@ -11,7 +11,16 @@ use std::sync::{Arc, Once};
 use tauri::test::MockRuntime;
 use tauri::Manager;
 
-const KINDS: [&str; 4] = ["text/html", "image/svg+xml", "application/vnd.ant.mermaid", "application/vnd.ant.react"];
+const KINDS: [&str; 8] = [
+    "text/html",
+    "image/svg+xml",
+    "application/vnd.ant.mermaid",
+    "application/vnd.ant.react",
+    "application/vnd.ant.slides",
+    "application/vnd.ant.document",
+    "application/vnd.ant.sheet",
+    "application/vnd.ant.dashboard",
+];
 
 fn app() -> (tauri::App<MockRuntime>, Arc<AppState>) {
     static ENV: Once = Once::new();
@@ -71,6 +80,16 @@ fn artifact_source_cannot_break_out_of_its_document() {
             assert!(!build_document(kind, attack, dark).contains(breakout), "{kind}: the source escaped its element");
         }
     }
+    // a typed artifact's data is JSON text in its page, and a doc's HTML shows as text
+    let attack = "</script><script>window.pwned = 1</script>";
+    for kind in &KINDS[5..] {
+        assert!(!build_document(kind, attack, false).contains("</script><script>window.pwned"), "{kind}");
+    }
+    // a deck also keeps itself in a <noscript> (the gallery's frame without scripts), which is text where scripts run
+    let deck = build_document("application/vnd.ant.slides", attack, false);
+    assert_eq!(deck.matches("</script><script>window.pwned").count(), 1);
+    assert!(deck.contains(&format!("<noscript id=\"deck\">{attack}</noscript>")));
+    assert!(build_document("application/vnd.ant.document", "<img src=x onerror=alert(1)>", false).contains("&lt;img src=x onerror=alert(1)&gt;"));
     // an HTML fragment is the page itself, in a complete document
     for dark in [false, true] {
         let doc = build_document("text/html", "<h1>Title</h1><script>document.title = 'ran'</script>", dark);

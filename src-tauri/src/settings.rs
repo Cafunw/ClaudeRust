@@ -114,6 +114,8 @@ pub struct Settings {
     /// Editor for "open in editor": auto | code | cursor | windsurf | zed | subl | idea | system
     pub editor: String,
     pub disabled_mcp_servers: Vec<String>,
+    /// Install newer directory versions of installed extensions by themselves (only signed, trusted ones that need no new settings).
+    pub extensions_auto_update: bool,
 
     pub onboarded: bool,
 }
@@ -178,6 +180,7 @@ impl Default for Settings {
             oai_api_key: String::new(),
             editor: "auto".into(),
             disabled_mcp_servers: vec![],
+            extensions_auto_update: false,
             onboarded: false,
         }
     }
@@ -439,6 +442,44 @@ fn without_oai_key(raw: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------- UI language
+
+/// Whether the UI speaks Turkish with language setting `setting` (auto | en | tr), for the
+/// texts the backend shows itself: "auto" follows the system's language, as the UI does.
+pub fn ui_turkish(setting: &str) -> bool {
+    turkish_for(setting, system_language())
+}
+
+fn turkish_for(setting: &str, system: Option<String>) -> bool {
+    match setting {
+        "tr" => true,
+        "en" => false,
+        _ => system.is_some_and(|l| l.to_ascii_lowercase().starts_with("tr")),
+    }
+}
+
+/// The system's display language (the WebView's `navigator.language` follows it), e.g. "tr-TR".
+fn system_language() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let first = |path: &str, name: &str| windows_registry::CURRENT_USER.open(path).ok()?.get_multi_string(name).ok()?.into_iter().next();
+        if let Some(l) = first(r"Control Panel\Desktop", "PreferredUILanguages").or_else(|| first(r"Control Panel\Desktop\MuiCached", "MachinePreferredUILanguages")) {
+            return Some(l);
+        }
+    }
+    ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+}
+
+/// The language setting stored in the database file at `path`, read on its own, read-only
+/// (for the dialog shown when that database doesn't open); "auto" when it can't be read.
+pub fn saved_language(path: &std::path::Path) -> String {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|c| c.query_row("SELECT value FROM settings WHERE key=?1", [KEY_SETTINGS], |r| r.get::<_, String>(0)))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()?["language"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "auto".into())
+}
+
 pub fn mask_key(k: &str) -> String {
     let n = k.chars().count();
     if n <= 12 {
@@ -592,5 +633,28 @@ mod tests {
         assert_eq!(p.theme, "dark");
         assert_eq!(p.base_url, "https://x.example");
         assert_eq!(p.max_tokens, 1024);
+    }
+
+    #[test]
+    fn the_backend_language_follows_the_setting_then_the_system() {
+        assert!(turkish_for("tr", Some("en-US".into())) && !turkish_for("en", Some("tr-TR".into())));
+        assert!(turkish_for("auto", Some("tr_TR.UTF-8".into())) && !turkish_for("auto", Some("en-GB".into())) && !turkish_for("auto", None));
+    }
+
+    #[test]
+    fn the_saved_language_is_read_from_the_file_alone() {
+        let dir = std::env::temp_dir().join(format!("cr-lang-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        {
+            let db = Db::open(&path).unwrap();
+            Settings { language: "tr".into(), ..Default::default() }.save(&db).unwrap();
+        }
+        assert_eq!(saved_language(&path), "tr");
+        let broken = dir.join("broken.sqlite");
+        std::fs::write(&broken, b"not a database").unwrap();
+        assert_eq!(saved_language(&broken), "auto");
+        assert_eq!(saved_language(&dir.join("missing.sqlite")), "auto");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

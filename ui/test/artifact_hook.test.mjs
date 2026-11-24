@@ -78,4 +78,7 @@ test('the frame gets neither modals nor popups', () => {
   const src = readFileSync(new URL('../js/artifacts.js', import.meta.url), 'utf8');
   const sandbox = src.match(/setAttribute\('sandbox', '([^']*)'\)/)[1].split(' ');
   for (const flag of ['allow-modals', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-same-origin']) assert.ok(!sandbox.includes(flag), flag);
+  // the one exception: a deck or doc prints itself (PDF); its page is the app's runtime and its content runs no script
+  assert.deepEqual(src.match(/sandbox\.add\('[^']*'\)/g), ["sandbox.add('allow-modals')"]);
+  assert.match(src, /if \(a\.type === SLIDES \|\| a\.type === DOC\) frame\.sandbox\.add\('allow-modals'\)/);
 });

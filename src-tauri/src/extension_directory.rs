@@ -129,6 +129,59 @@ async fn download(client: &reqwest::Client, asset: &Value, dir: &Path, cancel: &
     Ok(path)
 }
 
+/// The installed extensions the directory lists a newer version of, with a build for `platform`:
+/// {id, server (its name in the config), name, from, to}.
+pub fn updates(config: &Value, platform: &str) -> Vec<Value> {
+    entries(config, platform)
+        .into_iter()
+        .filter(|e| e["update"] == true && !e["asset"].is_null())
+        .map(|e| json!({"id": e["id"], "server": e["installed"]["name"], "name": e["name"], "from": e["installed"]["version"], "to": e["version"]}))
+        .collect()
+}
+
+/// After start and then once a day: the installed extensions that have an update
+/// ("extension-updates" {available, updated}); with Update automatically on, the
+/// ones that can go in without asking (extensions::quiet_update) are installed first.
+pub fn start_update_checks(app: tauri::AppHandle, st: Arc<AppState>) {
+    use tauri::{Emitter, Manager};
+    tauri::async_runtime::spawn(async move {
+        // the window is listening by then, and the start isn't slowed
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            let available = || updates(&crate::mcp::read_config(&st.mcp.config_path), &platform());
+            let mut updated = vec![];
+            if st.settings.read().extensions_auto_update {
+                for u in available() {
+                    match install_quietly(&app, &st, u["id"].as_str().unwrap_or_default()).await {
+                        Ok(true) => updated.push(json!({"name": u["name"], "to": u["to"]})),
+                        Ok(false) => {}
+                        Err(e) => log::warn!("updating extension {}: {e}", u["id"]),
+                    }
+                }
+                if !updated.is_empty() {
+                    let _ = crate::commands::mcp_reload(app.clone(), app.state::<Arc<AppState>>()).await;
+                }
+            }
+            let _ = app.emit("extension-updates", json!({"available": available(), "updated": updated}));
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+        }
+    });
+}
+
+/// Download entry `id`'s update and install it if it needs no one to look at it; whether it did.
+async fn install_quietly(app: &tauri::AppHandle, st: &Arc<AppState>, id: &str) -> AppResult<bool> {
+    let (entry, _, path) = fetch(app, st, id).await?;
+    let p = path.clone();
+    let info = crate::extensions::on_pool(move || crate::extensions::inspect(&p)).await?;
+    if !crate::extensions::quiet_update(&info, &st.mcp.config_path) {
+        let _ = std::fs::remove_file(&path);
+        return Ok(false);
+    }
+    let (ext, config) = (st.data_dir.join("extensions"), st.mcp.config_path.clone());
+    crate::extensions::on_pool(move || install_entry(&entry, &path, &ext, &config, &json!({}))).await?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn extension_directory(state: tauri::State<'_, Arc<AppState>>) -> AppResult<Value> {
     Ok(Value::Array(entries(&crate::mcp::read_config(&state.mcp.config_path), &platform())))
@@ -136,11 +189,25 @@ pub async fn extension_directory(state: tauri::State<'_, Arc<AppState>>) -> AppR
 
 /// Download directory entry `id` for this platform ("extension-download-progress"
 /// events carry {downloaded, total}); its install preview (extensions::inspect)
-/// with `path`, `source_url` and `entry`.
+/// with `path`, `source_url`, `entry` and `quiet` (an update that can go in
+/// without the preview, see extensions::quiet_update).
 #[tauri::command]
 pub async fn extension_directory_download(app: tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, id: String) -> AppResult<Value> {
+    let (entry, asset, path) = fetch(&app, &state, &id).await?;
+    let p = path.clone();
+    let mut info = crate::extensions::on_pool(move || crate::extensions::inspect(&p)).await?;
+    info["quiet"] = json!(crate::extensions::quiet_update(&info, &state.mcp.config_path));
+    info["path"] = json!(path.display().to_string());
+    info["source_url"] = asset["url"].clone();
+    info["entry"] = json!({"id": entry["id"], "name": entry["name"], "publisher": entry["publisher"], "version": entry["version"], "homepage": entry["homepage"], "repository": entry["repository"], "license": entry["license"]});
+    Ok(info)
+}
+
+/// Download directory entry `id`'s bundle for this platform (one download at a
+/// time, cancelled by extension_directory_cancel): the entry, its asset, the bundle.
+async fn fetch(app: &tauri::AppHandle, state: &AppState, id: &str) -> AppResult<(Value, Value, PathBuf)> {
     use tauri::Emitter;
-    let entry = list().into_iter().find(|e| e["id"] == id.as_str()).ok_or_else(|| AppError::coded("ed_unknown", Value::Null, format!("“{id}” isn't in the extension directory.")))?;
+    let entry = list().into_iter().find(|e| e["id"] == id).ok_or_else(|| AppError::coded("ed_unknown", Value::Null, format!("“{id}” isn't in the extension directory.")))?;
     let asset = asset_for(&entry, &platform()).cloned().ok_or_else(|| AppError::coded("ed_no_build", Value::Null, "This extension has no build for this computer's system."))?;
     let cancel = {
         let mut r = RUNNING.lock();
@@ -149,7 +216,7 @@ pub async fn extension_directory_download(app: tauri::AppHandle, state: tauri::S
         }
         r.insert(CancellationToken::new()).clone()
     };
-    let dir = downloads(&state);
+    let dir = downloads(state);
     let res = async {
         let public = asset["url"].as_str().is_some_and(|u| u.starts_with("https://"));
         let client = crate::mcp_oauth::download_client(redirects(), public)?;
@@ -160,13 +227,20 @@ pub async fn extension_directory_download(app: tauri::AppHandle, state: tauri::S
     }
     .await;
     *RUNNING.lock() = None;
-    let path = res?;
-    let p = path.clone();
-    let mut info = crate::extensions::on_pool(move || crate::extensions::inspect(&p)).await?;
-    info["path"] = json!(path.display().to_string());
-    info["source_url"] = asset["url"].clone();
-    info["entry"] = json!({"id": entry["id"], "name": entry["name"], "publisher": entry["publisher"], "version": entry["version"], "homepage": entry["homepage"], "repository": entry["repository"], "license": entry["license"]});
-    Ok(info)
+    Ok((entry, asset, res?))
+}
+
+/// Install `bundle` (downloaded for directory `entry`), noting where it came from;
+/// the bundle is deleted once installed.
+fn install_entry(entry: &Value, bundle: &Path, ext: &Path, config: &Path, values: &Value) -> AppResult<String> {
+    let (_, sha) = crate::extension_sign::check_file(bundle)?;
+    let source = json!({"id": entry["id"], "version": entry["version"], "sha256": sha});
+    let r = crate::extensions::install_from(bundle, ext, config, values, Some(&source));
+    // a failed install keeps the bundle, so the form can be corrected and sent again
+    if r.is_ok() {
+        let _ = std::fs::remove_file(bundle);
+    }
+    r
 }
 
 #[tauri::command]
@@ -188,17 +262,7 @@ pub async fn extension_directory_install(app: tauri::AppHandle, state: tauri::St
     }
     let entry = list().into_iter().find(|e| e["id"] == id.as_str()).ok_or_else(|| AppError::coded("ed_unknown", Value::Null, format!("“{id}” isn't in the extension directory.")))?;
     let (ext, config) = (state.data_dir.join("extensions"), state.mcp.config_path.clone());
-    let name = crate::extensions::on_pool(move || {
-        let (_, sha) = crate::extension_sign::check_file(&bundle)?;
-        let source = json!({"id": entry["id"], "version": entry["version"], "sha256": sha});
-        let r = crate::extensions::install_from(&bundle, &ext, &config, &values, Some(&source));
-        // a failed install keeps the bundle, so the form can be corrected and sent again
-        if r.is_ok() {
-            let _ = std::fs::remove_file(&bundle);
-        }
-        r
-    })
-    .await?;
+    let name = crate::extensions::on_pool(move || install_entry(&entry, &bundle, &ext, &config, &values)).await?;
     let mut status = crate::commands::mcp_reload(app, state).await?;
     status["installed"] = json!(name);
     Ok(status)
@@ -282,6 +346,18 @@ mod tests {
         assert_eq!(by("apify")["asset"]["platform"], "any");
         assert!(by("apify").get("assets").is_none());
         assert_eq!(entries(&json!({"mcpServers": []}), "win32-x64").len(), list.len(), "a broken config marks nothing");
+    }
+
+    #[test]
+    fn updates_are_the_installed_entries_with_a_newer_build_here() {
+        let config = json!({"mcpServers": {
+            "apify-mcp-server": {"command": "node", "extension": {"path": "/x", "version": "0.21.0", "source": {"id": "apify", "version": "0.21.0"}}},
+            "desktop-commander": {"command": "node", "extension": {"path": "/y", "version": "999.0.0"}},
+        }});
+        let u = updates(&config, "win32-x64");
+        assert_eq!(u.len(), 1, "{u:?}");
+        assert_eq!((u[0]["id"].as_str(), u[0]["server"].as_str(), u[0]["from"].as_str()), (Some("apify"), Some("apify-mcp-server"), Some("0.21.0")));
+        assert!(updates(&json!({}), "win32-x64").is_empty());
     }
 
     #[test]

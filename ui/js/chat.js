@@ -44,6 +44,7 @@ function composerInitial(conv) {
     style: o.style || 'normal',
     disabled_servers: o.disabled_servers || [],
     disabled_tools: o.disabled_tools || [],
+    tool_access: o.tool_access || null,
     permission_mode: o.permission_mode || store.settings.code_permission_mode || 'default',
   };
 }
@@ -706,13 +707,13 @@ function upsertTurn(turn, live = true, before = null) {
 function attachmentsHtml(items) {
   return `<div class="user-atts">${items.map((a) => a.src && a.kind === 'image'
     ? `<img src="${esc(a.src)}" alt="${esc(a.name)}" title="${esc(a.name)}" data-zoom role="button" tabindex="0">`
-    : `<div class="att"><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : attachmentSub(a)}</div></div></div>`).join('')}</div>`;
+    : `<div class="att"${a.missing ? '' : ' role="button" tabindex="0" aria-haspopup="dialog"'}><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : attachmentSub(a)}</div></div></div>`).join('')}</div>`;
 }
 
 function branchNav(turn) {
   const s = turn.siblings;
   if (!s || s.count <= 1) return null;
-  const nav = h(`<span class="branch-nav"><button class="icon-btn sm" data-d="-1" aria-label="${esc(t('a11y_prev_version'))}" ${s.index === 0 ? 'disabled' : ''}>${icon('chevLeft', 14)}</button><span class="count">${s.index + 1} / ${s.count}</span><button class="icon-btn sm" data-d="1" aria-label="${esc(t('a11y_next_version'))}" ${s.index >= s.count - 1 ? 'disabled' : ''}>${icon('chevRight', 14)}</button></span>`);
+  const nav = h(`<span class="branch-nav" role="group" aria-label="${esc(t('a11y_version_of', { n: s.index + 1, total: s.count }))}"><button class="icon-btn sm" data-d="-1" aria-label="${esc(t('a11y_prev_version'))}" title="${esc(t('a11y_prev_version'))}" ${s.index === 0 ? 'disabled' : ''}>${icon('chevLeft', 14)}</button><span class="count" aria-hidden="true">${s.index + 1} / ${s.count}</span><button class="icon-btn sm" data-d="1" aria-label="${esc(t('a11y_next_version'))}" title="${esc(t('a11y_next_version'))}" ${s.index >= s.count - 1 ? 'disabled' : ''}>${icon('chevRight', 14)}</button></span>`);
   nav.querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
     const target = s.ids[s.index + Number(b.dataset.d)];
     if (!target) return;
@@ -1289,7 +1290,7 @@ function showPermission(p) {
     buttons = [['once', t('allow_once'), 'primary'], ['session', t('allow_session'), ''], ['deny', t('deny'), 'ghost']];
   } else {
     title = `${icon('plug', 17)} ${t('wants_to_use')} <span class="mono" style="font-size:13px">${esc(p.tool_name || p.tool)}</span>`;
-    desc = `${t('from_server')} ${p.server}`;
+    desc = t('from_server', { server: p.server });
     const j = JSON.stringify(input, null, 2);
     detail = j && j !== '{}' ? `<pre>${esc(j)}</pre>` : '';
     buttons = [['once', t('allow_once'), 'primary'], ['chat', t('allow_chat'), ''], ['always', t('allow_always'), ''], ['deny', t('deny'), 'ghost']];

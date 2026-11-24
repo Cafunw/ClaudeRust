@@ -28,6 +28,10 @@ fn every_served_page_runs_the_hook_before_any_script_of_its_own() {
         ("image/svg+xml", format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><a href=\"https://example.com\"><text>x</text></a>{page_script}</svg>")),
         ("application/vnd.ant.mermaid", "graph TD; A-->B".to_string()),
         ("application/vnd.ant.react", "export default () => { if (confirm('x')) return null; return null; }".to_string()),
+        ("application/vnd.ant.slides", format!("<section><h1>x</h1>{page_script}</section>")),
+        ("application/vnd.ant.document", format!("# x\n\n{page_script}")),
+        ("application/vnd.ant.sheet", "a,b\n1,=A2+1".to_string()),
+        ("application/vnd.ant.dashboard", "{\"kpis\": []}".to_string()),
     ] {
         for dark in [false, true] {
             let token = tauri::async_runtime::block_on(commands::serve_artifact(app.state(), kind.into(), content.clone(), dark)).unwrap();

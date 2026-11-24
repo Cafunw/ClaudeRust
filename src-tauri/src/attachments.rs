@@ -1,5 +1,6 @@
-//! File attachments: type detection, image downscaling, docx/xlsx/pptx text
-//! extraction, PDF limits, and conversion to Messages API content blocks.
+//! File attachments: type detection, image downscaling, docx/xlsx/pptx,
+//! odt/epub and rtf text extraction, PDF limits, and conversion to Messages
+//! API content blocks.
 
 use crate::error::{AppError, AppResult};
 use crate::util::new_id;
@@ -237,6 +238,10 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
         "docx" => Some(docx_text(bytes)),
         "xlsx" => Some(crate::office::xlsx_text(bytes)),
         "pptx" => Some(crate::office::pptx_text(bytes)),
+        "odt" => Some(crate::office::odt_text(bytes)),
+        "epub" => Some(crate::office::epub_text(bytes)),
+        // the content decides: an RTF file is valid UTF-8 too, but its words are markup
+        _ if bytes.starts_with(b"{\\rtf") => Some(crate::office::rtf_text(bytes)),
         _ => None,
     };
     if let Some(text) = office {
@@ -253,7 +258,7 @@ fn from_bytes_at(name: &str, bytes: &[u8], path: Option<&std::path::Path>) -> Ap
         _ => {
             return Err(refuse(
                 "unsupported_file",
-                format!("“{name}” isn't a supported file type. You can attach images, PDFs, Word, Excel and PowerPoint files, and text files."),
+                format!("“{name}” isn't a supported file type. You can attach images, PDFs, Word, Excel and PowerPoint files, OpenDocument texts, EPUB books, RTF and text files."),
             ))
         }
     };
@@ -607,6 +612,15 @@ mod tests {
         assert_eq!(kind_of("a.pptx", &pptx), ok("text", "text/plain"));
         assert_eq!(from_bytes("a.xlsx", &xlsx).unwrap().data, "## Sheet: S\n1");
         assert_eq!(from_bytes("a.pptx", &pptx).unwrap().data, "## Slide 1\nHi");
+        let odt = crate::office::zip_of(&[("content.xml", "<office:body><text:p>Hi</text:p></office:body>")]);
+        assert_eq!(kind_of("a.odt", &odt), ok("text", "text/plain"));
+        assert_eq!(from_bytes("a.odt", &odt).unwrap().data, "Hi");
+        assert_eq!(kind_of("a.epub", &crate::office::epub_of(&[("c.xhtml", "<p>Hi</p>")])), ok("text", "text/plain"));
+        // RTF is read for its text, by its content (a .doc that is RTF too), not attached as markup
+        assert_eq!(from_bytes("a.rtf", br"{\rtf1\ansi{\fonttbl{\f0 Arial;}}\f0 Hi\par}").unwrap().data, "Hi");
+        assert_eq!(from_bytes("old.doc", br"{\rtf1 Hi}").unwrap().data, "Hi");
+        assert_eq!(kind_of("a.odt", b"PK\x03\x04"), Err("office_invalid".into()));
+        assert_eq!(kind_of("a.rtf", br"{\rtf1{\*\generator x}}"), Err("office_empty".into()));
         assert_eq!(kind_of("a.csv", b"a,b\n1,2\n"), ok("text", "text/csv"));
         assert_eq!(kind_of("a.csv", &utf16), ok("text", "text/csv"));
         assert_eq!(kind_of("notes.md", "héllo".as_bytes()), ok("text", "text/markdown"));

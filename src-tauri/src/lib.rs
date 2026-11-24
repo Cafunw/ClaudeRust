@@ -4,9 +4,11 @@ pub mod anthropic;
 pub mod applog;
 pub mod archmap;
 pub mod artifact_ai;
+pub mod artifact_docx;
 pub mod artifacts;
 pub mod claudecode;
 pub mod attachments;
+pub mod attachment_files;
 pub mod checkpoints;
 pub mod codetools;
 pub mod code_exec;
@@ -69,6 +71,7 @@ pub mod subagent;
 pub mod symbols;
 pub mod terminal;
 pub mod todos;
+pub mod tool_load;
 pub mod turnstream;
 pub mod updates;
 pub mod usage;
@@ -118,7 +121,7 @@ fn toggle_quick_entry(app: &AppHandle) {
         return;
     }
     let builder = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("quick.html".into()))
-        .title("Quick Entry")
+        .title(if turkish(app) { "Hızlı Giriş" } else { "Quick Entry" })
         .inner_size(700.0, 104.0)
         .resizable(false)
         .decorations(false)
@@ -167,13 +170,34 @@ pub fn register_shortcut(app: &AppHandle, s: &settings::Settings) {
     }
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open ClaudeRust", true, None::<&str>)?;
-    let new_chat = MenuItem::with_id(app, "new", "New Chat", true, None::<&str>)?;
-    let quick = MenuItem::with_id(app, "quick", "Quick Entry", true, None::<&str>)?;
+/// Whether the texts the backend shows itself are in Turkish (the UI's language setting).
+pub(crate) fn turkish(app: &AppHandle) -> bool {
+    app.try_state::<Arc<AppState>>().is_some_and(|s| s.turkish())
+}
+
+fn tray_menu(app: &AppHandle, turkish: bool) -> tauri::Result<Menu<tauri::Wry>> {
+    let l = |en: &'static str, tr: &'static str| if turkish { tr } else { en };
+    let open = MenuItem::with_id(app, "open", l("Open ClaudeRust", "ClaudeRust’ı aç"), true, None::<&str>)?;
+    let new_chat = MenuItem::with_id(app, "new", l("New Chat", "Yeni sohbet"), true, None::<&str>)?;
+    let quick = MenuItem::with_id(app, "quick", l("Quick Entry", "Hızlı Giriş"), true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit ClaudeRust", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &new_chat, &quick, &sep, &quit])?;
+    let quit = MenuItem::with_id(app, "quit", l("Quit ClaudeRust", "ClaudeRust’tan çık"), true, None::<&str>)?;
+    Menu::with_items(app, &[&open, &new_chat, &quick, &sep, &quit])
+}
+
+/// The tray menu again, in the UI's language (after the language setting changed).
+pub fn retitle_tray(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    match tray_menu(app, turkish(app)) {
+        Ok(menu) => {
+            let _ = tray.set_menu(Some(menu));
+        }
+        Err(e) => log::warn!("tray menu: {e}"),
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = tray_menu(app, turkish(app))?;
     let mut b = TrayIconBuilder::with_id("main")
         .tooltip("ClaudeRust")
         .menu(&menu)
@@ -235,15 +259,19 @@ fn offer_fresh_db(app: &AppHandle, path: &std::path::Path, err: &str) {
     let show_error = |msg: &str| {
         app.dialog().message(msg).title("ClaudeRust").kind(MessageDialogKind::Error).blocking_show();
     };
+    // the settings can't be loaded the usual way: their row is read from the file alone
+    let tr = settings::ui_turkish(&settings::saved_language(path));
+    let (head, ask, (fresh_b, quit_b)) = if tr {
+        ("ClaudeRust veritabanını açamadı:", "Yeni, boş bir veritabanıyla başlansın mı? Mevcut dosya yeniden adlandırılıp yanında saklanır; hiçbir şey silinmez.", ("Yeni veritabanıyla başla", "Çık"))
+    } else {
+        ("ClaudeRust couldn't open its database:", "Start with a new, empty database? The current file is kept next to it (renamed), so nothing is deleted.", ("Start with a new database", "Quit"))
+    };
     let fresh = app
         .dialog()
-        .message(format!(
-            "ClaudeRust couldn't open its database:\n{err}\n\n{}\n\nStart with a new, empty database? The current file is kept next to it (renamed), so nothing is deleted.",
-            path.display()
-        ))
+        .message(format!("{head}\n{err}\n\n{}\n\n{ask}", path.display()))
         .title("ClaudeRust")
         .kind(MessageDialogKind::Error)
-        .buttons(MessageDialogButtons::OkCancelCustom("Start with a new database".into(), "Quit".into()))
+        .buttons(MessageDialogButtons::OkCancelCustom(fresh_b.into(), quit_b.into()))
         .blocking_show();
     if !fresh {
         app.exit(1);
@@ -255,7 +283,11 @@ fn offer_fresh_db(app: &AppHandle, path: &std::path::Path, err: &str) {
         if from.exists() {
             let to = std::path::PathBuf::from(format!("{}.unreadable-{stamp}{suffix}", path.display()));
             if let Err(e) = std::fs::rename(&from, &to) {
-                show_error(&format!("Moving {} aside failed: {e}\n\nCheck that the folder is writable.", from.display()));
+                show_error(&if tr {
+                    format!("{} kenara taşınamadı: {e}\n\nKlasörün yazılabilir olduğunu kontrol edin.", from.display())
+                } else {
+                    format!("Moving {} aside failed: {e}\n\nCheck that the folder is writable.", from.display())
+                });
                 app.exit(1);
                 return;
             }
@@ -266,14 +298,18 @@ fn offer_fresh_db(app: &AppHandle, path: &std::path::Path, err: &str) {
 
 pub fn run() {
     display::prepare();
+    // a test copy never comes forward by itself (display::automation): not when another start
+    // of it is refused, nor by restoring a window saved as visible (the plugin shows and focuses it)
+    let test_copy = display::automation();
+    let window_state = tauri_plugin_window_state::Builder::default().with_denylist(&["quick"]);
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(move |app, _args, _cwd| {
+            if !test_copy {
+                show_main(app);
+            }
+        }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_denylist(&["quick"])
-                .build(),
-        )
+        .plugin(if test_copy { window_state.skip_initial_state("main") } else { window_state }.build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -352,6 +388,7 @@ pub fn run() {
             devtools::start(app.handle());
             commands::start_routine_scheduler(app.handle().clone(), st.clone());
             updates::start_background_checks(app.handle().clone(), st.clone());
+            extension_directory::start_update_checks(app.handle().clone(), st.clone());
             app.manage(st.clone());
 
             // Resolve the login-shell PATH, then start MCP servers.
@@ -393,6 +430,18 @@ pub fn run() {
                 if display::automation() {
                     // a test copy must not appear on the person's screen or take focus; a window outside every monitor still renders
                     let _ = w.set_position(tauri::PhysicalPosition::new(-12000, -12000));
+                    // show() activates the window on Windows and takes the person's focus: show it without activating
+                    #[cfg(windows)]
+                    if let Ok(h) = w.hwnd() {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE};
+                        // SAFETY: the handle belongs to this live window
+                        unsafe {
+                            let ex = GetWindowLongPtrW(h.0 as _, GWL_EXSTYLE);
+                            SetWindowLongPtrW(h.0 as _, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
+                            ShowWindow(h.0 as _, SW_SHOWNOACTIVATE);
+                        }
+                    }
+                    #[cfg(not(windows))]
                     let _ = w.show();
                 } else {
                     let _ = w.show();
@@ -451,6 +500,10 @@ pub fn run() {
             commands::stage_bytes,
             commands::stage_text,
             commands::unstage,
+            attachment_files::attachment_data,
+            attachment_files::attachment_save,
+            attachment_files::attachment_open,
+            attachment_files::artifact_read_file,
             commands::pick_files,
             commands::pick_directory,
             commands::save_text_file,
@@ -468,6 +521,8 @@ pub fn run() {
             commands::list_artifacts,
             commands::delete_artifact,
             commands::serve_artifact,
+            artifacts::artifact_edit,
+            artifacts::export_artifact,
             artifact_ai::artifact_complete,
             artifact_ai::artifact_complete_check,
             commands::render_markdown,

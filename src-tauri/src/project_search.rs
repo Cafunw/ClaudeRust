@@ -35,6 +35,13 @@ pub fn is_tool(name: &str) -> bool {
     name == SEARCH_TOOL || name == READ_TOOL
 }
 
+/// The SDK-hosted server that carries the tools to the account engine's CLI (`mcp__project_knowledge__<tool>`).
+pub const SERVER: &str = "project_knowledge";
+
+pub fn mcp_tools() -> Vec<crate::mcp::McpTool> {
+    crate::mcp::app_tools(SERVER, definitions(false))
+}
+
 /// A file's name as the prompt and the tools show it: on one line, without
 /// what could end or fake a tag.
 fn shown(name: &str) -> String {
@@ -201,6 +208,11 @@ pub fn read(files: &[ProjectFile], name: &str, start: Option<u64>, end: Option<u
     }
     let more = if upto < last { format!("\n(Cut at about {READ_CHARS} characters: read on from line {}.)", upto + 1) } else { String::new() };
     Ok(format!("<file name=\"{}\" lines=\"{first}-{upto}\" total_lines=\"{}\">\n{body}</file>{more}", shown(&f.name), lines.len()))
+}
+
+/// `run_tool` off the runtime's workers (the first call builds the project's index), on both engines.
+pub async fn run(db: std::sync::Arc<Db>, project_id: String, name: String, input: Value) -> (String, bool) {
+    tokio::task::spawn_blocking(move || run_tool(&db, &project_id, &name, &input)).await.unwrap_or_else(|_| ("The project search failed.".into(), true))
 }
 
 /// Run one of the tools for the project `project_id`: result text, failed.

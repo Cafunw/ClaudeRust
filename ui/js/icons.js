@@ -90,4 +90,8 @@ export const ARTIFACT_ICON = {
   'application/vnd.ant.mermaid': 'layers',
   'text/markdown': 'fileText',
   'application/vnd.ant.code': 'code',
+  'application/vnd.ant.slides': 'monitor',
+  'application/vnd.ant.document': 'fileText',
+  'application/vnd.ant.sheet': 'list',
+  'application/vnd.ant.dashboard': 'sliders',
 };

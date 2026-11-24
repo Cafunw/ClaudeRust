@@ -1122,7 +1122,7 @@ pub async fn pick_import_file(app: AppHandle) -> AppResult<Option<String>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Claude data export", &["zip", "json"])
+        .add_filter(if crate::turkish(&app) { "Claude dışa aktarımı" } else { "Claude data export" }, &["zip", "json"])
         .pick_file(move |f| {
             let _ = tx.send(f.and_then(|p| p.into_path().ok()).map(|p| p.display().to_string()));
         });

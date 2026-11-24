@@ -244,8 +244,9 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         if code_execution_on(st, conv, settings) {
             tools.push(crate::code_exec::definition());
         }
-        // a large project's text is searched, not sent whole (the Claude account's CLI and other endpoints have no such tools)
-        let searched = crate::project_search::too_large(&files) && !conv.model.starts_with(crate::oai::PREFIX) && !crate::claudecode::uses_cli(st, conv).await;
+        // a large project's text is searched, not sent whole (other endpoints have no such tools; the Claude account's
+        // CLI gets them through the SDK-hosted server claudecode.rs runs)
+        let searched = crate::project_search::too_large(&files) && !conv.model.starts_with(crate::oai::PREFIX);
         let inlined = if searched { &[][..] } else { &files[..] };
         if searched {
             tools.extend(crate::project_search::definitions(eager));
@@ -274,7 +275,22 @@ pub async fn build_request_context(st: &AppState, conv: &Conversation, settings:
         Some(block) => format!("{system}\n\n{block}"),
         None => system,
     };
-    for t in &mcp_tools {
+    // "load tools when needed": a chat with many MCP tools names the ones not loaded yet instead of sending them
+    let loaded = crate::tool_load::loaded(opts);
+    let unloaded: Vec<&crate::mcp::McpTool> = if conv.kind != "code" && crate::tool_load::deferred(opts, mcp_tools.len()) {
+        mcp_tools.iter().filter(|t| !loaded.contains(&t.api_name)).collect()
+    } else {
+        vec![]
+    };
+    let system = if unloaded.is_empty() { system } else { format!("{system}\n\n{}", crate::tool_load::index_block(unloaded.iter().copied())) };
+    if !unloaded.is_empty() {
+        let mut def = crate::tool_load::definition();
+        if eager {
+            def["eager_input_streaming"] = json!(true);
+        }
+        tools.push(def);
+    }
+    for t in mcp_tools.iter().filter(|t| unloaded.is_empty() || loaded.contains(&t.api_name)) {
         let mut desc = match &t.title {
             Some(title) if !t.description.contains(title.as_str()) => format!("{title}. {}", t.description),
             _ => t.description.clone(),
@@ -2029,11 +2045,15 @@ async fn execute_tool<R: Runtime>(
     }
 
     if let (true, Some(pid)) = (crate::project_search::is_tool(name), conv.project_id.clone()) {
-        // builds the project's index the first time: not on a runtime worker
-        let (db, name, input) = (st.db.clone(), name.to_string(), input.clone());
-        let (text, failed) = tokio::task::spawn_blocking(move || crate::project_search::run_tool(&db, &pid, &name, &input))
-            .await
-            .unwrap_or_else(|_| ("The project search failed.".into(), true));
+        let (text, failed) = crate::project_search::run(st.db.clone(), pid, name.to_string(), input.clone()).await;
+        return (text_block(text), failed);
+    }
+
+    if name == crate::tool_load::LOAD_TOOL && conv.kind != "code" {
+        // the next step's request context sends the loaded tools' schemas
+        let all = st.mcp.tools().await;
+        let available: Vec<_> = all.iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)).collect();
+        let (text, failed, _) = crate::tool_load::load(st, conv_id, &available, input);
         return (text_block(text), failed);
     }
 
@@ -2196,6 +2216,8 @@ pub fn clean_title(reply: &str) -> Option<String> {
             }
         }
         let t = t.trim_end_matches(|c: char| deco(c) || ".,;:。".contains(c));
+        // Haiku names a short chat "Greeting Exchange Title"; a title of one word and "Title" keeps it
+        let t = t.strip_suffix(" Title").filter(|r| r.trim().contains(' ')).unwrap_or(t);
         (!t.is_empty()).then(|| crate::util::truncate_chars(t, 80))
     })
 }
@@ -2218,6 +2240,8 @@ mod tests {
         assert_eq!(clean_title("**Title:** \"Rust lifetimes\".").as_deref(), Some("Rust lifetimes"));
         assert_eq!(clean_title("Başlık: Yumurta haşlama").as_deref(), Some("Yumurta haşlama"));
         assert_eq!(clean_title("TITLE:\n\nGarden plans").as_deref(), Some("Garden plans"));
+        assert_eq!(clean_title("Greeting Exchange Title").as_deref(), Some("Greeting Exchange"));
+        assert_eq!(clean_title("Book Title").as_deref(), Some("Book Title"));
         // a colon that is the title's own stays
         assert_eq!(clean_title("Rust: ownership basics").as_deref(), Some("Rust: ownership basics"));
         assert_eq!(clean_title("Why does it fail?").as_deref(), Some("Why does it fail?"));

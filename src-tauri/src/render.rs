@@ -320,6 +320,12 @@ fn finish_text(mut acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker,
     Some(part)
 }
 
+/// The note Claude Code adds beside an image it passes on (`[Image: source: C:\…\tool-results\x.png]`, or with the
+/// sizes it was scaled to): the model's, not the person's, who sees the image itself.
+fn is_cli_image_note(text: &str) -> bool {
+    (text.starts_with("[Image: ") || text.starts_with("[Image source: ")) && text.ends_with(']') && !text.contains('\n')
+}
+
 fn tool_result_view(block: &Value) -> Value {
     let is_error = block["is_error"].as_bool().unwrap_or(false);
     let mut text = String::new();
@@ -327,8 +333,10 @@ fn tool_result_view(block: &Value) -> Value {
     match &block["content"] {
         Value::String(s) => text.push_str(s),
         Value::Array(items) => {
+            let has_image = items.iter().any(|it| it["type"] == "image");
             for it in items {
                 match it["type"].as_str() {
+                    Some("text") if has_image && is_cli_image_note(it["text"].as_str().unwrap_or("").trim()) => {}
                     Some("text") => {
                         if !text.is_empty() {
                             text.push('\n');
@@ -1030,6 +1038,20 @@ mod tests {
         let spec = |update| artifacts::ArtifactSpec { identifier: "a".into(), kind: "text/html".into(), title: "A".into(), language: None, content: "x".into(), complete: true, update };
         assert_eq!(artifact_json(spec(true), 2)["update"], true);
         assert!(artifact_json(spec(false), 1).get("update").is_none());
+    }
+
+    #[test]
+    fn an_image_result_shows_the_image_without_the_clis_note_about_it() {
+        let img = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}});
+        let note = |t: &str| json!({"type": "text", "text": t});
+        let view = |content: Value| tool_result_view(&json!({"type": "tool_result", "tool_use_id": "t", "content": content}));
+        // as Claude Code 2.1 stores an MCP image (plain, and scaled with its sizes)
+        let v = view(json!([img, note(r"[Image: source: C:\Users\a\.claude\projects\p\tool-results\mcp-evalsrv-blob-1.png]"), note("Rendered.")]));
+        assert_eq!((v["text"].as_str(), v["images"].as_array().map(Vec::len)), (Some("Rendered."), Some(1)));
+        let v = view(json!([img, note("[Image: source: /tmp/x.png, original 2000x1000, displayed at 1000x500. Multiply coordinates by 2.00 to map to original image.]")]));
+        assert_eq!(v["text"], "");
+        // with no image, such text is the tool's own
+        assert_eq!(view(json!([note("[Image: source: x.png]")]))["text"], "[Image: source: x.png]");
     }
 
     #[test]

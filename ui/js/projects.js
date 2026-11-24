@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, newChatModel } from './store.js';
-import { $, esc, h, modal, button, relTime, toast, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle } from './util.js';
+import { $, esc, h, modal, button, relTime, toast, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle, hasWords } from './util.js';
 import { createComposer, attachmentError } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -30,9 +30,11 @@ export async function renderProjects(view) {
   await refreshProjects();
   const grid = $('.grid', view);
   const draw = (q) => {
-    const list = store.projects.filter((p) => !q || (p.name + ' ' + p.description).toLowerCase().includes(q.toLowerCase()));
+    const list = store.projects.filter((p) => hasWords(`${p.name} ${p.description}`, q));
     if (!list.length) {
-      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="big">${t('no_projects')}</div><div>${t('projects_desc')}</div></div>`;
+      grid.innerHTML = store.projects.length
+        ? `<div class="empty-state" style="grid-column:1/-1">${esc(t('no_results'))}</div>`
+        : `<div class="empty-state" style="grid-column:1/-1"><div class="big">${t('no_projects')}</div><div>${t('projects_desc')}</div></div>`;
       return;
     }
     grid.innerHTML = '';
@@ -134,7 +136,7 @@ function renderKnowledge(el, data, rerender) {
   el.innerHTML = `<div class="row" style="justify-content:space-between"><h3>${t('project_knowledge')}</h3><button class="btn sm" data-act="add">${icon('plus', 14)} ${t('add_content')}</button></div>
     <div class="k-section"><div class="row" style="justify-content:space-between"><div style="font-weight:500">${t('instructions')}</div><button class="icon-btn sm" data-act="instr" title="${esc(t('instr_edit'))}" aria-label="${esc(t('instr_edit'))}">${icon('edit', 14)}</button></div>
       <div class="small ${p.instructions ? '' : 'muted'}" style="margin-top:6px;white-space:pre-wrap;max-height:160px;overflow:auto">${esc(p.instructions || t('instructions_help'))}</div></div>
-    <div class="k-section"><div class="capacity"><div style="width:${pct.toFixed(1)}%"></div></div><div class="small muted" style="margin-top:6px">${pct < 1 && pct > 0 ? '<1' : Math.round(pct)}% ${t('of_capacity')}</div></div>
+    <div class="k-section"><div class="capacity"><div style="width:${pct.toFixed(1)}%"></div></div><div class="small muted" style="margin-top:6px">${esc(t('of_capacity', { pct: pct < 1 && pct > 0 ? '<1' : Math.round(pct) }))}</div></div>
     <div class="k-section files"></div>`;
   const files = $('.files', el);
   if (!data.files.length) files.innerHTML = `<div class="muted small">${t('no_files')}</div>`;

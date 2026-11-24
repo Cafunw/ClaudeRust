@@ -22,7 +22,7 @@
   // a request the policy (ARTIFACT_CSP) blocked fails without an error of its own
   window.addEventListener('securitypolicyviolation', function (e) {
     var uri = String(e.blockedURI || 'a request'), directive = String(e.effectiveDirective || '');
-    report('The artifact sandbox blocked ' + uri + ' (' + directive + '): artifacts cannot reach the network. Only scripts from the allowed CDNs and Google Fonts load, so data and images (inline SVG or data: URLs) must be part of the artifact.', '', { uri: uri, directive: directive });
+    report('The artifact sandbox blocked ' + uri + ' (' + directive + '): artifacts cannot reach the network. Only the scripts the artifact instructions list (at those versions) and Google Fonts load, so data and images (inline SVG or data: URLs) must be part of the artifact.', '', { uri: uri, directive: directive });
   });
   window.addEventListener('message', function (e) {
     var d = e.data;

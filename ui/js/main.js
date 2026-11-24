@@ -37,6 +37,7 @@ import './panes/map.js';
 import './panes/history.js';
 import './panes/files.js';
 import * as artifacts from './artifacts.js';
+import './artifact_files.js';
 import { renderProjects, renderProject, refreshProjects } from './projects.js';
 import { renderCode, renderChats, renderSessions } from './code.js';
 import { openSettings } from './settings.js';

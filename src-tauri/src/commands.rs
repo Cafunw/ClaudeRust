@@ -193,6 +193,9 @@ fn apply_settings_change(app: &AppHandle, st: &Arc<AppState>, old: &settings::Se
     if old.disabled_mcp_servers != new.disabled_mcp_servers {
         reload_mcp_in_background(app, st);
     }
+    if old.language != new.language {
+        crate::retitle_tray(app);
+    }
     crate::keepawake::apply(new);
 }
 
@@ -1357,7 +1360,7 @@ pub async fn pick_extension(app: AppHandle) -> AppResult<Option<String>> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Desktop Extension", &["mcpb", "dxt"])
+        .add_filter(if crate::turkish(&app) { "Masaüstü eklentisi" } else { "Desktop Extension" }, &["mcpb", "dxt"])
         .pick_file(move |f| {
             let _ = tx.send(f.and_then(|p| p.into_path().ok()).map(|p| p.display().to_string()));
         });

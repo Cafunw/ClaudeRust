@@ -1,6 +1,7 @@
 // What the app does for an artifact's sandboxed frame besides storage: the
 // person's consent to window.claude.complete and window.claude.callMcpTool,
-// and the message "Try fixing" sends. No DOM here (artifacts.js draws them).
+// window.fs.readFile, and the message "Try fixing" sends. No DOM here
+// (artifacts.js and artifact_files.js draw and wire them).
 
 /** Grants per scope (an artifact, or an artifact and a connector): `decide(scope, info)`
  *  resolves to how the artifact `scope` may go on now: 'granted' by what was
@@ -89,11 +90,34 @@ export function toolError(err) {
   return { content: [{ type: 'text', text: String((err && err.message) || err).slice(0, 2000) }], isError: true };
 }
 
+/** The bytes of base64 `b64`. */
+export function bytesOf(b64) {
+  const s = atob(b64);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+const MAX_NAME = 1024;
+
+/** window.fs.readFile of a frame shown in conversation `conv` (`d` as the
+ *  frame posted it: { name, encoding }): `read({ conversationId, name, encoding })`
+ *  is the backend's artifact_read_file, which looks in that conversation
+ *  only. Resolves to a string (encoding 'utf8') or a Uint8Array. */
+export async function readFileFor(conv, d, read) {
+  if (!conv) throw new Error('This artifact isn\'t shown in a chat, so it has no attached files to read.');
+  if (typeof d.name !== 'string' || !d.name || d.name.length > MAX_NAME) throw new Error('window.fs.readFile takes the name of a file attached to the chat.');
+  const r = await read({ conversationId: conv, name: d.name, encoding: typeof d.encoding === 'string' ? d.encoding : null });
+  return typeof r.text === 'string' ? r.text : bytesOf(r.base64 || '');
+}
+
 /** What the banner says for `err`: a request the sandbox blocked in the
  *  app's language (the page reports it in English, for Claude), else the
  *  page's own message. */
 export function errorText(err, t) {
-  return err.blocked ? t('art_csp_blocked', { uri: err.blocked.uri, directive: err.blocked.directive }) : err.message;
+  if (!err.blocked) return err.message;
+  const key = String(err.blocked.directive).startsWith('script-src') ? 'art_csp_blocked_script' : 'art_csp_blocked';
+  return t(key, { uri: err.blocked.uri, directive: err.blocked.directive });
 }
 
 const MAX_ERROR = 1500;

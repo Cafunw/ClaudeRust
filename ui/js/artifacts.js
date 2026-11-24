@@ -1,6 +1,6 @@
 // Artifact side panel and the Artifacts gallery page.
 import { icon, ARTIFACT_ICON } from './icons.js';
-import { t } from './i18n.js';
+import { t, currentLanguage } from './i18n.js';
 import { call, artifactUrl } from './api.js';
 import { store, emit, saveLocal, loadLocal } from './store.js';
 import { $, esc, h, showMenu, errorToast, relTime, searchToggle, modal, button } from './util.js';
@@ -12,6 +12,9 @@ import { createConsent, createGrants, createComplete, createToolCall, toolScope,
 import { shownArtifact } from './branch_panel.js';
 import { reopenId, wrapTab } from './artifact_sheet.js';
 import { errorText as failureText } from './neterr.js';
+// (chat.js imports this module too: reload is only called once both are loaded)
+import { reload as reloadChat } from './chat.js';
+import { renderPreview } from './artifact_preview.js';
 
 let panel = null;
 let renderTimer = null;
@@ -28,7 +31,23 @@ function isDark() { return document.documentElement.dataset.theme === 'dark'; }
 
 function langFor(a) {
   if (a.language) return a.language;
-  return { 'application/vnd.ant.react': 'jsx', 'text/html': 'html', 'image/svg+xml': 'xml', 'application/vnd.ant.mermaid': 'text', 'text/markdown': 'markdown' }[a.type] || 'text';
+  return { 'application/vnd.ant.react': 'jsx', 'text/html': 'html', 'image/svg+xml': 'xml', 'application/vnd.ant.mermaid': 'text', 'text/markdown': 'markdown', [SLIDES]: 'html', [DOC]: 'markdown', [DASHBOARD]: 'json' }[a.type] || 'text';
+}
+
+// the typed artifacts (artifacts.rs is_typed): the app's own runtime draws them, the person edits them in place
+const SLIDES = 'application/vnd.ant.slides', DOC = 'application/vnd.ant.document', SHEET = 'application/vnd.ant.sheet', DASHBOARD = 'application/vnd.ant.dashboard';
+const TYPED = new Set([SLIDES, DOC, SHEET, DASHBOARD]);
+const iconFor = (type) => ARTIFACT_ICON[type] || 'file';
+
+/** What a typed artifact downloads as: artifacts.rs export_file's formats, and 'print' (PDF, by the frame). */
+function exportFormats(type) {
+  switch (type) {
+    case SLIDES: return [['print', 'art_fmt_pdf'], ['html', 'art_fmt_deck']];
+    case DOC: return [['docx', 'art_fmt_docx'], ['print', 'art_fmt_pdf'], ['source', 'art_fmt_md'], ['html', 'art_fmt_html']];
+    case SHEET: return [['source', 'art_fmt_csv']];
+    case DASHBOARD: return [['source', 'art_fmt_json']];
+    default: return [];
+  }
 }
 
 export function onConversationOpened(convId, map) {
@@ -103,6 +122,10 @@ function setFull(on) {
   full = on;
   aside().classList.toggle('full', on);
   render();
+  // a deck that asked for the full window stops presenting with it
+  const f = aside().querySelector('.ap-body iframe');
+  if (!on && f && f.contentWindow && f.dataset.kind === SLIDES) f.contentWindow.postMessage({ __artifact: 'present', on: false }, '*');
+  if (!on) aside().querySelectorAll('.ap-head, .ap-alert').forEach((x) => (x.style.display = ''));
 }
 
 /** The topbar's toggle shows whether the panel is open. */
@@ -143,12 +166,12 @@ async function render() {
   const back = h(`<button class="ap-back" data-k="back" title="${esc(t('art_back'))}">${icon('arrowLeft', 16)}<span>${esc(t('art_back'))}</span></button>`);
   back.onclick = close;
   head.appendChild(back);
-  const titleBtn = h(`<button class="ap-title" data-k="title" title="${esc(a.title || a.identifier)}" ${panel.map.size > 1 ? 'aria-haspopup="menu"' : ''}>${icon(ARTIFACT_ICON[a.type] || 'file', 16)}<span class="ellipsis">${esc(a.title || a.identifier)}</span>${panel.map.size > 1 ? icon('chevDown', 14) : ''}</button>`);
+  const titleBtn = h(`<button class="ap-title" data-k="title" title="${esc(a.title || a.identifier)}" ${panel.map.size > 1 ? 'aria-haspopup="menu"' : ''}>${icon(iconFor(a.type), 16)}<span class="ellipsis">${esc(a.title || a.identifier)}</span>${panel.map.size > 1 ? icon('chevDown', 14) : ''}</button>`);
   titleBtn.onclick = () => {
     if (panel.map.size < 2) return;
     showMenu(titleBtn, [...panel.map.keys()].map((id) => {
       const last = versionsOf(id).at(-1);
-      return { label: last.title || id, sub: artifactKindText(last.label), icon: ARTIFACT_ICON[last.type] || 'file', checked: id === panel.identifier, onClick: () => { panel.identifier = id; panel.version = null; panel.followLatest = true; panel.view = null; render(); } };
+      return { label: last.title || id, sub: artifactKindText(last.label), icon: iconFor(last.type), checked: id === panel.identifier, onClick: () => { panel.identifier = id; panel.version = null; panel.followLatest = true; panel.view = null; render(); } };
     }), { width: 280 });
   };
   head.appendChild(titleBtn);
@@ -184,8 +207,15 @@ async function render() {
   head.appendChild(fullB);
   const copyB = h(`<button class="icon-btn" data-k="copy" title="${t('copy')}" aria-label="${t('copy')}">${icon('copy', 16)}</button>`);
   copyB.onclick = async () => { await copyText(a.content); copyB.innerHTML = icon('check', 16); setTimeout(() => (copyB.innerHTML = icon('copy', 16)), 1400); };
-  const dl = h(`<button class="icon-btn" data-k="download" title="${t('download')}" aria-label="${t('download')}">${icon('download', 16)}</button>`);
+  const formats = a.complete ? exportFormats(a.type).filter(([f]) => f !== 'print' || view === 'preview') : [];
+  const dl = h(`<button class="icon-btn" data-k="download" title="${t('download')}" aria-label="${t('download')}"${formats.length > 1 ? ' aria-haspopup="menu"' : ''}>${icon('download', 16)}</button>`);
+  const save = (format) => {
+    if (format === 'print') { const f = aside().querySelector('.ap-body iframe'); if (f && f.contentWindow) f.contentWindow.postMessage({ __artifact: 'print' }, '*'); return; }
+    call('export_artifact', { kind: a.type, content: a.content, title: a.title || a.identifier || 'artifact', format }).catch(errorToast);
+  };
   dl.onclick = () => {
+    if (formats.length > 1) { showMenu(dl, formats.map(([f, key]) => ({ label: t(key), icon: f === 'print' ? 'printer' : 'download', onClick: () => save(f) })), { width: 240 }); return; }
+    if (formats.length) { save(formats[0][0]); return; }
     const base = (a.title || a.identifier || 'artifact').replace(/[\\/:*?"<>|]+/g, '-');
     call('save_text_file', { name: `${base}.${a.ext || 'txt'}`, content: a.content }).catch(errorToast);
   };
@@ -225,6 +255,8 @@ async function render() {
       const frame = document.createElement('iframe');
       // no modals and no popups: links ask the app (openLink), alert and confirm do nothing (artifact_guard.js)
       frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-downloads');
+      // a deck or doc prints itself (PDF): its page is the app's runtime, and what it draws runs nothing (artifact_types/)
+      if (a.type === SLIDES || a.type === DOC) frame.sandbox.add('allow-modals');
       frame.setAttribute('referrerpolicy', 'no-referrer');
       // whose window.storage and window.claude this frame's calls use (not the panel's: it may show another artifact by then)
       frame.dataset.scope = `${panel.convId}/${myId}`;
@@ -232,9 +264,11 @@ async function render() {
       frame.dataset.artifact = myId;
       frame.dataset.version = a.version;
       frame.dataset.title = a.title || myId;
+      frame.dataset.kind = a.type;
       // a new page reports its errors anew
       panel.errors.delete(`${myId}@${a.version}`);
-      frame.src = artifactUrl(token);
+      // a typed artifact's runtime speaks the app's language
+      frame.src = artifactUrl(token) + (TYPED.has(a.type) ? `#lang=${currentLanguage()}` : '');
       if (a.type !== 'text/html') frame.classList.add('dark-ok');
       frame.title = a.title || myId;
       // a page whose libraries come from a CDN can take a while: a spinner until it's loaded, not a blank panel
@@ -283,6 +317,18 @@ function drawAlert(a) {
     if (panel) drawAlert(currentArtifact() || a);
   }));
   slot.appendChild(note);
+}
+
+/** The person edited typed artifact `frame` in place: `content` is saved as its
+ *  newest version (artifacts.rs artifact_edit), which the panel then shows. */
+async function saveEdit(frame, content) {
+  if (!TYPED.has(frame.dataset.kind) || typeof content !== 'string' || content.length > 2e6) return;
+  const convId = frame.dataset.conv;
+  try {
+    await call('artifact_edit', { conversationId: convId, identifier: frame.dataset.artifact, content });
+    if (panel && panel.convId === convId && panel.identifier === frame.dataset.artifact) Object.assign(panel, { followLatest: true, version: null });
+    await reloadChat();
+  } catch (e) { errorToast(e); }
 }
 
 function frameError(frame, d) {
@@ -451,14 +497,27 @@ export async function renderGallery(view) {
       return;
     }
     grid.innerHTML = '';
+    if (seen) seen.disconnect();
+    // a card's picture is drawn once it comes near the view
+    seen = new IntersectionObserver((entries) => entries.forEach((en) => {
+      if (!en.isIntersecting) return;
+      seen.unobserve(en.target);
+      const a = shown.get(en.target);
+      renderPreview(en.target, a, { dark: isDark(), lang: currentLanguage(), iconName: iconFor(a.kind) }).catch(() => { en.target.innerHTML = `<pre>${esc(a.content.slice(0, 600))}</pre>`; });
+    }), { rootMargin: '200px' });
     for (const a of f) {
-      const card = h(`<button class="card artifact-tile"><div class="preview"><pre>${esc(a.content.slice(0, 600))}</pre></div>
-        <div class="cap"><div class="row">${icon(ARTIFACT_ICON[a.kind] || 'file', 15)}<div class="t ellipsis grow" title="${esc(a.title || a.identifier)}">${esc(a.title || a.identifier)}</div></div>
+      const card = h(`<button class="card artifact-tile"><div class="preview" aria-hidden="true"></div>
+        <div class="cap"><div class="row">${icon(iconFor(a.kind), 15)}<div class="t ellipsis grow" title="${esc(a.title || a.identifier)}">${esc(a.title || a.identifier)}</div></div>
         <div class="f ellipsis" title="${esc(a.conversation_title || t('untitled'))}">${esc(artifactKindText(a.label))} · ${esc(a.conversation_title || t('untitled'))} · ${relTime(a.created_at)}</div></div></button>`);
       card.onclick = () => emit('navigate', { name: 'chat', params: { id: a.conversation_id, artifact: a.identifier } });
+      const preview = card.querySelector('.preview');
+      shown.set(preview, a);
+      seen.observe(preview);
       grid.appendChild(card);
     }
   };
+  const shown = new WeakMap();
+  let seen = null;
   draw('');
   $('.search-box input', view).addEventListener('input', (e) => draw(e.target.value));
 }
@@ -505,13 +564,21 @@ document.addEventListener('focusin', (e) => {
 // window.storage and window.claude calls, its errors, links and Esc
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || !['call', 'error', 'link', 'escape'].includes(d.__artifact)) return;
+  if (!d || !['call', 'error', 'link', 'escape', 'edit', 'present'].includes(d.__artifact)) return;
   const frame = [...document.querySelectorAll('#artifact-panel iframe')].find((f) => f.contentWindow === e.source);
   if (!frame || !panel) return;
   // the banner above the frame shows it: the page draws no overlay of its own (artifact_hook.js)
   if (d.__artifact === 'error') { e.source.postMessage({ __artifact: 'error-ack' }, '*'); frameError(frame, d); return; }
   if (d.__artifact === 'link') { openLink(d.url); return; }
   if (d.__artifact === 'escape') { if (full) setFull(false); return; }
+  if (d.__artifact === 'present') {
+    if (frame.dataset.kind !== SLIDES) return;
+    // the deck on its own: the panel's bar and notices step aside until it stops
+    aside().querySelectorAll('.ap-head, .ap-alert').forEach((x) => (x.style.display = d.on ? 'none' : ''));
+    if (!!d.on !== full) setFull(!!d.on);
+    return;
+  }
+  if (d.__artifact === 'edit') { saveEdit(frame, d.content); return; }
   const reply = (r) => e.source.postMessage({ __artifact: 'reply', id: d.id, ...r }, '*');
   const fail = (err) => reply({ error: String((err && err.message) || err) });
   // the toolbar shows what was allowed (or refused) on the way

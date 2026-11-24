@@ -62,7 +62,7 @@ test('a refused attachment is said in the UI language from its kind (attachments
   const e = Object.assign(new Error('“a.pdf” is not a valid PDF file.'), { kind: 'pdf_invalid', status: 0 });
   assert.equal(attachmentError(e, 'a.pdf'), '“a.pdf” geçerli bir PDF dosyası değil.');
   assert.equal(attachmentError(e), 'Bu dosya geçerli bir PDF dosyası değil.', 'no name known');
-  assert.equal(attachmentError({ kind: 'unsupported_file', name: 'x.bin', message: 'English' }), '“x.bin” desteklenen bir dosya türü değil. Görsel, PDF, Word, Excel, PowerPoint ve metin dosyaları ekleyebilirsiniz.', 'an error object from stage_paths');
+  assert.equal(attachmentError({ kind: 'unsupported_file', name: 'x.bin', message: 'English' }), '“x.bin” desteklenen bir dosya türü değil. Görsel, PDF, Word, Excel, PowerPoint, OpenDocument metin, EPUB, RTF ve metin dosyaları ekleyebilirsiniz.', 'an error object from stage_paths');
   assert.match(attachmentError({ kind: 'message_too_large' }), /30 MB/);
   assert.equal(attachmentError(Object.assign(new Error('boom'), { kind: 'network' })), null, 'not an attachment refusal');
   assert.equal(attachmentError(null), null);

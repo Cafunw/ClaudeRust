@@ -7,8 +7,11 @@ import { t, tOr } from './i18n.js';
 import { call, isMac } from './api.js';
 import { store, modelInfo, emit, rememberModel } from './store.js';
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast, modal, button } from './util.js';
+import { hookPreview } from './attachment_preview.js';
 
 const PASTE_AS_FILE = 6000;
+/** The preset styles (prompts.rs style_prompt), labelled style_<id>. */
+export const PRESET_STYLES = ['normal', 'concise', 'explanatory', 'formal', 'learning'];
 
 // What the Claude Code CLI applies by itself for a model in a folder: the effort it runs at when none is chosen,
 // whether Ultracode can be switched on, and whether its settings switch it on. Asked once per model and folder (it costs a CLI start): undefined
@@ -120,6 +123,8 @@ export function createComposer(opts) {
     style: 'normal',
     disabled_servers: [],
     disabled_tools: [],
+    // "deferred" | "all" | null = automatic (tool_load.rs)
+    tool_access: null,
     permission_mode: store.settings.code_permission_mode || 'default',
     ...(opts.initial || {}),
   };
@@ -207,8 +212,7 @@ export function createComposer(opts) {
   }
 
   function styleName(id) {
-    const builtin = { normal: t('style_normal'), concise: t('style_concise'), explanatory: t('style_explanatory'), formal: t('style_formal') };
-    if (builtin[id]) return builtin[id];
+    if (PRESET_STYLES.includes(id)) return t(`style_${id}`);
     const c = (store.settings.custom_styles || []).find((s) => s.id === id);
     return c ? c.name : id;
   }
@@ -261,6 +265,7 @@ export function createComposer(opts) {
         if (a.id) call('unstage', { id: a.id }).catch(() => {});
         renderAttachments();
       };
+      if (a.id && !a.loading) hookPreview(chip, { stagedId: a.id }, a.name);
       attEl.appendChild(chip);
     }
     updateSend();
@@ -445,8 +450,7 @@ export function createComposer(opts) {
         items.push({ element: rr });
       }
       items.push({ sep: true }, { header: t('style') });
-      const styles = [['normal', t('style_normal')], ['concise', t('style_concise')], ['explanatory', t('style_explanatory')], ['formal', t('style_formal')],
-        ...(store.settings.custom_styles || []).map((s) => [s.id, s.name])];
+      const styles = [...PRESET_STYLES.map((id) => [id, t(`style_${id}`)]), ...(store.settings.custom_styles || []).map((s) => [s.id, s.name])];
       for (const [id, name] of styles) items.push({ label: name, checked: (st.style || 'normal') === id, onClick: () => persist({ style: id }) });
       items.push({ label: t('create_style'), icon: 'edit', onClick: () => emit('open-settings', 'styles') });
     }
@@ -469,6 +473,16 @@ export function createComposer(opts) {
         });
         row.querySelector('.mcp-open').onclick = () => serverTools(anchor, s);
         items.push({ element: row });
+      }
+      // "load tools when needed" (tool_load.rs, chats only): automatic above 20 of the chat's tools unless it says
+      if (mode !== 'code') {
+        const policies = store.settings.tool_policies || {};
+        const count = servers.filter((s) => !(st.disabled_servers || []).includes(s.name))
+          .reduce((n, s) => n + s.tools.filter((tool) => !offTools(s).includes(tool) && policies[`${s.name}/${tool.name}`] !== 'deny').length, 0);
+        const deferred = st.tool_access ? st.tool_access === 'deferred' : count > 20;
+        items.push({ sep: true }, { header: t('tool_access') },
+          { label: t('tool_access_deferred'), sub: t('tool_access_deferred_d'), checked: deferred, onClick: () => { persist({ tool_access: 'deferred' }); toast(t('tool_access_set_deferred')); } },
+          { label: t('tool_access_all'), sub: t('tool_access_all_d'), checked: !deferred, onClick: () => { persist({ tool_access: 'all' }); toast(t('tool_access_set_all')); } });
       }
     }
     if (!items.length) items.push({ label: t('nothing_here'), disabled: true });

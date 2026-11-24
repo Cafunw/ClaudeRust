@@ -76,7 +76,7 @@ export function decorate(root) {
 }
 
 // the kinds artifacts.rs kind_label names in English (the rest are names: HTML, SVG, React, Python…)
-const KIND_KEYS = { Diagram: 'ak_diagram', Document: 'ak_document', Code: 'ak_code', Artifact: 'ak_artifact' };
+const KIND_KEYS = { Diagram: 'ak_diagram', Document: 'ak_document', Code: 'ak_code', Artifact: 'ak_artifact', Slides: 'ak_slides', Doc: 'ak_doc', Sheet: 'ak_sheet', Dashboard: 'ak_dashboard' };
 
 /** An artifact's kind (artifacts.rs kind_label) in the app's language. */
 export function artifactKindText(label) {
@@ -177,7 +177,7 @@ function diffStat(rows) {
   return `<span class="diff-stat"><span class="a">+${a}</span> <span class="d">-${d}</span></span>`;
 }
 
-const TOOL_ICONS = { MultiEdit: 'edit', NotebookEdit: 'edit', LS: 'folder', WebFetch: 'globe', WebSearch: 'globe', Task: 'sparkle', Agent: 'sparkle', conversation_search: 'history', recent_chats: 'history', Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
+const TOOL_ICONS = { MultiEdit: 'edit', NotebookEdit: 'edit', LS: 'folder', WebFetch: 'globe', WebSearch: 'globe', Task: 'sparkle', Agent: 'sparkle', conversation_search: 'history', recent_chats: 'history', load_tools: 'plug', Bash: 'terminal', Read: 'fileText', Write: 'file', Edit: 'edit', Glob: 'search', Grep: 'search', TodoWrite: 'list', ExitPlanMode: 'compass', web_search: 'globe', web_fetch: 'globe', code_execution: 'terminal' };
 
 function toolSummary(p) {
   const i = p.input || {};
@@ -191,6 +191,7 @@ function toolSummary(p) {
     case 'TodoWrite': return { name: t('todos'), arg: '' };
     case 'ExitPlanMode': return { name: t('plan_ready'), arg: '' };
     case 'conversation_search': return { name: t('searched_chats'), arg: i.query || '' };
+    case 'load_tools': return { name: t('loaded_tools'), arg: (i.names || []).join(', ') };
     case 'MultiEdit': return { name: 'Edit', arg: shortPath(i.file_path) + (i.edits ? ` (${i.edits.length})` : '') };
     case 'NotebookEdit': return { name: 'Notebook', arg: shortPath(i.notebook_path) };
     case 'LS': return { name: 'List', arg: shortPath(i.path) };

@@ -341,13 +341,46 @@ fn file_from_row(r: &Row) -> rusqlite::Result<ProjectFile> {
     })
 }
 
-/// Escape a user query for FTS5: every token becomes a quoted prefix term.
+/// Letters that search matches without their accent (the Turkish ones and the common Latin ones).
+const UNACCENTED: [(&str, char); 19] = [
+    ("àáâãäåāăą", 'a'), ("çćĉċč", 'c'), ("ďđ", 'd'), ("èéêëēĕėęě", 'e'), ("ĝğġģ", 'g'), ("ĥħ", 'h'), ("ìíîïĩīĭįı", 'i'), ("ĵ", 'j'), ("ķ", 'k'), ("ĺļľŀł", 'l'),
+    ("ñńņň", 'n'), ("òóôõöøōŏő", 'o'), ("ŕŗř", 'r'), ("śŝşšș", 's'), ("ţťŧț", 't'), ("ùúûüũūŭůűų", 'u'), ("ŵ", 'w'), ("ýÿŷ", 'y'), ("źżž", 'z'),
+];
+
+/// `s` as search compares it: lower case, where I, İ and ı are all i (Turkish), and without accents.
+pub(crate) fn fold(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| if matches!(c, 'I' | 'İ') { 'i'.to_lowercase() } else { c.to_lowercase() })
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
+        .map(|c| if c.is_ascii() { c } else { UNACCENTED.iter().find(|(from, _)| from.contains(c)).map_or(c, |&(_, to)| to) })
+        .collect()
+}
+
+/// One word of a query as an FTS5 prefix term. FTS5 folds case and accents but keeps ı apart
+/// from i (and indexes "I" as i), so a word with i's matches with either at its first four.
+fn fts_term(word: &str) -> String {
+    let w: Vec<char> = word.replace('"', "\"\"").chars().map(|c| if matches!(c, 'I' | 'İ') { 'i' } else { c }).collect();
+    let at: Vec<usize> = (0..w.len()).filter(|&i| matches!(w[i], 'i' | 'ı')).take(4).collect();
+    let terms: Vec<String> = (0..1usize << at.len())
+        .map(|mask| {
+            let mut v = w.clone();
+            for (bit, &i) in at.iter().enumerate() {
+                v[i] = if (mask >> bit) & 1 == 1 { 'ı' } else { 'i' };
+            }
+            format!("\"{}\"*", v.into_iter().collect::<String>())
+        })
+        .collect();
+    if terms.len() == 1 {
+        terms.concat()
+    } else {
+        format!("({})", terms.join(" OR "))
+    }
+}
+
+/// A user query for FTS5: every word must match, in any order (an explicit AND:
+/// FTS5 takes no implicit one next to a parenthesized group).
 fn fts_query(q: &str) -> String {
-    q.split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{}\"*", t.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ")
+    q.split_whitespace().map(fts_term).collect::<Vec<_>>().join(" AND ")
 }
 
 /// Bring the schema up to date in one transaction. A database with no
@@ -976,13 +1009,11 @@ impl Db {
             })?;
             return Ok(rows.collect::<Result<Vec<_>, _>>()?);
         }
-        // Title matches first.
-        let like = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+        // Titles holding every word, in any order, first; compared folded (SQLite's LIKE folds ASCII only)
+        let words: Vec<String> = fold(q).split_whitespace().map(str::to_string).collect();
         {
-            let mut st = c.prepare(&format!(
-                "SELECT id,title,kind,updated_at FROM conversations c WHERE {shown} AND title LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?2"
-            ))?;
-            let rows = st.query_map(params![like, limit as i64], |r| {
+            let mut st = c.prepare(&format!("SELECT id,title,kind,updated_at FROM conversations c WHERE {shown} ORDER BY updated_at DESC"))?;
+            let rows = st.query_map([], |r| {
                 Ok(SearchHit {
                     conversation_id: r.get(0)?,
                     message_id: None,
@@ -993,7 +1024,13 @@ impl Db {
                 })
             })?;
             for h in rows.flatten() {
-                hits.push(h);
+                let title = fold(&h.title);
+                if words.iter().all(|w| title.contains(w.as_str())) {
+                    hits.push(h);
+                    if hits.len() >= limit {
+                        break;
+                    }
+                }
             }
         }
         if self.fts {
@@ -1022,12 +1059,15 @@ impl Db {
                 }
             }
         } else {
+            // without FTS5: every word, as typed
+            let likes: Vec<String> = q.split_whitespace().map(|w| format!("%{}%", w.replace('%', "\\%").replace('_', "\\_"))).collect();
+            let every = vec!["m.content LIKE ? ESCAPE '\\'"; likes.len()].join(" AND ");
             let mut st = c.prepare(&format!(
                 "SELECT m.conversation_id, m.id, c.title, substr(m.content, 1, 200), c.kind, c.updated_at
                  FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                 WHERE {shown} AND m.content LIKE ?1 ESCAPE '\\' ORDER BY c.updated_at DESC LIMIT ?2"
+                 WHERE {shown} AND {every} ORDER BY c.updated_at DESC LIMIT {limit}"
             ))?;
-            let rows = st.query_map(params![like, limit as i64], |r| {
+            let rows = st.query_map(rusqlite::params_from_iter(&likes), |r| {
                 Ok(SearchHit {
                     conversation_id: r.get(0)?,
                     message_id: r.get(1)?,
@@ -1894,5 +1934,39 @@ mod tests {
         assert!(db.memory_get(&p.id).unwrap().is_none());
         db.memory_delete("global").unwrap();
         assert!(db.memory_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_matches_every_word_in_any_order_turkish_aware() {
+        assert_eq!(fold("İSTANBUL Işık ışık Çiçek ŞEKER Ünlü"), "istanbul isik isik cicek seker unlu");
+        assert_eq!(fts_query("a\"b c"), "\"a\"\"b\"* AND \"c\"*");
+        assert_eq!(fts_term("Işk"), "(\"işk\"* OR \"ışk\"*)");
+        assert_eq!(fts_term("iiiiii").matches(" OR ").count(), 15, "the first four i's vary");
+        let db = Db::open_in_memory().unwrap();
+        let conv = |title: &str| {
+            let c = db.conv_create("chat", "m", None, None, &json!({})).unwrap();
+            db.conv_set_title(&c.id, title).unwrap();
+            c.id
+        };
+        let filler = conv("Sidebar filler chat number 1 about tests");
+        let city = conv("İstanbul gezisi");
+        let light = conv("Işık ayarları");
+        let body = conv("Bahçe");
+        db.msg_insert(&text_msg("b1", &body)).unwrap();
+        db.fts_index(&body, "b1", "Çiçekler ışıkta büyür, yapraklar güneşe döner.").unwrap();
+        let ids = |q: &str| db.search(q, 10).unwrap().into_iter().map(|h| h.conversation_id).collect::<Vec<_>>();
+        assert_eq!(ids("filler 1"), vec![filler.clone()]);
+        assert_eq!(ids("1 FILLER number"), vec![filler.clone()], "any order, any case");
+        assert!(ids("filler 2").is_empty(), "every word must match");
+        assert_eq!(ids("istanbul"), vec![city]);
+        // the title first, then the message that says "ışıkta"
+        assert_eq!(ids("ISIK"), vec![light.clone(), body.clone()]);
+        assert_eq!(ids("ışık ayar"), vec![light]);
+        // message text: accents and i/ı folded, words in any order, a highlighted snippet
+        let hits = db.search("isikta cicek", 10).unwrap();
+        assert_eq!(hits.iter().map(|h| h.conversation_id.clone()).collect::<Vec<_>>(), vec![body.clone()]);
+        assert!(hits[0].snippet.contains('\u{1}') && hits[0].snippet.contains('\u{2}'));
+        assert_eq!(ids("GÜNEŞE yaprak"), vec![body]);
+        assert!(ids("cicek gezisi").is_empty(), "the words of one title or one message");
     }
 }

@@ -59,6 +59,27 @@ pub struct McpTool {
     pub read_only: bool,
 }
 
+/// The app's own tools (`definitions` in the API's shape) as an SDK-hosted server lists them to the account
+/// engine's CLI. Their API name is the bare tool name, which no MCP server's tool can have (those are
+/// `server__tool`): that is how a call is told apart from one for a connected server with the same tool name.
+pub fn app_tools(server: &str, definitions: Vec<Value>) -> Vec<McpTool> {
+    definitions
+        .into_iter()
+        .map(|d| {
+            let name = d["name"].as_str().unwrap_or_default().to_string();
+            McpTool {
+                server: server.into(),
+                api_name: name.clone(),
+                name,
+                title: None,
+                description: d["description"].as_str().unwrap_or_default().into(),
+                input_schema: d["input_schema"].clone(),
+                read_only: true,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerStatus {
     pub name: String,

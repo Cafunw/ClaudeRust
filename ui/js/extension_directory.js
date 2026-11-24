@@ -3,10 +3,11 @@
 // downloads the bundle only then, checks its SHA-256 against the listed one
 // and opens the usual preview (signature, what it runs, settings) before
 // anything is installed; an installed one with a newer listed version offers
-// the update.
+// the update, here and on its card in Settings (updateExtension).
 import { t, currentLanguage } from './i18n.js';
 import { icon } from './icons.js';
 import { call, on as onBackend } from './api.js';
+import { emit, loadLocal, saveLocal } from './store.js';
 import { esc, h, modal, toast, errorToast, humanSize } from './util.js';
 import { notRegistered } from './optional_cmd.js';
 import { previewDialog } from './extensions_page.js';
@@ -34,6 +35,49 @@ export function entryAction(e) {
   if (e.installed) return e.update ? 'update' : 'installed';
   return 'install';
 }
+
+/** Install bundle `info` (extension_directory_download's reply) of entry `e`. An update
+ *  keeps its settings and, when nothing in it needs a look (`info.quiet`: signed by a
+ *  trusted publisher, no new setting), goes straight in; otherwise the usual preview,
+ *  an update's form filled in. `done(status)` once installed. */
+export async function installDownloaded(e, info, done) {
+  const send = async (values) => {
+    const r = await call('extension_directory_install', { id: e.id, path: info.path, values });
+    toast(e.installed ? t('ext_updated', { name: e.name, v: e.version }) : t('extension_installed', { name: r.installed }));
+    if (done) await done(r);
+  };
+  if (e.installed && info.quiet) return send({});
+  // an update's form filled in; one whose settings can't be read is still an update
+  const saved = e.installed ? await call('extension_settings', { name: e.installed.name }).catch(() => ({})) : null;
+  previewDialog(info, send, saved);
+}
+
+/** "Update" on installed directory entry `e`'s card in Settings (its `button`): download it (the listed hash only) and install it as installDownloaded does. */
+export async function updateExtension(e, button, redraw) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = t('ed_downloading');
+  try {
+    await installDownloaded(e, await call('extension_directory_download', { id: e.id }), redraw);
+  } catch (err) {
+    if (!err || err.kind !== 'cancelled') errorToast(err);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+/** The once-a-day check (extension_directory.rs start_update_checks): what it updated, and, once per new set, what can be. */
+export function onExtensionUpdates(r) {
+  for (const u of (r && r.updated) || []) toast(t('ext_updated', { name: u.name, v: u.to }));
+  const avail = (r && r.available) || [];
+  const key = avail.map((u) => `${u.id}@${u.to}`).join(',');
+  if (avail.length && key !== loadLocal().ext_updates_told) {
+    toast(t('ext_updates_toast', { n: avail.length }), '', { action: t('upd_view'), onAction: () => emit('open-settings', 'developer'), duration: 30000 });
+  }
+  saveLocal({ ext_updates_told: key });
+}
+onBackend('extension-updates', onExtensionUpdates);
 
 /** The directory dialog; `redraw(status)` redraws Settings → Developer after an install. */
 export async function openExtensionDirectory(redraw) {
@@ -86,13 +130,9 @@ export async function openExtensionDirectory(redraw) {
     }
     busy = null;
     draw();
-    previewDialog(info, async (values) => {
-      const r = await call('extension_directory_install', { id: e.id, path: info.path, values });
-      toast(t('extension_installed', { name: r.installed }));
-      redraw && redraw(r);
-      await load().catch(errorToast);
-      draw();
-    });
+    try {
+      await installDownloaded(e, info, async (r) => { if (redraw) redraw(r); await load().catch(errorToast); draw(); });
+    } catch (err) { errors[e.id] = errorText(err); draw(); }
   };
 
   const draw = () => {

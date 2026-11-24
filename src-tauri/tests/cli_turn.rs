@@ -25,10 +25,12 @@ use tokio_util::sync::CancellationToken;
 // ------------------------------------------------------------- the stand-in CLI
 
 /// Plays the steps of `script.json` (one list per start of the CLI, each start takes the first) and logs
-/// its arguments, every line it reads and how it exited to `log.jsonl`. Steps: `["out", line]` writes a
+/// its arguments, its prompt file, every line it reads and how it exited to `log.jsonl`. Steps: `["out", line]` writes a
 /// line, `["err", text]` writes to stderr, `["read", pattern]` waits for a line that has the pattern's
 /// fields, `["exit", code]` exits, `["stay"]` keeps it running after its input ends (as a background
-/// process of the CLI's can), `["sleep", ms]` waits. Then, as the CLI does, it ends when its input does.
+/// process of the CLI's can), `["sleep", ms]` waits, `["cap", n]` answers as the CLI does when a reply needs `n`
+/// output tokens (thinking included) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is lower, and exits. Then, as the CLI
+/// does, it ends when its input does.
 /// Input that isn't JSON (a title's conversation) is logged as its text.
 const FAKE_CLI: &str = r#"
 const fs = require("fs");
@@ -38,7 +40,8 @@ const log = (o) => fs.appendFileSync(at("log.jsonl"), JSON.stringify(o) + "\n");
 const runs = JSON.parse(fs.readFileSync(at("script.json"), "utf8"));
 const steps = runs.shift() || [];
 fs.writeFileSync(at("script.json"), JSON.stringify(runs));
-log({ argv: process.argv.slice(2), pid: process.pid });
+const promptAt = process.argv.indexOf("--system-prompt-file");
+log({ argv: process.argv.slice(2), pid: process.pid, prompt: promptAt > 0 ? fs.readFileSync(process.argv[promptAt + 1], "utf8") : null });
 process.on("exit", (code) => log({ exit: code }));
 const input = [];
 let closed = false;
@@ -57,6 +60,11 @@ const flushed = () => Promise.all([process.stdout, process.stderr].map((s) => ne
     else if (op === "exit") { await flushed(); process.exit(arg); }
     else if (op === "stay") setInterval(() => {}, 1 << 30);
     else if (op === "sleep") await new Promise((r) => setTimeout(r, arg));
+    else if (op === "cap" && Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) < arg) {
+      const max = process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+      process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: `API Error: Claude's response exceeded the ${max} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.` }) + "\n");
+      await flushed(); process.exit(1);
+    }
   }
   while (!closed) await new Promise((r) => (wake = r));
 })();
@@ -70,6 +78,8 @@ struct Cli {
 /// One start of the stand-in: its arguments, the lines it read, its exit code (None: it was killed).
 struct Run {
     args: Vec<String>,
+    /// what its `--system-prompt-file` held
+    prompt: Option<String>,
     pid: u32,
     input: Vec<Value>,
     exit: Option<i64>,
@@ -120,7 +130,7 @@ impl Cli {
         for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
             if let Some(a) = v["argv"].as_array() {
                 let args = a.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect();
-                out.push(Run { args, pid: v["pid"].as_u64().unwrap_or_default() as u32, input: vec![], exit: None });
+                out.push(Run { args, prompt: v["prompt"].as_str().map(String::from), pid: v["pid"].as_u64().unwrap_or_default() as u32, input: vec![], exit: None });
             } else if let Some(r) = out.last_mut() {
                 if v["in"].is_null() {
                     r.exit = v["exit"].as_i64();
@@ -635,6 +645,35 @@ fn a_cli_that_stays_after_its_result_is_stopped() {
 }
 
 #[test]
+fn a_reply_whose_artifact_was_edited_in_place_is_replayed_to_the_cli() {
+    block_on(async {
+        use tauri::Manager;
+        let h = Harness::new("chat");
+        h.app.manage(h.st.clone());
+        let (old, new) = (new_id(), new_id());
+        let sheet = "Here.
+<antArtifact identifier=\"b\" type=\"sheet\" title=\"Budget\">
+Rent,1000
+</antArtifact>";
+        h.cli.script(vec![vec![read_user(), init(&old), assistant(&old, "msg_1", "uuid-1", text(sheet)), result(&old, 0.01)]]);
+        h.turn("A budget", None).await.unwrap();
+        h.transcript(&old, 0.01);
+        // the person edits the sheet: the CLI's session still holds the reply as it was
+        clauderust_lib::artifacts::artifact_edit(h.app.state(), h.conv.clone(), "b".into(), "Rent,1200".into()).await.unwrap();
+        h.cli.script(vec![vec![read_user(), init(&new), assistant(&new, "msg_2", "uuid-2", text("1200")), result(&new, 0.02)]]);
+        h.turn("What is the rent?", None).await.unwrap();
+
+        let runs = h.cli.runs();
+        assert!(!runs[1].has(&["--resume"]), "{:?}", runs[1].args);
+        let context = runs[1].first("user")["message"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(context.starts_with("<earlier_conversation>") && context.contains("source=\"user\">
+Rent,1200
+</antArtifact>"), "{context}");
+        assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["cc_session"], json!(new));
+    });
+}
+
+#[test]
 fn a_session_the_cli_lost_starts_over_with_the_conversation_as_context() {
     block_on(async {
         let h = Harness::new("code");
@@ -889,5 +928,129 @@ fn a_title_comes_without_the_models_label() {
         let title = claudecode::title(&h.st, &conv, "Replace the TODO in calc.py", "Done.").await;
         assert_eq!(title.as_deref(), Some("Replace TODO comment in calc.py"));
         assert!(h.cli.runs()[0].has(&["--model", "haiku"]));
+    });
+}
+
+#[test]
+fn a_title_is_written_with_room_for_the_models_thinking() {
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.settings.write().chat_engine = "claude-code".into();
+        // what CLI 2.1 prints for a title on Haiku 5.5, which thinks some 255 tokens it can't be told not to; a line
+        // may come before the JSON
+        let answer = json!({"type": "result", "subtype": "success", "is_error": false, "duration_ms": 1843, "num_turns": 1, "result": "Soft Boiled Eggs Title",
+            "session_id": new_id(), "total_cost_usd": 0.0004, "usage": {"input_tokens": 120, "output_tokens": 270}, "permission_denials": [], "uuid": new_id()});
+        h.cli.script(vec![vec![json!(["cap", 300]), out(json!("Warning: a newer version is available")), out(answer)]]);
+        let conv = h.st.db.conv_get(&h.conv).unwrap();
+        let title = claudecode::title(&h.st, &conv, "How long do I boil an egg for a soft yolk?", "About 6 minutes.").await;
+        assert_eq!(title.as_deref(), Some("Soft Boiled Eggs"));
+        let run = &h.cli.runs()[0];
+        assert!(run.has(&["--model", "haiku"]) && run.has(&["--effort", "low"]), "{:?}", run.args);
+        assert_eq!(run.input.first(), Some(&json!("<conversation>")), "the conversation goes in on stdin, not in the arguments");
+    });
+}
+
+#[test]
+fn a_large_project_is_searched_through_the_apps_own_tools() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let p = h.st.db.project_create("Launch", "").unwrap();
+        let filler = "Unrelated meeting notes about the office plants.\n".repeat(4000);
+        let data = format!("{filler}The launch is on Friday the 13th at the harbour.\n");
+        let f = clauderust_lib::db::ProjectFile { id: new_id(), project_id: p.id.clone(), name: "notes.md".into(), mime: "text/markdown".into(), size: data.len() as i64, kind: "text".into(), data, created_at: 1 };
+        h.st.db.project_file_add(&f).unwrap();
+        h.st.db.conv_set_project(&h.conv, Some(&p.id)).unwrap();
+        let sid = new_id();
+        let mcp = |id: &str, message: Value| out(json!({"type": "control_request", "request_id": id, "request": {"subtype": "mcp_message", "server_name": "project_knowledge", "message": message}}));
+        let answered = |id: &str| read(json!({"type": "control_response", "response": {"request_id": id}}));
+        let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "project_knowledge_search", "arguments": {"query": "launch harbour"}}});
+        h.cli.script(vec![vec![
+            read_user(),
+            init(&sid),
+            mcp("mcp-1", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+            answered("mcp-1"),
+            mcp("mcp-2", call),
+            answered("mcp-2"),
+            assistant(&sid, "msg_1", "uuid-1", text("Friday the 13th.")),
+            result(&sid, 0.01),
+        ]]);
+        h.turn("When is the launch?", None).await.unwrap();
+
+        let run = &h.cli.runs()[0];
+        let prompt = run.prompt.as_deref().expect("a prompt file");
+        assert!(prompt.contains("<project_knowledge_index>") && prompt.contains("- notes.md ("), "the index, not the files");
+        assert!(!prompt.contains("office plants"), "the file isn't inlined");
+        assert!(run.input[0]["request"]["sdkMcpServers"].as_array().unwrap().contains(&json!("project_knowledge")));
+        let listed: Vec<Value> = run.answer("mcp-1")["response"]["mcp_response"]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
+        assert_eq!(listed, [json!("project_knowledge_search"), json!("project_knowledge_read")]);
+        let found = &run.answer("mcp-2")["response"]["mcp_response"]["result"];
+        assert_eq!(found["isError"], false);
+        assert!(found["content"][0]["text"].as_str().unwrap().contains("The launch is on Friday the 13th at the harbour."), "{found}");
+        // the app's own read-only tools run without a permission card
+        assert!(run.has(&["mcp__project_knowledge__project_knowledge_search"]) && run.has(&["mcp__project_knowledge__project_knowledge_read"]), "{:?}", run.args);
+    });
+}
+
+/// A stdio MCP server `web` with one tool, `echo`, connected to the app.
+async fn echo_server(h: &Harness) {
+    let script = h.cli.dir.join("echo_mcp.cjs");
+    std::fs::write(&script, r#"
+const send = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+require("readline").createInterface({ input: process.stdin }).on("line", (l) => {
+  let m; try { m = JSON.parse(l); } catch { return; }
+  if (m.id === undefined) return;
+  const result = m.method === "initialize" ? { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "web", version: "1" } }
+    : m.method === "tools/list" ? { tools: [{ name: "echo", description: "Echo the text back", inputSchema: { type: "object", properties: { text: { type: "string" } } } }] }
+    : m.method === "tools/call" ? { content: [{ type: "text", text: String(m.params.arguments.text) }] } : {};
+  send({ jsonrpc: "2.0", id: m.id, result });
+});
+"#).unwrap();
+    let config = json!({"mcpServers": {"web": {"command": "node", "args": [script.display().to_string()]}}});
+    std::fs::write(h.st.data_dir.join("mcp.json"), config.to_string()).unwrap();
+    h.st.mcp.start_all(&[]).await;
+    assert_eq!(h.st.mcp.tools().await.len(), 1, "the MCP server connected");
+}
+
+#[test]
+fn a_tool_loaded_when_needed_is_listed_to_the_cli_before_the_load_returns() {
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.settings.write().chat_engine = "claude-code".into();
+        echo_server(&h).await;
+        h.st.db.conv_set_options(&h.conv, &json!({"engine": "claude-code", "tool_access": "deferred"})).unwrap();
+        let sid = new_id();
+        let mcp = |id: &str, server: &str, message: Value| out(json!({"type": "control_request", "request_id": id, "request": {"subtype": "mcp_message", "server_name": server, "message": message}}));
+        let answered = |id: &str| read(json!({"type": "control_response", "response": {"request_id": id}}));
+        let list = |id: u64| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        let load = json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "load_tools", "arguments": {"names": ["web__echo"]}}});
+        h.cli.script(vec![vec![
+            read_user(),
+            init(&sid),
+            mcp("mcp-1", "web", list(1)),
+            answered("mcp-1"),
+            mcp("mcp-2", "tool_access", list(2)),
+            answered("mcp-2"),
+            mcp("mcp-3", "tool_access", load),
+            // the app says web's list changed, and the CLI lists it again before the load is answered
+            read(json!({"type": "control_request", "request": {"subtype": "mcp_message", "server_name": "web", "message": {"method": "notifications/tools/list_changed"}}})),
+            mcp("mcp-4", "web", list(4)),
+            answered("mcp-4"),
+            answered("mcp-3"),
+            assistant(&sid, "msg_1", "uuid-1", text("Loaded.")),
+            result(&sid, 0.01),
+        ]]);
+        h.turn("Echo hi", None).await.unwrap();
+
+        let run = &h.cli.runs()[0];
+        let names = |id: &str| -> Vec<Value> { run.answer(id)["response"]["mcp_response"]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect() };
+        assert!(names("mcp-1").is_empty(), "not loaded yet: not listed");
+        assert_eq!(names("mcp-2"), [json!("load_tools")]);
+        assert_eq!(names("mcp-4"), [json!("echo")]);
+        assert_eq!(run.answer("mcp-3")["response"]["mcp_response"]["result"]["content"][0]["text"], "Loaded: web__echo. Call them now.");
+        let at = |id: &str| run.input.iter().position(|l| l["response"]["request_id"] == id).unwrap();
+        assert!(at("mcp-4") < at("mcp-3"), "listed before the load returned");
+        assert!(run.prompt.as_deref().unwrap().contains("- web__echo: Echo the text back"));
+        assert!(run.has(&["mcp__tool_access__load_tools"]), "{:?}", run.args);
+        assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["loaded_tools"], json!(["web__echo"]));
     });
 }

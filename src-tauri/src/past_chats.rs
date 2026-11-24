@@ -40,25 +40,9 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
-/// The tools as the account engine's SDK-hosted server lists them. Their API name is the bare tool name, which
-/// no MCP server's tool can have (those are `server__tool`): that is how a call is told apart from one for a
-/// connected server that happens to have the same name.
+/// The tools as the account engine's SDK-hosted server lists them.
 pub fn mcp_tools() -> Vec<McpTool> {
-    definitions()
-        .into_iter()
-        .map(|d| {
-            let name = d["name"].as_str().unwrap_or_default().to_string();
-            McpTool {
-                server: SERVER.into(),
-                api_name: name.clone(),
-                name,
-                title: None,
-                description: d["description"].as_str().unwrap_or_default().into(),
-                input_schema: d["input_schema"].clone(),
-                read_only: true,
-            }
-        })
-        .collect()
+    crate::mcp::app_tools(SERVER, definitions())
 }
 
 /// One of these tools' answer to a call from `conv_id`: text blocks, and whether it failed.

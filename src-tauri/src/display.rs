@@ -107,6 +107,37 @@ fn set_default(key: &'static str, val: &str) {
     }
 }
 
+/// The window that had the foreground when a test copy started.
+#[cfg(windows)]
+static FOREGROUND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// A test copy's window must never keep the person's focus: Windows still
+/// activates it once WebView2 starts, even when it is shown without
+/// activation, so for a few seconds hand the foreground back whenever it lands here.
+#[cfg(windows)]
+fn give_back_foreground() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+    let prev = FOREGROUND.load(std::sync::atomic::Ordering::SeqCst);
+    if prev == 0 {
+        return;
+    }
+    std::thread::spawn(move || {
+        let me = std::process::id();
+        // from before the window exists until well after WebView2 has started
+        for _ in 0..400 {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let mut pid = 0u32;
+            // SAFETY: plain Win32 calls on window handles; a stale handle only makes them fail
+            unsafe {
+                GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+                if pid == me {
+                    SetForegroundWindow(prev as _);
+                }
+            }
+        }
+    });
+}
+
 /// Call first thing in `run()`, before the WebView starts and before other
 /// threads exist (it sets environment variables).
 pub fn prepare() {
@@ -117,6 +148,8 @@ pub fn prepare() {
     // a test copy's window sits outside every monitor (lib.rs), which Chromium would count as hidden and stop painting
     #[cfg(windows)]
     if automation() {
+        // SAFETY: no preconditions; the window the person is working in, to give back if the copy takes it
+        FOREGROUND.store(unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as isize, std::sync::atomic::Ordering::SeqCst);
         let args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
         if !args.contains("CalculateNativeWinOcclusion") {
             std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", format!("{args} --disable-features=CalculateNativeWinOcclusion"));
@@ -159,6 +192,11 @@ pub fn prepare() {
         "remote": remote,
         "software": software,
     }));
+    // last: it starts a thread, and the environment is set above
+    #[cfg(windows)]
+    if automation() {
+        give_back_foreground();
+    }
 }
 
 /// What `prepare` decided, for Settings.

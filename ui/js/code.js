@@ -5,7 +5,7 @@ import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit, on, saveLocal, loadLocal, newChatModel } from './store.js';
-import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog, convTitle, snippetHtml } from './util.js';
+import { $, esc, h, relTime, errorToast, toast, confirmDialog, searchToggle, showMenu, promptDialog, convTitle, snippetHtml, hasWords } from './util.js';
 import { createComposer } from './composer.js';
 import { startConversation } from './home.js';
 import { conversationMenu } from './chat.js';
@@ -145,8 +145,7 @@ export async function renderSessions(view) {
   list.before(filter);
   const drawSessions = (q) => {
     list.innerHTML = '';
-    const ql = (q || '').trim().toLowerCase();
-    const shown = sessions.filter((s) => !ql || `${s.title || ''} ${s.cwd || ''}`.toLowerCase().includes(ql));
+    const shown = sessions.filter((s) => hasWords(`${s.title || ''} ${s.cwd || ''}`, q));
     if (sessions.length && !shown.length) { list.innerHTML = `<div class="muted small" style="padding:10px 2px">${esc(t('no_results'))}</div>`; return; }
     const groups = new Map();
     for (const s of shown) {

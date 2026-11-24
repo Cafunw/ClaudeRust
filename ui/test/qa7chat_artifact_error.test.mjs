@@ -80,6 +80,8 @@ test('a blocked request says where it went, for the banner to say in the app\'s 
   const t = (k, v) => `${k}:${v.uri}:${v.directive}`;
   assert.equal(errorText({ message: 'raw', blocked: f.posted[0].blocked }, t), 'art_csp_blocked:https://api.example.com/x:connect-src');
   assert.equal(errorText({ message: 'raw', blocked: null }, t), 'raw', 'the page\'s own errors are shown as they are');
+  // a library the CSP doesn't list is named as such, not as a network request
+  assert.equal(errorText({ message: 'raw', blocked: { uri: 'https://esm.sh/x@1', directive: 'script-src-elem' } }, t), 'art_csp_blocked_script:https://esm.sh/x@1:script-src-elem');
 });
 
 test('the panel acknowledges every error its frame reports', () => {

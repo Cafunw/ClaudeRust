@@ -14,7 +14,7 @@ import { connectorDialog, removeConnector } from './mcp_connector.js';
 import { diagnosticsReport } from './diagnostics.js';
 import { openDirectory } from './connector_directory.js';
 import { installExtension, installedExtension, extensionControls, nodeRuntimeRow } from './extensions_page.js';
-import { openExtensionDirectory } from './extension_directory.js';
+import { openExtensionDirectory, updateExtension } from './extension_directory.js';
 import { renderSkills } from './skills_page.js';
 import { renderMemory } from './memory_page.js';
 import { styleEditor } from './style_gen.js';
@@ -364,10 +364,13 @@ const RENDER = {
     const actions = h('<div class="row" style="margin-bottom:16px;flex-wrap:wrap"></div>');
     const servers = h('<div></div>');
     body.append(actions, servers, nodeRuntimeRow());
+    if ('extensions_auto_update' in store.settings) body.appendChild(row(t('ext_auto_update'), t('ext_auto_update_d'), toggle('extensions_auto_update')));
     let status;
     const draw = async (st) => {
       status = st || await call('mcp_status');
       store.mcpServers = status.servers;
+      // installed extensions the directory lists a newer version of, by server name
+      const updates = new Map((await call('extension_directory').catch(() => [])).filter((e) => e.update && e.asset && e.installed).map((e) => [e.installed.name, e]));
       servers.innerHTML = '';
       // a config that can't be used starts no servers: say why
       if (status.config_problem) servers.appendChild(h(`<div class="notice error" style="margin:0 0 14px">${icon('alert', 15)}<div class="grow small">${esc(status.config_problem)}</div></div>`));
@@ -375,7 +378,8 @@ const RENDER = {
       for (const s of status.servers) {
         const card = serverCard(s, draw, status);
         const ext = installedExtension(status, s.name);
-        if (ext) card.querySelector('.head').after(extensionControls(ext, draw));
+        const e = updates.get(s.name);
+        if (ext) card.querySelector('.head').after(extensionControls(ext, draw, e && { version: e.version, run: (b) => updateExtension(e, b, draw) }));
         servers.appendChild(card);
       }
       actions.innerHTML = '';

@@ -1,8 +1,9 @@
-//! Text of Excel workbooks (.xlsx: each sheet as CSV) and PowerPoint
-//! presentations (.pptx: the text of each slide). They are zips from
-//! anywhere: the entry count, the bytes read of each part and the text made
-//! are bounded, entry names are only looked up in the same zip, nothing
-//! nested is opened, and no entity but XML's own is expanded.
+//! Text of Excel workbooks (.xlsx: each sheet as CSV), PowerPoint
+//! presentations (.pptx: the text of each slide), OpenDocument texts (.odt),
+//! EPUB books (their chapters in reading order) and RTF documents. The zips
+//! come from anywhere: the entry count, the bytes read of each part and the
+//! text made are bounded, entry names are only looked up in the same zip,
+//! nothing nested is opened, and no entity but XML's own is expanded.
 
 use crate::attachments::refuse;
 use crate::error::AppResult;
@@ -74,6 +75,390 @@ pub fn pptx_text(bytes: &[u8]) -> AppResult<String> {
         out.line("");
     }
     out.finish(p.what, "slides")
+}
+
+/// The most spaces one `<text:s text:c="n"/>` stands for: with more, a small
+/// file could make text far larger than itself.
+const MAX_SPACES: usize = 16;
+
+/// The text of an OpenDocument text (content.xml): a paragraph or heading
+/// a line, a table row's cells tab-separated; comments and the deleted text
+/// of tracked changes are left out.
+pub fn odt_text(bytes: &[u8]) -> AppResult<String> {
+    let mut p = Package::open(bytes, "OpenDocument text", MAX_PART_BYTES)?;
+    let (xml, cut) = p.part("content.xml")?.ok_or_else(|| refuse("office_invalid", "Not a valid OpenDocument text: content.xml is missing.".into()))?;
+    let mut out = Out::default();
+    let (mut para, mut row) = (String::new(), Vec::<String>::new());
+    let (mut body, mut skip, mut cell, mut stop) = (false, 0usize, 0usize, false);
+    walk(&xml, |t| {
+        if stop {
+            return;
+        }
+        match t {
+            Tok::Open("body", _) => body = true,
+            Tok::Close("body") => body = false,
+            Tok::Open("annotation" | "tracked-changes", _) => skip += 1,
+            Tok::Close("annotation" | "tracked-changes") => skip = skip.saturating_sub(1),
+            _ if !body || skip > 0 => {}
+            Tok::Text(s) => collapse_into(&mut para, &unescape(s)),
+            Tok::Open("s", a) => {
+                let n = attr(a, |k| k.ends_with(":c")).and_then(|c| c.trim().parse().ok()).unwrap_or(1usize);
+                para.extend(std::iter::repeat_n(' ', n.min(MAX_SPACES)));
+            }
+            Tok::Open("tab", _) => para.push('\t'),
+            Tok::Open("line-break", _) => para.push('\n'),
+            Tok::Open("table-cell" | "covered-table-cell", _) => cell += 1,
+            Tok::Close("p" | "h") if cell > 0 => para.push(' '),
+            Tok::Close("p" | "h") => {
+                stop = !out.line(para.trim_end());
+                para.clear();
+            }
+            Tok::Close("table-cell" | "covered-table-cell") => {
+                cell = cell.saturating_sub(1);
+                row.push(para.trim().to_string());
+                para.clear();
+            }
+            Tok::Close("table-row") => {
+                while row.last().is_some_and(String::is_empty) {
+                    row.pop();
+                }
+                stop = !out.line(&row.join("\t"));
+                row.clear();
+            }
+            _ => {}
+        }
+    });
+    if cut {
+        out.line(&format!("[Only the first {} MB of this document were read.]", MAX_PART_BYTES >> 20));
+    }
+    out.finish(p.what, "text")
+}
+
+/// The text of an EPUB book: the XHTML documents its spine lists, in that
+/// order, a block (paragraph, heading, list item, table row) a line.
+pub fn epub_text(bytes: &[u8]) -> AppResult<String> {
+    let mut p = Package::open(bytes, "EPUB book", MAX_PART_BYTES)?;
+    let invalid = |why: &str| refuse("office_invalid", format!("Not a valid EPUB book: {why}."));
+    let (container, _) = p.part("META-INF/container.xml")?.ok_or_else(|| invalid("META-INF/container.xml is missing"))?;
+    let mut opf = None;
+    walk(&container, |t| {
+        if let Tok::Open("rootfile", a) = t {
+            opf = opf.take().or_else(|| attr(a, |k| k == "full-path").map(|v| unescape(v).into_owned()));
+        }
+    });
+    let opf = opf.ok_or_else(|| invalid("its package document isn't named"))?;
+    let (package, _) = p.part(&opf)?.ok_or_else(|| invalid("its package document is missing"))?;
+    let (mut items, mut spine) = (HashMap::new(), vec![]);
+    walk(&package, |t| match t {
+        Tok::Open("item", a) => {
+            if let (Some(id), Some(href)) = (attr(a, |k| k == "id"), attr(a, |k| k == "href")) {
+                items.insert(id.to_string(), unescape(href).into_owned());
+            }
+        }
+        Tok::Open("itemref", a) if spine.len() < MAX_ENTRIES => spine.extend(attr(a, |k| k == "idref").map(str::to_string)),
+        _ => {}
+    });
+    let dir = opf.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut out = Out::default();
+    for id in spine {
+        let Some(href) = items.get(&id) else { continue };
+        let Some((xhtml, cut)) = p.part(&zip_path(dir, href))? else { continue };
+        if !xhtml_text(&xhtml, &mut out) || (cut && !out.line(&format!("[Only the first {} MB of this chapter were read.]", MAX_PART_BYTES >> 20))) {
+            break;
+        }
+    }
+    out.finish(p.what, "chapters")
+}
+
+/// Elements that start and end a line of their own.
+const BLOCKS: &[&str] = &[
+    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "tr", "table", "ul", "ol", "blockquote", "pre", "section", "article",
+    "header", "footer", "aside", "nav", "figure", "figcaption", "hr", "body",
+];
+
+/// Adds the text of an XHTML document to `out`; false once `out` is full.
+fn xhtml_text(xml: &str, out: &mut Out) -> bool {
+    let (mut para, mut skip, mut pre, mut ok) = (String::new(), 0usize, 0usize, true);
+    let flush = |para: &mut String, out: &mut Out| {
+        let line = para.trim();
+        let added = line.is_empty() || out.line(line);
+        para.clear();
+        added
+    };
+    walk(xml, |t| {
+        if !ok {
+            return;
+        }
+        let (name, open) = match t {
+            Tok::Open(n, _) => (n, true),
+            Tok::Close(n) => (n, false),
+            Tok::Text(_) if skip > 0 => return,
+            Tok::Text(s) if pre > 0 => return para.push_str(&unescape(s)),
+            Tok::Text(s) => return collapse_into(&mut para, &unescape(s)),
+        };
+        match name {
+            "head" | "script" | "style" => skip = if open { skip + 1 } else { skip.saturating_sub(1) },
+            _ if skip > 0 => {}
+            "br" if open => para.push('\n'),
+            "td" | "th" if !open => para.push('\t'),
+            _ if BLOCKS.contains(&name) => {
+                if name == "pre" {
+                    pre = if open { pre + 1 } else { pre.saturating_sub(1) };
+                }
+                ok = flush(&mut para, &mut *out);
+            }
+            _ => {}
+        }
+    });
+    ok && flush(&mut para, out)
+}
+
+/// Text added as HTML and ODF show it: a run of whitespace is one space, none at a line's start.
+fn collapse_into(para: &mut String, s: &str) {
+    for c in s.chars() {
+        if matches!(c, ' ' | '\t' | '\n' | '\r') {
+            if !para.is_empty() && !para.ends_with([' ', '\t', '\n']) {
+                para.push(' ');
+            }
+        } else {
+            para.push(c);
+        }
+    }
+}
+
+/// The entry `href` (percent-encoded, maybe with a #fragment) names,
+/// relative to the zip directory `dir`; `..` never leaves the zip's root.
+fn zip_path(dir: &str, href: &str) -> String {
+    let href = percent_decode(href.split('#').next().unwrap_or(""));
+    let mut parts: Vec<&str> = if href.starts_with('/') { vec![] } else { dir.split('/').filter(|s| !s.is_empty()).collect() };
+    for seg in href.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn percent_decode(s: &str) -> String {
+    let (b, mut out, mut i) = (s.as_bytes(), Vec::with_capacity(s.len()), 0);
+    while i < b.len() {
+        match s.get(i + 1..i + 3).filter(|_| b[i] == b'%').and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            Some(v) => {
+                out.push(v);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Groups nested deeper than this keep the state of the one at this depth
+/// (a file of braces would otherwise make a stack as large as itself).
+const MAX_RTF_DEPTH: usize = 1024;
+
+/// Destinations whose text isn't the document's: tables, metadata,
+/// headers and footers, pictures and embedded objects, list numbering.
+const RTF_SKIPPED: &[&[u8]] = &[
+    b"fonttbl", b"colortbl", b"stylesheet", b"info", b"pict", b"object", b"objdata", b"header", b"headerl", b"headerr", b"headerf",
+    b"footer", b"footerl", b"footerr", b"footerf", b"listtable", b"listoverridetable", b"revtbl", b"filetbl", b"listtext", b"pntext",
+    b"pntxta", b"pntxtb", b"ftnsep", b"ftnsepc", b"aftnsep", b"aftnsepc", b"fldinst", b"themedata", b"datastore", b"latentstyles",
+];
+
+/// Text made from an RTF document so far.
+struct Rtf {
+    out: String,
+    /// bytes in the document's code page not decoded yet (a double-byte
+    /// character comes as two `\'hh`)
+    bytes: Vec<u8>,
+    code_page: &'static encoding_rs::Encoding,
+    /// the high half of a `\uN` surrogate pair
+    high: Option<u32>,
+}
+
+impl Rtf {
+    fn flush(&mut self) {
+        if !self.bytes.is_empty() {
+            self.out.push_str(&self.code_page.decode_without_bom_handling(&self.bytes).0);
+            self.bytes.clear();
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.flush();
+        if self.high.take().is_some() {
+            self.out.push(char::REPLACEMENT_CHARACTER);
+        }
+        self.out.push(c);
+    }
+
+    /// The UTF-16 unit `\uN` writes (negative above 32767).
+    fn unit(&mut self, n: i64) {
+        let u = (if n < 0 { n + 65536 } else { n }) as u32;
+        match (self.high, u) {
+            (_, 0xD800..=0xDBFF) => {
+                self.flush();
+                self.high = Some(u);
+            }
+            (Some(h), 0xDC00..=0xDFFF) => {
+                self.high = None;
+                self.push(char::from_u32(0x10000 + ((h - 0xD800) << 10) + (u - 0xDC00)).unwrap_or(char::REPLACEMENT_CHARACTER));
+            }
+            _ => self.push(char::from_u32(u).unwrap_or(char::REPLACEMENT_CHARACTER)),
+        }
+    }
+}
+
+/// The Windows code page `\ansicpgN` names.
+fn code_page(n: i64) -> Option<&'static encoding_rs::Encoding> {
+    let label = match n {
+        874 | 1250..=1258 => format!("windows-{n}"),
+        932 => "shift_jis".into(),
+        936 => "gbk".into(),
+        949 => "euc-kr".into(),
+        950 => "big5".into(),
+        10000 => "macintosh".into(),
+        65001 => "utf-8".into(),
+        _ => return None,
+    };
+    encoding_rs::Encoding::for_label(label.as_bytes())
+}
+
+/// The plain text of an RTF document: control words and symbols, `\uN`
+/// and `\'hh` (in the `\ansicpg` code page) are read; the destinations in
+/// `RTF_SKIPPED`, `\*` destinations and `\bin` data are skipped.
+// shortcut: `\'hh` is read in the document's code page, not in its font's `\fcharset`; follow the font if mixed-script files come out wrong.
+pub fn rtf_text(bytes: &[u8]) -> AppResult<String> {
+    let b = bytes;
+    let mut r = Rtf { out: String::new(), bytes: vec![], code_page: encoding_rs::WINDOWS_1252, high: None };
+    // a group's state: skipped, and how many characters stand in for a \uN
+    let (mut skip, mut uc) = (false, 1usize);
+    let (mut stack, mut deeper) = (Vec::<(bool, usize)>::new(), 0usize);
+    // the stand-ins of the last \uN still to drop
+    let mut drop = 0usize;
+    let mut i = 0;
+    while i < b.len() && r.out.len() <= MAX_TEXT {
+        let c = b[i];
+        i += 1;
+        let text = match c {
+            b'{' | b'}' => {
+                r.flush();
+                drop = 0;
+                if c == b'}' && deeper > 0 {
+                    deeper -= 1;
+                } else if c == b'}' {
+                    (skip, uc) = stack.pop().unwrap_or((skip, uc));
+                } else if stack.len() < MAX_RTF_DEPTH {
+                    stack.push((skip, uc));
+                } else {
+                    deeper += 1;
+                }
+                continue;
+            }
+            b'\r' | b'\n' => continue,
+            b'\\' if b.get(i).is_some_and(u8::is_ascii_alphabetic) => {
+                let word = i;
+                while b.get(i).is_some_and(u8::is_ascii_alphabetic) {
+                    i += 1;
+                }
+                let word = &b[word..i];
+                let neg = b.get(i) == Some(&b'-') && b.get(i + 1).is_some_and(u8::is_ascii_digit);
+                i += usize::from(neg);
+                let digits = i;
+                while b.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+                let n = std::str::from_utf8(&b[digits..i]).ok().and_then(|d| d.parse::<i64>().ok()).map(|n| if neg { -n } else { n });
+                i += usize::from(b.get(i) == Some(&b' '));
+                match (word, n) {
+                    (b"bin", n) => i = i.saturating_add(n.unwrap_or(0).max(0) as usize).min(b.len()),
+                    (b"uc", Some(n)) => uc = n.clamp(0, 16) as usize,
+                    (w, _) if RTF_SKIPPED.contains(&w) => skip = true,
+                    _ if skip => {}
+                    (b"ansicpg", Some(n)) => {
+                        r.flush();
+                        r.code_page = code_page(n).unwrap_or(r.code_page);
+                    }
+                    (b"u", Some(n)) if (-32768..=65535).contains(&n) => {
+                        r.unit(n);
+                        drop = uc;
+                    }
+                    (b"par" | b"line" | b"sect" | b"page" | b"row" | b"nestrow", _) => r.push('\n'),
+                    (b"tab" | b"cell" | b"nestcell", _) => r.push('\t'),
+                    (b"emdash", _) => r.push('—'),
+                    (b"endash", _) => r.push('–'),
+                    (b"bullet", _) => r.push('•'),
+                    (b"lquote", _) => r.push('‘'),
+                    (b"rquote", _) => r.push('’'),
+                    (b"ldblquote", _) => r.push('“'),
+                    (b"rdblquote", _) => r.push('”'),
+                    (b"emspace" | b"enspace" | b"qmspace", _) => r.push(' '),
+                    _ => {}
+                }
+                continue;
+            }
+            b'\\' => {
+                let Some(&s) = b.get(i) else { break };
+                i += 1;
+                match s {
+                    b'\'' => match b.get(i..i + 2).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                        Some(v) => {
+                            i += 2;
+                            v
+                        }
+                        None => continue,
+                    },
+                    b'\\' | b'{' | b'}' => s,
+                    b'*' => {
+                        skip = true;
+                        continue;
+                    }
+                    b'~' if !skip => {
+                        r.push('\u{a0}');
+                        continue;
+                    }
+                    b'_' if !skip => {
+                        r.push('-');
+                        continue;
+                    }
+                    b'\r' | b'\n' if !skip => {
+                        r.push('\n');
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+            c => c,
+        };
+        if drop > 0 {
+            drop -= 1;
+        } else if !skip {
+            if r.high.take().is_some() {
+                r.out.push(char::REPLACEMENT_CHARACTER);
+            }
+            r.bytes.push(text);
+        }
+    }
+    r.flush();
+    let full = r.out.len() > MAX_TEXT;
+    if full {
+        let mut end = MAX_TEXT;
+        while !r.out.is_char_boundary(end) {
+            end -= 1;
+        }
+        r.out.truncate(end);
+    }
+    let mut out = Out::default();
+    out.text = r.out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_matches('\n').to_string();
+    out.full = full;
+    out.finish("RTF document", "text")
 }
 
 struct Package<'a> {
@@ -337,6 +722,8 @@ fn unescape(s: &str) -> Cow<'_, str> {
             "amp" => Some('&'),
             "quot" => Some('"'),
             "apos" => Some('\''),
+            // XHTML's, in EPUB books that declare its DTD
+            "nbsp" => Some('\u{a0}'),
             _ => {
                 let num = n.strip_prefix('#')?;
                 let code = match num.strip_prefix(['x', 'X']) {
@@ -427,9 +814,128 @@ pub(crate) fn pptx_of(slides: &[&[&str]]) -> Vec<u8> {
     zip_owned(&files)
 }
 
+/// An EPUB book whose spine lists `chapters` (path under OEBPS, XHTML body)
+/// in that order, its manifest in the reverse order.
+#[cfg(test)]
+pub(crate) fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
+    let items: String = chapters.iter().enumerate().rev().map(|(i, (href, _))| format!(r#"<item id="c{i}" href="{href}" media-type="application/xhtml+xml"/>"#)).collect();
+    let spine: String = (0..chapters.len()).map(|i| format!(r#"<itemref idref="c{i}"/>"#)).collect();
+    let mut files = vec![
+        ("mimetype".to_string(), "application/epub+zip".to_string()),
+        ("META-INF/container.xml".to_string(), r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.to_string()),
+        ("OEBPS/content.opf".to_string(), format!("<package><manifest>{items}</manifest><spine>{spine}</spine></package>")),
+    ];
+    for (href, body) in chapters {
+        files.push((zip_path("OEBPS", href), format!("<html><head><title>T</title><style>p{{}}</style></head><body>{body}</body></html>")));
+    }
+    zip_owned(&files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odt_paragraphs_tables_and_spaces() {
+        let content = r#"<?xml version="1.0"?><office:document-content><office:automatic-styles><style:style style:name="P1">ignored</style:style></office:automatic-styles>
+            <office:body><office:text>
+              <text:h text:outline-level="1">Title &amp; more</text:h>
+              <text:p>One  <text:span>two</text:span>
+                three<text:s text:c="3"/>x<text:tab/>y<text:line-break/>z</text:p>
+              <text:p/>
+              <text:p>Note<office:annotation><text:p>a comment</text:p></office:annotation> kept</text:p>
+              <text:tracked-changes><text:changed-region><text:deletion><text:p>deleted</text:p></text:deletion></text:changed-region></text:tracked-changes>
+              <table:table><table:table-row><table:table-cell><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:covered-table-cell/><table:table-cell><text:p>c</text:p></table:table-cell><table:table-cell/></table:table-row>
+              <table:table-row><table:table-cell><text:p>1</text:p></table:table-cell></table:table-row></table:table>
+            </office:text></office:body></office:document-content>"#;
+        let text = odt_text(&zip_of(&[("mimetype", "application/vnd.oasis.opendocument.text"), ("content.xml", content)])).unwrap();
+        assert_eq!(text, "Title & more\nOne two three   x\ty\nz\n\nNote kept\na b\t\tc\n1");
+    }
+
+    #[test]
+    fn hostile_odt_is_bounded() {
+        assert!(odt_text(b"PK\x03\x04 nope").unwrap_err().to_string().contains("Not a valid OpenDocument text"));
+        assert_eq!(odt_text(&zip_of(&[("styles.xml", "<x/>")])).unwrap_err().to_string(), "Not a valid OpenDocument text: content.xml is missing.");
+        // a space count can't make the text larger than the file
+        let spaces = format!("<office:body><text:p>a{}b</text:p></office:body>", r#"<text:s text:c="99999999999999"/>"#.repeat(3));
+        assert_eq!(odt_text(&zip_of(&[("content.xml", &spaces)])).unwrap(), format!("a{}b", " ".repeat(3 * MAX_SPACES)));
+        // text outside the body (styles, settings) isn't the document's
+        assert!(odt_text(&zip_of(&[("content.xml", "<office:styles><text:p>x</text:p></office:styles>")])).unwrap_err().to_string().contains("no text"));
+        // a part that inflates without end is cut at the part limit; the text made stays under MAX_TEXT
+        let big = format!("<office:body>{}</office:body>", "<text:p>words and more words</text:p>".repeat(60_000));
+        let text = odt_text(&zip_of(&[("content.xml", &big)])).unwrap();
+        assert!(text.len() < crate::logdigest::TEXT_DIGEST_OVER && text.ends_with("KB.]"), "{}", text.len());
+    }
+
+    #[test]
+    fn epub_chapters_in_spine_order() {
+        let book = epub_of(&[
+            ("text/ch%201.xhtml", "<h1>Chapter&#160;1</h1><p>It  was\n  a <em>dark</em> night.</p><script>alert(1)</script><p>Line<br/>break &nbsp;x</p>"),
+            ("../extra/two.xhtml#start", "<ul><li>one</li><li>two</li></ul><table><tr><td>a</td><td>b</td></tr></table><pre>  keep\n    this</pre>"),
+        ]);
+        assert_eq!(epub_text(&book).unwrap(), "Chapter\u{a0}1\nIt was a dark night.\nLine\nbreak \u{a0}x\none\ntwo\na\tb\nkeep\n    this");
+    }
+
+    #[test]
+    fn hostile_epubs_are_bounded() {
+        assert!(epub_text(&zip_of(&[("a.txt", "x")])).unwrap_err().to_string().contains("container.xml is missing"));
+        let no_opf = zip_of(&[("META-INF/container.xml", "<container/>")]);
+        assert!(epub_text(&no_opf).unwrap_err().to_string().contains("isn't named"));
+        // a spine of missing or outside items reads nothing; `..` stays inside the zip
+        let opf = r#"<package><manifest><item id="a" href="../../../../etc/passwd"/></manifest><spine><itemref idref="a"/><itemref idref="nope"/></spine></package>"#;
+        let book = zip_of(&[("META-INF/container.xml", r#"<rootfile full-path="OEBPS/p.opf"/>"#), ("OEBPS/p.opf", opf)]);
+        assert_eq!(epub_text(&book).unwrap_err().to_string(), "This EPUB book has no chapters to read.");
+        assert_eq!(zip_path("OEBPS/text", "../../../../etc/passwd"), "etc/passwd");
+        assert_eq!(zip_path("OEBPS", "/abs/x.xhtml"), "abs/x.xhtml");
+        // one chapter listed over and over stops once the text is full
+        let chapter = format!("<p>{}</p>", "x".repeat(10_000));
+        let spine: String = r#"<itemref idref="c"/>"#.repeat(MAX_ENTRIES * 2);
+        let opf = format!(r#"<package><manifest><item id="c" href="c.xhtml"/></manifest><spine>{spine}</spine></package>"#);
+        let book = zip_of(&[("META-INF/container.xml", r#"<rootfile full-path="p.opf"/>"#), ("p.opf", &opf), ("c.xhtml", &chapter)]);
+        let text = epub_text(&book).unwrap();
+        assert!(text.len() < crate::logdigest::TEXT_DIGEST_OVER && text.ends_with("KB.]"));
+        assert_eq!(percent_decode("a%20b%zz%4"), "a b%zz%4");
+    }
+
+    #[test]
+    fn rtf_text_and_escapes() {
+        let doc = br#"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fswiss Arial;}{\f1 Courier;}}{\colortbl;\red255\green0\blue0;}
+{\stylesheet{\s0 Normal;}}{\info{\title Secret title}{\author Me}}{\*\generator Riched20 10.0;}\viewkind4\uc1
+\pard\f0\fs24 Caf\'e9 \b bold\b0  \{braces\} \\ back\par
+Tab\tab here\line next\par
+{\field{\*\fldinst HYPERLINK "https://x.test"}{\fldrslt link text}}\par
+\u351?ey \uc0\u287 x \uc1\u-10179?\u-8704? \emdash  \ldblquote q\rdblquote\par
+{\pict\pngblip 89504e470d0a}{\object{\*\objdata 0105}}\bin4 {}}}after\par
+{\header head}{\footer foot}End}"#;
+        assert_eq!(rtf_text(doc).unwrap(), "Café bold {braces} \\ back\nTab\there\nnext\nlink text\nşey ğx 😀 — “q”\nafter\nEnd");
+        // the document's code page: Turkish, and a double-byte one
+        assert_eq!(rtf_text(br"{\rtf1\ansi\ansicpg1254 \'fd\'fe\'f0\'dd}").unwrap(), "ışğİ");
+        assert_eq!(rtf_text(br"{\rtf1\ansi\ansicpg932 \'82\'a0}").unwrap(), "あ");
+        assert_eq!(rtf_text(br"{\rtf1\ansicpg99999 \'e9}").unwrap(), "é", "an unknown code page keeps the default");
+    }
+
+    #[test]
+    fn hostile_rtf_is_bounded() {
+        // deep nesting, unbalanced braces, cut escapes, huge parameters
+        let deep = [b"{\\rtf1 a".as_slice(), &b"{".repeat(1_000_000), b"b", &b"}".repeat(2_000_000), b"c"].concat();
+        assert_eq!(rtf_text(&deep).unwrap(), "abc");
+        assert_eq!(rtf_text(br"{\rtf1 x\'").unwrap(), "x");
+        assert_eq!(rtf_text(br"{\rtf1 x\'4").unwrap(), "x4");
+        assert_eq!(rtf_text(br"{\rtf1 x\").unwrap(), "x");
+        assert_eq!(rtf_text(br"{\rtf1 x\u99999999999999? y\u-99999 z}").unwrap(), "x? yz");
+        assert_eq!(rtf_text(br"{\rtf1 x\bin99999999999999 secret}").unwrap(), "x");
+        assert_eq!(rtf_text(br"{\rtf1 x\bin-5 y}").unwrap(), "xy");
+        assert_eq!(rtf_text(br"{\rtf1 \uc99999999999\u65 abc}").unwrap(), "A");
+        // a lone or unpaired surrogate is a replacement character
+        assert_eq!(rtf_text(br"{\rtf1 \u-10179?x\u-8704?}").unwrap(), "\u{fffd}x\u{fffd}");
+        let long_word = [b"{\\rtf1 ".as_slice(), &b"a".repeat(100), b"\\", &b"z".repeat(100_000), b" end}"].concat();
+        assert_eq!(rtf_text(&long_word).unwrap(), "a".repeat(100) + "end");
+        // the text made is bounded
+        let huge = [b"{\\rtf1 ".as_slice(), &b"word ".repeat(400_000), b"}"].concat();
+        let text = rtf_text(&huge).unwrap();
+        assert!(text.len() < crate::logdigest::TEXT_DIGEST_OVER && text.ends_with("KB.]"));
+        assert!(rtf_text(br"{\rtf1{\*\generator x}{\fonttbl{\f0 A;}}}").unwrap_err().to_string().contains("no text"));
+    }
 
     #[test]
     fn sheets_become_csv_in_workbook_order() {

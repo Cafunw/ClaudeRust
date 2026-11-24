@@ -233,13 +233,36 @@ pub fn install_from(zip_path: &Path, extensions_dir: &Path, config_path: &Path, 
         return Err(AppError::coded("ext_signature_invalid", Value::Null, "The extension's signature doesn't match the file: it was changed after it was signed. It was not installed."));
     }
     let name = sanitize_name(manifest["name"].as_str().unwrap_or("extension"));
+    // an update keeps the settings the installed version has for what `user_values` leaves out
+    let mut values = saved_values(&name, config_path).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    if let (Some(v), Some(given)) = (values.as_object_mut(), user_values.as_object()) {
+        v.extend(given.clone());
+    }
     let tmp = staging_dir(extensions_dir, &name)?;
-    let checked = unzip(zip_path, &tmp).and_then(|_| dry_run(&tmp, &name, &manifest, extensions_dir, user_values));
+    let checked = unzip(zip_path, &tmp).and_then(|_| dry_run(&tmp, &name, &manifest, extensions_dir, &values));
     if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(e);
     }
-    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, user_values, true, source))
+    swap_in(&tmp, &extensions_dir.join(&name), |dir| register(dir, &name, &manifest, config_path, &values, true, source))
+}
+
+/// The settings saved for installed extension `name` (a manifest name; secrets as
+/// references), or None when no extension is installed under that name.
+fn saved_values(name: &str, config_path: &Path) -> Option<Value> {
+    let x = &mcp::read_config(config_path)["mcpServers"][sanitize_name(name)]["extension"];
+    x.is_object().then(|| x["user_config"].clone())
+}
+
+/// Whether the bundle `info` (inspect's reply) can replace the installed extension of its
+/// name without anyone looking at it: signed by a trusted publisher, for this system, with
+/// what it runs on there, asking for no setting the installed version didn't have.
+pub fn quiet_update(info: &Value, config_path: &Path) -> bool {
+    let Some(saved) = saved_values(info["name"].as_str().unwrap_or("extension"), config_path) else { return false };
+    info["signature"]["status"] == "trusted"
+        && info["compatible"] != false
+        && info["runtime_missing"].is_null()
+        && info["user_config"].as_object().into_iter().flatten().all(|(k, _)| saved.get(k).is_some())
 }
 
 /// Install an extension that is already unpacked in a folder (for example one
@@ -835,6 +858,40 @@ mod tests {
         std::fs::write(&bad, signed).unwrap();
         assert_eq!(install(&bad, &ext, &cfg, &json!({})).unwrap_err().kind(), "ext_signature_invalid");
         assert!(!ext.join("signed-demo").exists());
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn an_update_keeps_its_settings_and_goes_in_quietly_only_when_nothing_needs_a_look() {
+        let tmp = std::env::temp_dir().join(format!("ext-upd-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ext, cfg) = (tmp.join("ext"), tmp.join("config.json"));
+        let spec = json!({"token": {"type": "string", "sensitive": true, "required": true}, "dir": {"type": "directory", "default": "/a"}});
+        let mk = |file: &str, name: &str, version: &str, user_config: &Value| {
+            let p = tmp.join(file);
+            bundle(&p, &json!({"name": name, "version": version, "server": {"type": "node", "mcp_config": {"command": "node", "args": ["--dir=${user_config.dir}"], "env": {"TOKEN": "${user_config.token}"}}}, "user_config": user_config}), &[]);
+            p
+        };
+        install(&mk("1.mcpb", "upd", "1.0.0", &spec), &ext, &cfg, &json!({"token": "s3cret", "dir": "/b"})).unwrap();
+        let v2 = mk("2.mcpb", "upd", "1.1.0", &spec);
+        // given nothing, the update takes the installed version's settings
+        install_from(&v2, &ext, &cfg, &json!({}), None).unwrap();
+        let srv = &mcp::read_config(&cfg)["mcpServers"]["upd"];
+        assert_eq!((srv["extension"]["version"].as_str(), srv["args"][0].as_str(), srv["env"]["TOKEN"].as_str()), (Some("1.1.0"), Some("--dir=/b"), Some("s3cret")));
+        // what the bundle runs on is there in this test, whatever the machine has
+        let seen = |p: &Path, status: &str| {
+            let mut i = inspect(p).unwrap();
+            i["signature"]["status"] = json!(status);
+            i["runtime_missing"] = Value::Null;
+            i
+        };
+        assert!(quiet_update(&seen(&v2, "trusted"), &cfg));
+        assert!(!quiet_update(&seen(&v2, "untrusted"), &cfg), "not signed by a trusted publisher");
+        assert!(!quiet_update(&seen(&v2, "unsigned"), &cfg));
+        let mut more = spec.clone();
+        more["region"] = json!({"type": "string"});
+        assert!(!quiet_update(&seen(&mk("3.mcpb", "upd", "1.2.0", &more), "trusted"), &cfg), "asks for a new setting");
+        assert!(!quiet_update(&seen(&mk("o.mcpb", "other", "1.0.0", &spec), "trusted"), &cfg), "nothing installed under its name");
         let _ = std::fs::remove_dir_all(tmp);
     }
 }

@@ -1036,3 +1036,63 @@ fn a_large_project_is_searched_through_a_tool() {
         assert!(answer.starts_with("<passage file=\"notes.md\"") && answer.contains("Photosynthesis happens in the chloroplast."), "{answer}");
     });
 }
+
+/// The names of the tools a request offered.
+fn offered(body: &Value) -> Vec<String> {
+    body["tools"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str().map(String::from)).collect()
+}
+
+#[test]
+fn a_chat_that_loads_tools_when_needed_sends_a_schema_once_the_model_loads_it() {
+    block_on(async {
+        let api = api(|b| {
+            let msgs = b["messages"].as_array().unwrap();
+            let results = msgs.iter().filter(|m| m["content"].as_array().is_some_and(|c| c.iter().any(|x| x["type"] == "tool_result"))).count();
+            Reply::Stream(match results {
+                0 => reply(b, vec![tool_block(0, "toolu_1", "load_tools", &json!({"names": ["web__echo", "web__nope"]}))], "tool_use"),
+                1 => reply(b, vec![tool_block(0, "toolu_2", "web__echo", &json!({"text": "hi"}))], "tool_use"),
+                _ => reply(b, vec![text_block(0, &["Done."])], "end_turn"),
+            })
+        })
+        .await;
+        let h = chat(&api);
+        std::fs::write(h.dir.0.join("mcp.json"), json!({"mcpServers": {"web": {"url": format!("{}/mcp", api.url)}}}).to_string()).unwrap();
+        h.st.mcp.start_all(&[]).await;
+        h.st.settings.write().tool_policies.insert("web/echo".into(), json!("allow"));
+        h.st.db.conv_set_options(&h.conv, &json!({"tool_access": "deferred"})).unwrap();
+        h.send("Echo hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+
+        let sent = api.streams();
+        assert_eq!(sent.len(), 3);
+        // first only the tool's name and line in the prompt, and load_tools
+        let first = offered(&sent[0]);
+        assert!(first.contains(&"load_tools".to_string()) && !first.contains(&"web__echo".to_string()), "{first:?}");
+        let system = sent[0]["system"].to_string();
+        assert!(system.contains("- web__echo: Echo the text back"), "{system}");
+        let loaded = sent[1]["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"].to_string();
+        assert!(loaded.contains("Loaded: web__echo.") && loaded.contains("Not available in this chat: web__nope."), "{loaded}");
+        // then its schema, from the next request on; everything is loaded, so load_tools goes
+        let second = offered(&sent[1]);
+        assert!(second.contains(&"web__echo".to_string()) && !second.contains(&"load_tools".to_string()), "{second:?}");
+        assert!(!sent[1]["system"].to_string().contains("<available_tools>"));
+        assert_eq!(api.mcp_calls().len(), 1, "the loaded tool ran");
+        assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["loaded_tools"], json!(["web__echo"]), "kept for the conversation");
+    });
+}
+
+#[test]
+fn a_switched_off_tool_is_neither_listed_nor_loadable() {
+    block_on(async {
+        let api = api(|b| Reply::Stream(reply(b, vec![text_block(0, &["Hi."])], "end_turn"))).await;
+        let h = chat(&api);
+        std::fs::write(h.dir.0.join("mcp.json"), json!({"mcpServers": {"web": {"url": format!("{}/mcp", api.url)}}}).to_string()).unwrap();
+        h.st.mcp.start_all(&[]).await;
+        h.st.db.conv_set_options(&h.conv, &json!({"tool_access": "deferred", "disabled_tools": ["web__echo"]})).unwrap();
+        h.send("Hi");
+        assert_eq!(h.ended().await["error"], Value::Null);
+        let sent = api.streams();
+        assert!(!offered(&sent[0]).iter().any(|n| n == "load_tools" || n == "web__echo"), "{:?}", offered(&sent[0]));
+        assert!(!sent[0]["system"].to_string().contains("web__echo"));
+    });
+}

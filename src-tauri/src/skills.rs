@@ -378,7 +378,7 @@ pub async fn skill_set_enabled(name: String, scope: String, project: Option<Stri
 pub async fn skill_pick_file(app: tauri::AppHandle) -> AppResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().add_filter("Skill", &["zip", "skill"]).pick_file(move |f| {
+    app.dialog().file().add_filter(if crate::turkish(&app) { "Beceri" } else { "Skill" }, &["zip", "skill"]).pick_file(move |f| {
         let _ = tx.send(f.and_then(|p| p.into_path().ok()).map(|p| p.display().to_string()));
     });
     Ok(rx.await.unwrap_or(None))

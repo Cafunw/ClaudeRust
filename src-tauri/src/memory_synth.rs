@@ -13,10 +13,8 @@ use crate::util::truncate_chars;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 
 pub const GLOBAL: &str = "global";
 /// The longest memory kept, and given to a chat (characters).
@@ -240,31 +238,13 @@ async fn api_one_shot(st: &AppState, system: &str, input: &str, max_tokens: u32)
 }
 
 /// As claudecode::title asks the CLI: no tools, settings, MCP or saved session.
+/// As claudecode::one_shot (titles) asks the CLI, with the memory's own error codes.
 async fn cli_one_shot(st: &AppState, system: &str, input: &str, max_tokens: u32) -> AppResult<String> {
-    let cli = crate::claudecode::find_cli(&st.settings.read().claude_code_path).ok_or_else(|| coded("memory_no_cli", "Claude Code isn't installed."))?;
-    // an empty folder of ours: no project's files, memory or settings within reach
-    let dir = st.data_dir.join("memory-cli");
-    std::fs::create_dir_all(&dir)?;
-    let args: Vec<String> = ["-p", "--model", "haiku", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence", "--system-prompt", system]
-        .map(String::from)
-        .to_vec();
-    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
-    cmd.current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
-        cmd.env_remove(k);
-    }
-    cmd.env("MAX_THINKING_TOKENS", "0").env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_tokens.to_string());
-    let mut child = cmd.spawn()?;
-    // the chats go in on stdin: no command-line quoting for what the person wrote
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes()).await;
-    }
-    let out = tokio::time::timeout(TIMEOUT, child.wait_with_output()).await.map_err(|_| coded("memory_timeout", "Updating the memory took too long."))??;
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    match v["result"].as_str() {
-        Some(text) if v["is_error"] != true => Ok(text.to_string()),
-        _ => Err(coded("memory_cli_failed", "Claude Code couldn't update the memory.")),
-    }
+    crate::claudecode::one_shot(st, system, input, max_tokens, TIMEOUT).await.map_err(|e| match e.kind() {
+        "cli_not_installed" => coded("memory_no_cli", "Claude Code isn't installed."),
+        "cli_timeout" => coded("memory_timeout", "Updating the memory took too long."),
+        _ => coded("memory_cli_failed", "Claude Code couldn't update the memory."),
+    })
 }
 
 #[cfg(test)]

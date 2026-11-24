@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -219,22 +220,39 @@ pub async fn auth_logout(override_path: &str) -> AppResult<()> {
     }
 }
 
+/// What a title's one-shot may write. The CLI can't turn Haiku 5's thinking off (`MAX_THINKING_TOKENS=0` is
+/// ignored there) and counts it in this cap: at 64 the CLI answered "exceeded the 64 output token maximum".
+pub const TITLE_MAX_TOKENS: u32 = 1024;
+
 /// A short title for a conversation that runs on the Claude account (no API key to ask): one `one_shot` call,
-/// at most 64 tokens out and about 600 in. None when the conversation doesn't run through the CLI or the call fails.
+/// about 600 tokens in. None when the conversation doesn't run through the CLI or the call fails.
 pub async fn title(st: &AppState, conv: &crate::db::Conversation, user_text: &str, assistant_text: &str) -> Option<String> {
     if !uses_cli(st, conv).await {
         return None;
     }
     let text = format!("<conversation>\nUser: {}\n\nAssistant: {}\n</conversation>", truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
-    crate::engine::clean_title(&one_shot(st, crate::prompts::TITLE_PROMPT, &text, 64, Duration::from_secs(45)).await.ok()?)
+    crate::engine::clean_title(&one_shot(st, crate::prompts::TITLE_PROMPT, &text, TITLE_MAX_TOKENS, Duration::from_secs(45)).await.ok()?)
+}
+
+/// The `result` line of a `--output-format json` run: the whole output, or (with a warning line before it,
+/// or as the array `--verbose` makes) the last result in it.
+fn json_result(stdout: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(stdout);
+    let is_result = |v: &Value| v["type"] == "result" || v["result"].is_string();
+    let all = serde_json::from_str::<Value>(text.trim()).ok().map(|v| match v {
+        Value::Array(a) => a.into_iter().rev().find(is_result).unwrap_or_default(),
+        v => v,
+    });
+    all.unwrap_or_else(|| text.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(is_result).unwrap_or_default())
 }
 
 /// One answer from the CLI's smallest model on the Claude account (titles, an artifact's `window.claude.complete`):
-/// no tools, settings, saved session or thinking, at most `max_tokens` out, `input` on stdin.
+/// no tools, settings or saved session, low effort (thinking as little as the model allows), at most `max_tokens`
+/// out (thinking included), `input` on stdin.
 pub async fn one_shot(st: &AppState, system: &str, input: &str, max_tokens: u32, timeout: Duration) -> AppResult<String> {
     let cli = find_cli(&st.settings.read().claude_code_path).ok_or_else(|| AppError::coded("cli_not_installed", Value::Null, "Claude Code isn't installed."))?;
     let args: Vec<String> = [
-        "-p", "--model", "haiku", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
+        "-p", "--model", "haiku", "--effort", "low", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
         "--disable-slash-commands", "--no-session-persistence", "--system-prompt", system,
     ]
     .iter()
@@ -254,7 +272,7 @@ pub async fn one_shot(st: &AppState, system: &str, input: &str, max_tokens: u32,
     let out = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| AppError::coded("cli_timeout", json!({"s": timeout.as_secs()}), "Claude took too long to answer."))??;
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let v = json_result(&out.stdout);
     match v["result"].as_str() {
         Some(r) if v["is_error"] != true => Ok(r.to_string()),
         r => Err(AppError::coded("claude_code", Value::Null, format!("Claude Code couldn't answer: {}", truncate_chars(r.unwrap_or_default(), 300)))),
@@ -804,7 +822,7 @@ pub fn cli_session_flags(options: &Value, model: &str, chat: bool, thinking_defa
 }
 
 /// A name in the characters the CLI keeps in an MCP tool's name (`mcp__<server>__<tool>`); it replaces the rest.
-fn cli_safe(s: &str) -> String {
+pub(crate) fn cli_safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
@@ -825,9 +843,33 @@ fn chat_tools(tools: Vec<McpTool>) -> ChatTools {
     out
 }
 
+/// The tools a chat's SDK-hosted servers carry, and with "load tools when needed" (tool_load.rs) those of its MCP
+/// tools not loaded yet (API names), which aren't listed or run until `load_tools` loads them.
+#[derive(Default)]
+struct SdkTools {
+    tools: ChatTools,
+    /// the chat's MCP tools (API names): what `load_tools` can load
+    mcp: HashSet<String>,
+    unloaded: parking_lot::Mutex<HashSet<String>>,
+    /// how many times the CLI has listed a server's tools, woken each time
+    lists: std::sync::atomic::AtomicUsize,
+    listed: tokio::sync::Notify,
+}
+
+impl From<ChatTools> for SdkTools {
+    fn from(tools: ChatTools) -> Self {
+        SdkTools { tools, ..Default::default() }
+    }
+}
+
+/// The app's own tools (past chats, project search, `load_tools`): read-only, run without asking.
+fn app_tool(api_name: &str) -> bool {
+    crate::past_chats::NAMES.contains(&api_name) || crate::project_search::is_tool(api_name) || api_name == crate::tool_load::LOAD_TOOL
+}
+
 /// What a chat on the account switches on in the CLI besides its prompt: web search and fetch while the
 /// conversation's web search is on, and its MCP tools; none of Claude Code's own tools, skills, MCP servers,
-/// settings or hooks. The second list runs without asking: web search and past-chat search (as on the API), and
+/// settings or hooks. The second list runs without asking: web search and the app's own tools (as on the API), and
 /// the MCP tools set to Allow in Settings or allowed for this chat. Web fetch and the other MCP tools ask; Block
 /// ones aren't offered.
 fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, Value>, chat_allowed: &[String]) -> (Vec<String>, Vec<String>) {
@@ -837,8 +879,7 @@ fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, V
         .collect();
     let mut allowed: Vec<String> = if web { vec!["WebSearch".into()] } else { vec![] };
     for (s, n, t) in tools {
-        let past_chats = crate::past_chats::NAMES.contains(&t.api_name.as_str());
-        if past_chats || policies.get(&format!("{}/{}", t.server, t.name)).and_then(Value::as_str) == Some("allow") || chat_allowed.contains(&t.api_name) {
+        if app_tool(&t.api_name) || policies.get(&format!("{}/{}", t.server, t.name)).and_then(Value::as_str) == Some("allow") || chat_allowed.contains(&t.api_name) {
             allowed.push(format!("mcp__{s}__{n}"));
         }
     }
@@ -847,11 +888,17 @@ fn chat_flags(web: bool, tools: &ChatTools, policies: &serde_json::Map<String, V
 
 /// The SDK-hosted `server`'s answer to a JSON-RPC message from the CLI; `None` for a tool call, which the
 /// app's connection to the real server answers.
-fn sdk_mcp_reply(tools: &ChatTools, server: &str, msg: &Value) -> Option<Value> {
+fn sdk_mcp_reply(tools: &SdkTools, server: &str, msg: &Value) -> Option<Value> {
     let result = match msg["method"].as_str().unwrap_or("") {
         "tools/call" => return None,
-        "initialize" => json!({"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")}}),
-        "tools/list" => json!({"tools": tools.iter().filter(|(s, ..)| s == server).map(|(_, n, t)| json!({"name": n, "description": t.description, "inputSchema": t.input_schema})).collect::<Vec<_>>()}),
+        "initialize" => json!({"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {"listChanged": true}}, "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")}}),
+        "tools/list" => {
+            let unloaded = tools.unloaded.lock();
+            let list: Vec<Value> = tools.tools.iter().filter(|(s, _, t)| s == server && !unloaded.contains(&t.api_name)).map(|(_, n, t)| json!({"name": n, "description": t.description, "inputSchema": t.input_schema})).collect();
+            tools.lists.fetch_add(1, Ordering::SeqCst);
+            tools.listed.notify_waiters();
+            json!({"tools": list})
+        }
         // a notification (no id) is answered with an empty result
         m if m == "ping" || msg["id"].is_null() => json!({}),
         m => return Some(json!({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": format!("Method not found: {m}")}})),
@@ -859,14 +906,49 @@ fn sdk_mcp_reply(tools: &ChatTools, server: &str, msg: &Value) -> Option<Value> 
     Some(json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}))
 }
 
-/// A tool call the CLI sent to an SDK-hosted server from `conv_id`'s turn, run on the app's MCP connection (past
-/// chats: by the app itself) and answered in MCP's terms.
-async fn sdk_mcp_call(st: &AppState, conv_id: &str, tools: &ChatTools, server: &str, msg: &Value) -> Value {
+/// `load_tools` on the account engine: the tools it loads are kept in the conversation (as on the API engine) and
+/// listed from now on. The CLI is told its servers' lists changed, and the answer waits until it has listed them
+/// again (it then offers them in the very next request of the turn; Claude Code 2.1 re-lists some 300 ms after).
+async fn load_sdk_tools(st: &AppState, conv_id: &str, tools: &SdkTools, args: &Value, to_cli: &tokio::sync::mpsc::UnboundedSender<Value>) -> (String, bool) {
+    let available: Vec<&McpTool> = tools.tools.iter().map(|(.., t)| t).filter(|t| tools.mcp.contains(&t.api_name)).collect();
+    let (text, failed, new) = crate::tool_load::load(st, conv_id, &available, args);
+    let mut servers: Vec<&str> = tools.tools.iter().filter(|(.., t)| new.contains(&t.api_name)).map(|(s, ..)| s.as_str()).collect();
+    servers.sort_unstable();
+    servers.dedup();
+    let target = tools.lists.load(Ordering::SeqCst) + servers.len();
+    tools.unloaded.lock().retain(|n| !new.contains(n));
+    for s in &servers {
+        let _ = to_cli.send(json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "mcp_message", "server_name": s, "message": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}}}));
+    }
+    let relisted = async {
+        loop {
+            let wake = tools.listed.notified();
+            if tools.lists.load(Ordering::SeqCst) >= target {
+                break;
+            }
+            wake.await;
+        }
+    };
+    // a CLI that doesn't list them again has them from the next turn on
+    let _ = tokio::time::timeout(Duration::from_secs(5), relisted).await;
+    (text, failed)
+}
+
+/// A tool call the CLI sent to an SDK-hosted server from `conv_id`'s turn, run on the app's MCP connection (the
+/// app's own tools: by the app itself) and answered in MCP's terms.
+async fn sdk_mcp_call(st: &AppState, conv_id: &str, tools: &SdkTools, server: &str, msg: &Value, to_cli: &tokio::sync::mpsc::UnboundedSender<Value>) -> Value {
     let name = msg["params"]["name"].as_str().unwrap_or("");
     let args = &msg["params"]["arguments"];
     let failed = |text: String| (vec![json!({"type": "text", "text": text})], true);
-    let (blocks, is_error) = match tools.iter().find(|(s, n, _)| s == server && n == name) {
+    let text = |(text, failed): (String, bool)| (vec![json!({"type": "text", "text": text})], failed);
+    let (blocks, is_error) = match tools.tools.iter().find(|(s, n, _)| s == server && n == name) {
         Some((.., t)) if crate::past_chats::NAMES.contains(&t.api_name.as_str()) => crate::past_chats::run(st, conv_id, &t.name, args),
+        Some((.., t)) if crate::project_search::is_tool(&t.api_name) => match st.db.conv_get(conv_id).ok().and_then(|c| c.project_id) {
+            Some(pid) => text(crate::project_search::run(st.db.clone(), pid, t.name.clone(), args.clone()).await),
+            None => failed("This chat isn't in a project.".into()),
+        },
+        Some((.., t)) if t.api_name == crate::tool_load::LOAD_TOOL => text(load_sdk_tools(st, conv_id, tools, args, to_cli).await),
+        Some((.., t)) if tools.unloaded.lock().contains(&t.api_name) => failed(format!("Load {name} with {} first.", crate::tool_load::LOAD_TOOL)),
         Some((.., t)) => st.mcp.call(&t.api_name, args).await.unwrap_or_else(|e| failed(format!("Error: {e}"))),
         None => failed(format!("Tool {name} is not available.")),
     };
@@ -1109,7 +1191,7 @@ async fn run_once<R: Runtime>(
     let ultracode_asked = conv.options["ultracode"] == true && !chat && crate::models::info(&conv.model).ultracode;
     let fast_asked = conv.options["fast"] == true && crate::models::info(&conv.model).fast_price.is_some();
     let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
-    let mut sdk_tools: Arc<ChatTools> = Arc::default();
+    let mut sdk_tools: Arc<SdkTools> = Arc::default();
     let mut chat_allowed: Vec<String> = vec![];
     // a project's PDFs and images, and the chat prompt file (kept until the turn ends)
     let mut project_files: Vec<Value> = vec![];
@@ -1125,13 +1207,23 @@ async fn run_once<R: Runtime>(
         // past chats while searching them is on, first (of two tools that end up with one name the first stays), then
         // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
         let mut all = if settings.chat_search && !conv.incognito { crate::past_chats::mcp_tools() } else { vec![] };
+        // a project too large for the prompt: its index is in the prompt file, its search a tool of ours
+        let offered = |name: &str| rc.tools.iter().any(|t| t["name"] == name);
+        if offered(crate::project_search::SEARCH_TOOL) {
+            all.extend(crate::project_search::mcp_tools());
+        }
+        // tools loaded when needed: the request context offers `load_tools` and leaves the others' schemas out
+        if offered(crate::tool_load::LOAD_TOOL) {
+            all.extend(crate::tool_load::mcp_tools());
+        }
         all.extend(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)));
         let tools = chat_tools(all);
         let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
         let (f, allowed) = chat_flags(web, &tools, &settings.tool_policies, &opt_strs("allowed_tools"));
         args.extend(f);
         chat_allowed = allowed;
-        sdk_tools = Arc::new(tools);
+        let unloaded = rc.mcp_names.keys().filter(|n| !offered(n)).cloned().collect();
+        sdk_tools = Arc::new(SdkTools { tools, mcp: rc.mcp_names.keys().cloned().collect(), unloaded: parking_lot::Mutex::new(unloaded), ..Default::default() });
         args.push("--system-prompt-file".into());
         args.push(file.0.display().to_string());
         _prompt_file = Some(file);
@@ -1153,7 +1245,8 @@ async fn run_once<R: Runtime>(
     if let Some(i) = prev_at {
         let p = &path[i];
         if let Some(sid) = p.meta["cc_session"].as_str() {
-            if fresh || !transcript_exists(sid) {
+            // (cc_replay: changed since the session holds it, an artifact edited in place)
+            if fresh || p.meta["cc_replay"] == true || !transcript_exists(sid) {
                 with_history = true;
             } else {
                 held = &path[..=i];
@@ -1251,7 +1344,7 @@ async fn run_once<R: Runtime>(
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
     st.cc_ctl.lock().insert(conv_id.to_string(), Ctl { tx: ctl_tx, waiting: false, spare: false });
     let _ctl = CtlGuard { st: st.clone(), conv_id: conv_id.to_string() };
-    let mut servers: Vec<&str> = sdk_tools.iter().map(|(s, ..)| s.as_str()).collect();
+    let mut servers: Vec<&str> = sdk_tools.tools.iter().map(|(s, ..)| s.as_str()).collect();
     servers.sort_unstable();
     servers.dedup();
     if !servers.is_empty() {
@@ -1613,7 +1706,7 @@ async fn run_once<R: Runtime>(
                         let tool = req["tool_name"].as_str().unwrap_or("").to_string();
                         let input = req["input"].clone();
                         let tool_use_id = req["tool_use_id"].as_str().unwrap_or("").to_string();
-                        let mcp_tool = sdk_tools.iter().find(|(s, n, _)| tool == format!("mcp__{s}__{n}")).map(|(.., t)| t);
+                        let mcp_tool = sdk_tools.tools.iter().find(|(s, n, _)| tool == format!("mcp__{s}__{n}")).map(|(.., t)| t);
                         let kind = match tool.as_str() {
                             "ExitPlanMode" => "plan",
                             "AskUserQuestion" => "question",
@@ -1678,7 +1771,7 @@ async fn run_once<R: Runtime>(
                                 let (st, tools, tx, cancel, conv_id) = (st.clone(), sdk_tools.clone(), out_tx.clone(), cancel.clone(), conv_id.to_string());
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        r = sdk_mcp_call(&st, &conv_id, &tools, &server, &msg) => { let _ = tx.send(mcp_response(&rid, r)); }
+                                        r = sdk_mcp_call(&st, &conv_id, &tools, &server, &msg, &tx) => { let _ = tx.send(mcp_response(&rid, r)); }
                                         _ = cancel.cancelled() => {}
                                     }
                                 });
@@ -2265,7 +2358,7 @@ mod tests {
 
     #[test]
     fn the_sdk_servers_answer_the_cli() {
-        let tools = chat_tools(vec![tool("weather", "get_forecast"), tool("db", "query")]);
+        let tools: SdkTools = chat_tools(vec![tool("weather", "get_forecast"), tool("db", "query")]).into();
         let init = sdk_mcp_reply(&tools, "weather", &json!({"jsonrpc": "2.0", "id": "a:0", "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})).unwrap();
         assert_eq!((init["id"].as_str(), init["result"]["protocolVersion"].as_str(), init["result"]["serverInfo"]["name"].as_str()), (Some("a:0"), Some("2025-11-25"), Some("weather")));
         assert!(init["result"]["capabilities"]["tools"].is_object());
@@ -2292,18 +2385,19 @@ mod tests {
         let mut all = crate::past_chats::mcp_tools();
         // a connected server that happens to have the name: its tools are its own
         all.extend([tool("weather", "get_forecast"), tool(crate::past_chats::SERVER, "query")]);
-        let tools = chat_tools(all);
+        let tools: SdkTools = chat_tools(all).into();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // a tool the conversation has, whose server isn't connected (any more): the connection's error
         for (server, name) in [("weather", "get_forecast"), (crate::past_chats::SERVER, "query")] {
-            let r = sdk_mcp_call(&st, "c1", &tools, server, &json!({"id": 7, "method": "tools/call", "params": {"name": name, "arguments": {}}})).await;
+            let r = sdk_mcp_call(&st, "c1", &tools, server, &json!({"id": 7, "method": "tools/call", "params": {"name": name, "arguments": {}}}), &tx).await;
             assert_eq!((r["id"].as_i64(), r["result"]["isError"].as_bool()), (Some(7), Some(true)));
             assert!(r["result"]["content"][0]["text"].as_str().unwrap().starts_with("Error: "), "{r}");
         }
         // one it doesn't have (another server's, or Blocked): never called
-        let r = sdk_mcp_call(&st, "c1", &tools, "db", &json!({"id": 8, "params": {"name": "get_forecast"}})).await;
+        let r = sdk_mcp_call(&st, "c1", &tools, "db", &json!({"id": 8, "params": {"name": "get_forecast"}}), &tx).await;
         assert_eq!(r["result"], json!({"content": [{"type": "text", "text": "Tool get_forecast is not available."}], "isError": true}));
         // past chats: the app answers (here: there are none)
-        let r = sdk_mcp_call(&st, "c1", &tools, crate::past_chats::SERVER, &json!({"id": 9, "params": {"name": "recent_chats", "arguments": {}}})).await;
+        let r = sdk_mcp_call(&st, "c1", &tools, crate::past_chats::SERVER, &json!({"id": 9, "params": {"name": "recent_chats", "arguments": {}}}), &tx).await;
         assert_eq!(r["result"], json!({"content": [{"type": "text", "text": "No previous chats found."}], "isError": false}));
         // a title is asked of the CLI only for a conversation that runs on it (the call can go in a spawned task)
         let conv = st.db.conv_create("chat", &format!("{}llama3", crate::oai::PREFIX), None, None, &json!({})).unwrap();
@@ -2323,8 +2417,8 @@ mod tests {
         let cli = find_cli("").expect("Claude Code isn't installed");
         let mut all = crate::past_chats::mcp_tools();
         all.push(tool("weather", "get_forecast"));
-        let tools = chat_tools(all);
-        let (flags, allowed) = chat_flags(true, &tools, &serde_json::Map::new(), &[]);
+        let tools: SdkTools = chat_tools(all).into();
+        let (flags, allowed) = chat_flags(true, &tools.tools, &serde_json::Map::new(), &[]);
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--permission-prompt-tool=stdio"].map(String::from).to_vec();
         args.extend(flags);
         args.push("--allowedTools".into());

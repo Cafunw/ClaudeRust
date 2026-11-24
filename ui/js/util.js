@@ -107,6 +107,15 @@ export function snippetHtml(s) {
   return esc(plain).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>');
 }
 
+/** `s` as search compares it (as db.rs fold does): lower case, I/İ/ı all i, no accents. */
+export const fold = (s) => String(s ?? '').replace(/[Iİı]/g, 'i').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+/** Whether `text` holds every word of `query`, in any order (an empty query matches). */
+export function hasWords(text, query) {
+  const hay = fold(text);
+  return fold(query).split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}
+
 /** Size line for an attachment chip; notes when a large file was digested. */
 export function attachmentSub(a) {
   const size = humanSize(a.size || 0);

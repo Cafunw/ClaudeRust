@@ -30,7 +30,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null, incognito = false }) {
-  const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers, disabled_tools: st.disabled_tools, fast: !!st.fast, research: !!st.research };
+  const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers, disabled_tools: st.disabled_tools, tool_access: st.tool_access, fast: !!st.fast, research: !!st.research };
   const research = kind === 'chat' && !!st.research && researchOffered();
   if (kind === 'chat' && incognito) options.incognito = true;
   if (kind === 'code') { options.permission_mode = st.permission_mode; options.ultracode = engine === 'claude-code' ? st.ultracode ?? null : null; if (engine) options.engine = engine; if (worktree !== null) options.worktree = worktree; }

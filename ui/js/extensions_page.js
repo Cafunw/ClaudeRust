@@ -188,8 +188,9 @@ function runtimeNotice(runtime, done) {
 }
 
 /** The install preview of bundle `info` (extension_inspect's reply, plus
- *  `entry`/`source_url` for one from the directory); `install(values)` installs it. */
-export function previewDialog(info, install) {
+ *  `entry`/`source_url` for one from the directory); `install(values)` installs it.
+ *  For an update, `saved` (extension_settings' reply) fills the form in. */
+export function previewDialog(info, install, saved = null) {
   const entry = info.entry || null;
   const sig = signatureLine(info.signature);
   const body = h(`<div class="ext-preview">
@@ -208,7 +209,8 @@ export function previewDialog(info, install) {
       ${info.signature && info.signature.fingerprint ? `<dt style="${DT}">${esc(t('ext_cert'))}</dt><dd class="mono" style="${DD}">${esc(info.signature.fingerprint)}</dd>` : ''}
     </dl></div>`);
   if (info.runtime_missing) body.appendChild(runtimeNotice(info.runtime_missing));
-  const values = configForm(body, info.user_config);
+  const secrets = (saved && saved.secrets_set) || [];
+  const values = configForm(body, info.user_config, saved && saved.values, secrets);
   let trusted = !sig.confirm;
   if (sig.confirm) {
     const c = h(`<label class="ext-confirm small" style="display:flex;gap:8px;align-items:flex-start;margin-top:12px"><input type="checkbox"> <span>${esc(t('ext_trust_confirm'))}</span></label>`);
@@ -218,16 +220,17 @@ export function previewDialog(info, install) {
   const err = h('<div class="ext-err small" role="alert" style="color:var(--danger);margin-top:10px" hidden></div>');
   body.appendChild(err);
   const fail = (msg) => { err.textContent = msg; err.hidden = !msg; };
-  const ok = button(t('install'), 'primary', async () => {
+  const label = saved ? t('ed_update', { v: info.version || '?' }) : t('install');
+  const ok = button(label, 'primary', async () => {
     const v = values();
-    const missing = missingRequired(info.user_config, v);
+    const missing = missingRequired(info.user_config, v, secrets);
     if (missing) { fail(t('ext_required_missing', { field: missing })); return; }
     fail('');
     ok.disabled = true;
     try { await install(v); m.close(); } catch (e) { fail(errorText(e)); ok.disabled = !trusted; }
   });
   ok.disabled = !trusted || (info.signature && info.signature.status === 'invalid');
-  const m = modal({ title: t('install_extension'), body, wide: true, footer: [button(t('cancel'), '', () => m.close()), ok] });
+  const m = modal({ title: saved ? label : t('install_extension'), body, wide: true, footer: [button(t('cancel'), '', () => m.close()), ok] });
   return m;
 }
 
@@ -264,14 +267,17 @@ async function reconfigure(ext, redraw) {
 }
 
 /** Version, Reconfigure and Uninstall for installed extension `ext` (see
- *  installedExtension), and what to do when its runtime is missing. */
-export function extensionControls(ext, redraw) {
+ *  installedExtension), and what to do when its runtime is missing; with `update`
+ *  ({version, run(button)}: the directory lists a newer version) its badge and button. */
+export function extensionControls(ext, redraw, update = null) {
   const el = h(`<div class="ext-ctl" style="margin-top:8px"><div class="row" style="gap:6px;flex-wrap:wrap">
     <span class="cd-cat">${icon('download', 12)} ${esc(t('ext_version', { v: ext.version || '?' }))}</span>
+    ${update ? `<span class="cd-cat ext-upd">${esc(t('ed_update_available'))}</span><button class="btn sm primary" data-a="upd">${esc(t('ed_update', { v: update.version }))}</button>` : ''}
     <button class="btn sm ghost" data-a="conf">${esc(t('ext_reconfigure'))}</button>
     <button class="btn sm ghost" data-a="rm">${esc(t('ext_uninstall'))}</button></div></div>`);
   if (ext.runtime) el.appendChild(runtimeNotice(ext.runtime, async () => { try { redraw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
   el.querySelector('[data-a=conf]').onclick = () => reconfigure(ext, redraw);
+  if (update) el.querySelector('[data-a=upd]').onclick = (ev) => update.run(ev.currentTarget);
   el.querySelector('[data-a=rm]').onclick = async () => {
     if (!(await confirmDialog(t('ext_uninstall_confirm', { name: ext.display_name || ext.name }), { okLabel: t('ext_uninstall') }))) return;
     try { redraw(await call('extension_uninstall', { name: ext.name })); toast(t('ext_uninstalled', { name: ext.display_name || ext.name })); } catch (e) { errorToast(e); }

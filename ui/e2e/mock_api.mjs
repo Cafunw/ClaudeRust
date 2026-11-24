@@ -105,9 +105,10 @@ async function stream(res, body, mock) {
 }
 
 /** Start the mock on a free port. `requests` gets the body of every
- *  streaming Messages request; set `cwd` for the Write tool's folder. */
+ *  streaming Messages request; set `cwd` for the Write tool's folder, and
+ *  `noTitles` to refuse title requests. */
 export async function startMock() {
-  const mock = { url: '', requests: [], mcpCalls: [], aborted: 0, rejected: 0, cwd: null, close: null };
+  const mock = { url: '', requests: [], mcpCalls: [], aborted: 0, rejected: 0, cwd: null, noTitles: false, close: null };
   const server = http.createServer(async (req, res) => {
     let raw = '';
     for await (const c of req) raw += c;
@@ -127,6 +128,10 @@ export async function startMock() {
     }
     if (req.method === 'GET' && req.url.startsWith('/v1/models')) { json(res, 200, { data: MODELS, has_more: false, first_id: MODELS[0].id, last_id: MODELS[MODELS.length - 1].id }); return; }
     if (req.method !== 'POST') { res.writeHead(405).end(); return; }
+    if (!body.stream && mock.noTitles) {
+      json(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'the e2e mock writes no titles now' } });
+      return;
+    }
     if (!body.stream) {
       json(res, 200, { id: 'msg_title', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: TITLE }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 2 } });
       return;

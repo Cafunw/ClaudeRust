@@ -9,12 +9,9 @@ use crate::state::AppState;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::future::Future;
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
-use tokio::io::AsyncWriteExt;
 
 /// At most this many samples (ui/js/style_gen.js has the same caps), each at
 /// most this long, and together at least `MIN_CHARS` (characters).
@@ -94,7 +91,7 @@ async fn draft<F: Future<Output = AppResult<String>>>(db: &Db, today: &str, samp
 
 enum Engine {
     Api,
-    Cli(PathBuf),
+    Cli,
 }
 
 /// Where the fast model is asked, as for titles and memory: the Claude
@@ -104,7 +101,7 @@ async fn engine(st: &AppState) -> AppResult<Engine> {
     let probe = Conversation { kind: "chat".into(), model: st.settings.read().title_model.clone(), ..Default::default() };
     if crate::claudecode::uses_cli(st, &probe).await {
         let path = st.settings.read().claude_code_path.clone();
-        return crate::claudecode::find_cli(&path).map(Engine::Cli).ok_or_else(no_engine);
+        return crate::claudecode::find_cli(&path).map(|_| Engine::Cli).ok_or_else(no_engine);
     }
     if st.api_key.read().is_some() {
         Ok(Engine::Api)
@@ -133,31 +130,12 @@ async fn ask_api(st: &AppState, input: String) -> AppResult<String> {
     Ok(v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect())
 }
 
-/// As memory_synth asks the CLI: no tools, settings, MCP or saved session.
-async fn ask_cli(st: &AppState, cli: PathBuf, input: String) -> AppResult<String> {
-    // an empty folder of ours: no project's files, memory or settings within reach
-    let dir = st.data_dir.join("style-cli");
-    std::fs::create_dir_all(&dir)?;
-    let args: Vec<String> = ["-p", "--model", "haiku", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence", "--system-prompt", STYLE_PROMPT]
-        .map(String::from)
-        .to_vec();
-    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
-    cmd.current_dir(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
-    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
-        cmd.env_remove(k);
-    }
-    cmd.env("MAX_THINKING_TOKENS", "0").env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", MAX_OUTPUT_TOKENS.to_string());
-    let mut child = cmd.spawn()?;
-    // the samples go in on stdin: no command-line quoting for what the person wrote
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes()).await;
-    }
-    let out = tokio::time::timeout(TIMEOUT, child.wait_with_output()).await.map_err(|_| too_slow())??;
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    match v["result"].as_str() {
-        Some(text) if v["is_error"] != true => Ok(text.to_string()),
-        _ => Err(coded("style_cli_failed", "Claude Code couldn't draft the style. Check that you're signed in (Settings → Account).")),
-    }
+/// As claudecode::one_shot (titles) asks the CLI: no tools, settings, MCP or saved session.
+async fn ask_cli(st: &AppState, input: String) -> AppResult<String> {
+    crate::claudecode::one_shot(st, STYLE_PROMPT, &input, MAX_OUTPUT_TOKENS, TIMEOUT).await.map_err(|e| match e.kind() {
+        "cli_timeout" => too_slow(),
+        _ => coded("style_cli_failed", "Claude Code couldn't draft the style. Check that you're signed in (Settings → Account)."),
+    })
 }
 
 /// A draft style (its instructions) from up to `MAX_SAMPLES` writing samples.
@@ -169,7 +147,7 @@ pub async fn style_from_samples(state: State<'_, Arc<AppState>>, samples: Vec<St
     draft(&db, &today(), &samples, |input| async move {
         match engine {
             Engine::Api => ask_api(&st, input).await,
-            Engine::Cli(cli) => ask_cli(&st, cli, input).await,
+            Engine::Cli => ask_cli(&st, input).await,
         }
     })
     .await

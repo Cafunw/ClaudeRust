@@ -4,7 +4,7 @@ import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
 import { store, emit } from './store.js';
-import { $, esc, h, relTime, convTitle, snippetHtml } from './util.js';
+import { $, esc, h, relTime, convTitle, snippetHtml, fold, hasWords } from './util.js';
 import * as workspace from './workspace.js';
 import { allCommands, handle as runSlash } from './slash.js';
 import { incognitoSupported, newIncognitoChat } from './home.js';
@@ -89,8 +89,7 @@ export function openSearch() {
       cat: x.kind === 'code' ? 'code' : 'chat',
       route: { name: 'chat', params: { id: x.conversation_id } },
     }));
-    const ql = q.trim().toLowerCase();
-    const projs = store.projects.filter((p) => !ql || p.name.toLowerCase().includes(ql)).slice(0, ql ? 5 : 3)
+    const projs = store.projects.filter((p) => hasWords(p.name, q)).slice(0, q.trim() ? 5 : 3)
       .map((p) => ({ title: p.name, snippet: esc(p.description || ''), meta: t('projects'), icon: 'folder', cat: 'project', route: { name: 'project', params: { id: p.id } } }));
     items = pick(q.trim() ? [...acts.slice(0, 6).map((a) => ({ ...a, cat: 'actions' })), ...items.slice(0, 30), ...projs] : [...items.slice(0, 30), ...projs]);
     idx = 0;
@@ -119,9 +118,9 @@ export function openSearch() {
 
 /** Match score of a title for a query (0 = no match). */
 function score(title, q) {
-  const ql = q.trim().toLowerCase();
+  const ql = fold(q.trim());
   if (!ql) return 1;
-  const tl = title.toLowerCase();
+  const tl = fold(title);
   const at = tl.indexOf(ql);
   if (at >= 0) {
     const wordStart = at === 0 || /[\s/:—-]/.test(tl[at - 1]);
