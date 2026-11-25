@@ -41,6 +41,8 @@ pub struct AppState {
     pub live: Mutex<HashMap<String, LiveRun>>,
     /// The Claude Code CLI turn running in a conversation: the line to it.
     pub cc_ctl: Mutex<HashMap<String, crate::claudecode::Ctl>>,
+    /// Claude Code processes kept between a chat's turns (claudecode.rs).
+    pub cc_warm: crate::claudecode::WarmPool,
     /// Claude Code's workflows per conversation (the Tasks pane), finished ones until cleared.
     pub workflows: Mutex<HashMap<String, Vec<Value>>>,
     pub permissions: Mutex<HashMap<String, oneshot::Sender<PermissionReply>>>,
@@ -75,6 +77,7 @@ impl AppState {
             runs: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             cc_ctl: Mutex::new(HashMap::new()),
+            cc_warm: Default::default(),
             workflows: Mutex::new(HashMap::new()),
             permissions: Mutex::new(HashMap::new()),
             pending_perms: Mutex::new(HashMap::new()),

@@ -377,4 +377,115 @@ mod tests {
         assert!(t.ends_with("end"));
         assert!(s.take_new().ends_with("end"));
     }
+
+    #[test]
+    fn output_dropped_by_the_cap_is_not_returned_later() {
+        let s = shell();
+        s.push("old");
+        assert_eq!(s.take_new(), "old");
+        // pushes the read "old" and unread bytes out of the front
+        s.push(&"x".repeat(OUTPUT_CAP));
+        s.push("new");
+        let t = s.take_new();
+        assert_eq!(t.len(), OUTPUT_CAP);
+        assert!(t.ends_with("new") && !t.contains("old"));
+        assert_eq!(s.take_new(), "");
+        assert_eq!(s.tail(3), "new");
+    }
+
+    #[test]
+    fn status_follows_the_exit_code_and_notes_fall_back_to_the_command() {
+        let mut sh = shell();
+        *sh.exit.lock() = Some(0);
+        assert_eq!((sh.status(), sh.running()), ("completed", false));
+        *sh.exit.lock() = Some(2);
+        assert_eq!(sh.summary()["status"], "failed");
+        assert_eq!(sh.summary()["exit_code"], 2);
+        sh.command = "y".repeat(100);
+        let note = finished_note(&sh, 0, 30_000, false).unwrap();
+        assert_eq!(note, format!("{} finished after 30s.", "y".repeat(80)));
+    }
+
+    /// A shell for conversation `conv` in a new folder whose name has a space.
+    fn session(conv: &str, shells: &Arc<Shells>) -> CodeSession {
+        let root = std::env::temp_dir().join(format!("cr shells {}", new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        CodeSession::for_conversation(root, conv, shells.clone())
+    }
+
+    async fn exit_of(sh: &BgShell) -> Option<i32> {
+        let start = std::time::Instant::now();
+        while sh.exit.lock().is_none() && start.elapsed() < std::time::Duration::from_secs(60) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        *sh.exit.lock()
+    }
+
+    const LONG: &str = if cfg!(windows) { "Start-Sleep 60" } else { "sleep 60" };
+
+    #[tokio::test]
+    async fn a_background_command_runs_in_the_session_folder() {
+        let shells = Arc::new(Shells::default());
+        let s = session("c", &shells);
+        std::fs::write(s.root.join("marker.txt"), "").unwrap();
+        // a working directory that's gone: the command runs in the folder
+        *s.cwd.lock() = s.root.join("deleted");
+        let sh = shells.spawn(&s, "echo \"hello world\"; ls; exit 3", "List").unwrap();
+        assert_eq!(sh.cwd, s.root);
+        assert_eq!(sh.status(), "running");
+        assert!(shells.any_running());
+        assert_eq!(exit_of(&sh).await, Some(3));
+        assert!(sh.finished_at.lock().is_some());
+        assert_eq!(sh.status(), "failed");
+        let out = sh.take_new();
+        assert!(out.contains("hello world") && out.contains("marker.txt"), "{out}");
+        assert_eq!(sh.take_new(), "");
+        assert!(!shells.any_running());
+        assert!(!shells.kill(&sh.id), "a finished command can't be killed");
+        assert_eq!(shells.list(Some("c")).len(), 1);
+        assert!(shells.list(Some("other")).is_empty());
+        shells.clear_finished("c");
+        assert!(shells.get(&sh.id).is_none());
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    #[tokio::test]
+    async fn killing_a_background_command_stops_it() {
+        let shells = Arc::new(Shells::default());
+        let s = session("c", &shells);
+        let sh = shells.spawn(&s, LONG, "").unwrap();
+        let started = std::time::Instant::now();
+        assert!(shells.kill(&sh.id));
+        assert_eq!(sh.status(), "killed");
+        assert_eq!(exit_of(&sh).await, Some(-1));
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "it ran on after the kill");
+        assert!(!shells.any_running());
+        assert!(!shells.kill(&sh.id));
+        assert!(!shells.kill("bash_missing"));
+        // a killed command is finished: cleared from the list
+        shells.clear_finished("c");
+        assert!(shells.list(None).is_empty());
+        let _ = std::fs::remove_dir_all(&s.root);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_conversation_stops_only_its_shells() {
+        let shells = Arc::new(Shells::default());
+        let (a, b) = (session("a", &shells), session("b", &shells));
+        let (sa, sb) = (shells.spawn(&a, LONG, "").unwrap(), shells.spawn(&b, LONG, "").unwrap());
+        shells.kill_conversation("a");
+        assert!(shells.list(Some("a")).is_empty());
+        assert_eq!(sa.status(), "killed");
+        assert!(sb.running());
+        // running shells stay when finished ones are cleared
+        shells.clear_finished("b");
+        assert_eq!(shells.list(Some("b")).len(), 1);
+        shells.kill_all();
+        assert_eq!(sb.status(), "killed");
+        assert_eq!((exit_of(&sa).await, exit_of(&sb).await), (Some(-1), Some(-1)));
+        assert!(!shells.any_running());
+        for s in [a, b] {
+            let _ = std::fs::remove_dir_all(&s.root);
+        }
+    }
 }

@@ -441,6 +441,17 @@ mod tests {
         assert!(!doc.contains("<br"), "{doc}");
     }
 
+    /// app.css drops the bullet of an item whose checkbox comes first in it
+    /// (a tight list) or first in its first paragraph (a loose one).
+    #[test]
+    fn task_items_start_with_their_checkbox() {
+        let tight = render("- [ ] todo\n- [x] done\n- plain\n", O);
+        assert!(tight.contains("<li><input disabled=\"\" type=\"checkbox\"/>\ntodo</li>"), "{tight}");
+        assert!(tight.contains("<li><input disabled=\"\" type=\"checkbox\" checked=\"\"/>\ndone</li>"), "{tight}");
+        let loose = render("- [ ] todo\n\n- [x] done\n", O);
+        assert!(loose.contains("<li>\n<p><input disabled=\"\" type=\"checkbox\"/>\ntodo</p>"), "{loose}");
+    }
+
     #[test]
     fn tables() {
         let h = render("|a|b|\n|-|-|\n|1|2|\n", O);

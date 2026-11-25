@@ -1,6 +1,6 @@
-// npm run test:ui — Code tab and panes sweep: the panes' keyboard rows and
-// tabs, the side panel's width, binary files in a diff, and the words around
-// counts and review comments.
+// npm run test:ui — the Code tab's panes: their keyboard rows and tabs, the
+// side panel's width, binary files in a diff, and the words around counts,
+// review comments and task times.
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,7 +87,7 @@ test('task times are in the UI language ("sn." and "dk." in Turkish, not "s" and
   setLanguage('en');
 });
 
-test('every key this sweep added has English and Turkish text', () => {
+test('the Code tab\'s pane, project and onboarding keys have English and Turkish text', () => {
   const keys = ['ws_resize', 'changes_show_all', 'task_exit', 'hist_search_by', 'code_ask_ph', 'review_removed_line',
     'proj_chats_one', 'proj_chats_n', 'proj_options', 'instr_edit', 'proj_file_remove', 'onboard_need_key'];
   for (const lang of ['en', 'tr']) {

@@ -171,9 +171,9 @@ impl Watches {
     /// Start watching `root` for a conversation (replaces an earlier watch).
     /// `busy` tells whether the agent is mid-turn (checks wait for it);
     /// `on_result` gets each finished run's summary.
-    pub fn start(
+    pub fn start<R: tauri::Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         conv_id: &str,
         root: &Path,
         command: String,
@@ -411,5 +411,186 @@ mod tests {
         let (code, out) = tokio::time::timeout(Duration::from_secs(20), run_check(&dir, "head -c 3000000 /dev/zero | tr '\\0' x; echo; exit 3", &stop)).await.unwrap();
         assert_eq!(code, Some(3));
         assert!(out.len() <= 400_001);
+    }
+
+    fn project(files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cr-watch-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        dir
+    }
+
+    /// The project's files (name, content), and the command detected for them.
+    type Case<'a> = (&'a [(&'a str, &'a str)], Option<&'a str>);
+
+    #[test]
+    fn the_check_command_follows_the_project_kind() {
+        let cases: &[Case] = &[
+            (&[("tsconfig.json", "{}"), ("package.json", r#"{"scripts":{"lint":"x"}}"#)], Some("npx --no-install tsc --noEmit --pretty false")),
+            (&[("go.mod", "module x"), ("Makefile", "")], Some("go build ./... && go vet ./...")),
+            // the first of typecheck, check, lint, build that the project has
+            (&[("package.json", r#"{"scripts":{"build":"b","typecheck":"t","lint":"l"}}"#)], Some("npm run -s typecheck")),
+            (&[("package.json", r#"{"scripts":{"build":"b","check":"c"}}"#)], Some("npm run -s check")),
+            (&[("package.json", r#"{"scripts":{"build":"b"}}"#)], Some("npm run -s build")),
+            // no usable script (or not JSON): what else the folder has
+            (&[("package.json", r#"{"scripts":{"test":"t","lint":1}}"#), ("requirements.txt", "")], Some("python3 -m compileall -q -x '(\\.venv|venv|node_modules)' .")),
+            (&[("package.json", "not json"), ("Makefile", "all:")], Some("make -q || make")),
+            (&[("package.json", "{}")], None),
+            (&[("setup.py", "")], Some("python3 -m compileall -q -x '(\\.venv|venv|node_modules)' .")),
+            (&[("pyproject.toml", ""), ("Cargo.toml", "[package]")], Some("cargo check --all-targets --message-format short")),
+            (&[("README.md", "")], None),
+        ];
+        for (files, want) in cases {
+            let dir = project(files);
+            assert_eq!(detect(&dir).as_deref(), *want, "{files:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn error_lines_skip_warnings_and_are_trimmed() {
+        let long = format!("error: {}", "x".repeat(500));
+        let out = format!("  Error: thing failed  \nwarning: unused\n./a.go:1:2: warning: shadowed\nSyntaxError: bad token\nok\n{long}\nfile.py:3: error: nope");
+        let e = error_lines(&out);
+        assert_eq!(e[..2], ["Error: thing failed".to_string(), "SyntaxError: bad token".to_string()]);
+        assert_eq!(e[2].chars().count(), 300);
+        assert_eq!(e[3], "file.py:3: error: nope");
+        assert_eq!(e.len(), 4, "{e:?}");
+        assert!(error_lines("").is_empty());
+    }
+
+    #[test]
+    fn changes_in_build_output_and_dependencies_are_ignored() {
+        let root = Path::new("/p");
+        for ignored in ["/p/node_modules/a/b.js", "/p/.git/index", "/p/src/target/x", "/p/web/.next/a", "/p/app/__pycache__/m.pyc"] {
+            assert!(!relevant(Path::new(ignored), root), "{ignored}");
+        }
+        for counted in ["/p/src/target.rs", "/p/builds/a.c", "/p/Cargo.toml", "/elsewhere/a.rs"] {
+            assert!(relevant(Path::new(counted), root), "{counted}");
+        }
+    }
+
+    #[test]
+    fn tail_keeps_whole_characters() {
+        assert_eq!(tail("abc", 5), "abc");
+        assert_eq!(tail("abcdef", 2), "ef");
+        // the cut would split "é" (2 bytes): it starts after it
+        assert_eq!(tail("aé", 1), "");
+        assert_eq!(tail("éé", 3), "é");
+    }
+
+    #[tokio::test]
+    async fn the_registry_controls_a_conversations_watch() {
+        let dir = std::env::temp_dir();
+        let ws = Watches::default();
+        ws.install("c", Watch::new(&dir, "make".into()));
+        ws.set_auto_fix("c", true);
+        let w = ws.get("c").unwrap();
+        let s = w.summary("c");
+        assert_eq!((s["status"].as_str(), s["command"].as_str(), s["auto_fix"].as_bool()), (Some("idle"), Some("make"), Some(true)));
+        assert_eq!((s["runs"].as_u64(), s["watching"].as_bool(), s["errors"].as_u64()), (Some(0), Some(true), Some(0)));
+        // "run now" wakes the loop even when it isn't waiting yet
+        ws.run_now("c");
+        tokio::time::timeout(Duration::from_secs(1), w.kick.notified()).await.expect("no wake-up");
+        w.state.lock().output = "y".repeat(30_000);
+        assert_eq!(w.summary("c")["output"].as_str().unwrap().len(), 20_000);
+        assert_eq!(w.output().len(), 30_000);
+        // other conversations are untouched, and unknown ones are no-ops
+        ws.set_auto_fix("d", true);
+        ws.run_now("d");
+        ws.stop("d");
+        assert!(!w.stop.is_cancelled());
+        ws.stop("c");
+        assert!(w.stop.is_cancelled() && ws.get("c").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_check_reports_its_exit_code_and_both_streams() {
+        let dir = std::env::temp_dir();
+        let stop = CancellationToken::new();
+        let cmd = if cfg!(windows) { "Write-Output 'checking'; [Console]::Error.WriteLine('error: broken'); exit 2" } else { "echo checking; echo 'error: broken' >&2; exit 2" };
+        let (code, out) = run_check(&dir, cmd, &stop).await;
+        assert_eq!(code, Some(2));
+        // stdout, then stderr after a line break
+        assert_eq!(out.replace("\r\n", "\n").trim_end(), "checking\n\nerror: broken");
+        assert_eq!(error_lines(&out), ["error: broken".to_string()]);
+        let (code, _) = run_check(&dir, "exit 0", &stop).await;
+        assert_eq!(code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn stopping_the_watch_stops_a_running_check() {
+        let dir = std::env::temp_dir();
+        let stop = CancellationToken::new();
+        let cmd = if cfg!(windows) { "Start-Sleep 60" } else { "sleep 60" };
+        let s2 = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            s2.cancel();
+        });
+        let started = std::time::Instant::now();
+        let (code, out) = run_check(&dir, cmd, &stop).await;
+        assert_eq!((code, out.as_str()), (None, "stopped"));
+        assert!(started.elapsed() < Duration::from_secs(30), "the check ran on");
+    }
+
+    async fn until(what: impl Fn() -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while !what() {
+            if start.elapsed() > Duration::from_secs(30) {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn changes_are_debounced_wait_for_the_agent_and_stop_with_the_watch() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let dir = std::env::temp_dir().join(format!("cr-watch-run-{}", crate::util::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = tauri::test::mock_app();
+        let (runs, busy) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let ws = Watches::default();
+        let (r, b) = (runs.clone(), busy.clone());
+        let on_result = Arc::new(move |s: Value| {
+            if s["status"] == "ok" {
+                r.fetch_add(1, SeqCst);
+            }
+        });
+        ws.start(app.handle(), "c", &dir, "exit 0".into(), Arc::new(move || b.load(SeqCst)), on_result).unwrap();
+        let n = || runs.load(SeqCst);
+        let quiet = || tokio::time::sleep(Duration::from_millis(2500));
+        assert!(until(|| n() >= 1).await, "the first check runs at once");
+        // (a watcher that reports the folder's own creation late, as FSEvents can, adds one check here)
+        quiet().await;
+        let base = n();
+        // a burst of changes: one check, once they settle
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("f{i}.txt")), "x").unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(until(|| n() == base + 1).await, "no check after the changes");
+        quiet().await;
+        assert_eq!(n(), base + 1, "one check for the burst");
+        // in the middle of a turn the check waits for its end
+        busy.store(true, SeqCst);
+        std::fs::write(dir.join("g.txt"), "x").unwrap();
+        quiet().await;
+        assert_eq!(n(), base + 1, "checked half-finished work");
+        busy.store(false, SeqCst);
+        assert!(until(|| n() == base + 2).await);
+        // "Run now", nothing changed
+        ws.run_now("c");
+        assert!(until(|| n() == base + 3).await);
+        assert_eq!(ws.get("c").unwrap().summary("c")["runs"], base + 3);
+        ws.stop("c");
+        std::fs::write(dir.join("h.txt"), "x").unwrap();
+        quiet().await;
+        assert_eq!(n(), base + 3, "a stopped watch checks nothing");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

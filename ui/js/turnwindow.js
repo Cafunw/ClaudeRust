@@ -25,6 +25,26 @@ export function pageStart(turns, end) {
   return i;
 }
 
+// A page of older turns (and parked turns coming back) is drawn a frame's
+// worth at a time: this much work (script, and the layout of what it drew)
+// leaves room for the frame's paint within 16 ms.
+export const FRAME_BUDGET = 6;
+/** Opening a conversation draws this much of its last page at once (a short
+ *  one whole), in the frame that opens it. */
+export const OPEN_BUDGET = 12;
+
+/** `draw(i)` for i = 0, 1, … below `n` while `budget` ms last (at least
+ *  once); how many were drawn. */
+export function drawWithin(n, draw, budget = FRAME_BUDGET, now = () => performance.now()) {
+  const t0 = now();
+  let i = 0;
+  while (i < n) {
+    draw(i++);
+    if (now() - t0 >= budget) break;
+  }
+  return i;
+}
+
 // Turns drawn by scrolling up stay in the DOM; the ones far off screen are
 // parked (emptied, keeping their height) and drawn again from their data
 // when they come near, so what's mounted stays about a few screens' worth.

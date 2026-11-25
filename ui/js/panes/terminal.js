@@ -129,6 +129,8 @@ async function mount(el, ctx) {
   term.open(host);
   // xterm names its input "Terminal input" in English whatever the app's language
   if (term.textarea) term.textarea.setAttribute('aria-label', t('ws_terminal'));
+  // a key the app already took (its capture-phase shortcuts: Ctrl+Tab, Ctrl+/) never reaches the shell too
+  term.attachCustomKeyEventHandler((e) => !e.defaultPrevented);
   const s = { term, fit, ptyId: null, el, exited: false, convId: ctx.convId };
   sessions.set(ctx.convId, s);
   requestAnimationFrame(() => { try { fit.fit(); } catch { /* hidden */ } start(s, ctx); });

@@ -93,6 +93,12 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 /// window must quit, or the app would keep running with no way back.
 static TRAY_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Closing the main window hides it (macOS apps stay open without windows)
+/// instead of quitting.
+fn hides_on_close(keep_in_tray: bool, tray_ok: bool) -> bool {
+    (keep_in_tray && tray_ok) || cfg!(target_os = "macos")
+}
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -177,14 +183,21 @@ pub(crate) fn turkish(app: &AppHandle) -> bool {
     app.try_state::<Arc<AppState>>().is_some_and(|s| s.turkish())
 }
 
-fn tray_menu(app: &AppHandle, turkish: bool) -> tauri::Result<Menu<tauri::Wry>> {
+/// The tray menu's items (id, label); a separator goes before "quit".
+fn tray_items(turkish: bool) -> [(&'static str, &'static str); 4] {
     let l = |en: &'static str, tr: &'static str| if turkish { tr } else { en };
-    let open = MenuItem::with_id(app, "open", l("Open ClaudeRust", "ClaudeRust’ı aç"), true, None::<&str>)?;
-    let new_chat = MenuItem::with_id(app, "new", l("New Chat", "Yeni sohbet"), true, None::<&str>)?;
-    let quick = MenuItem::with_id(app, "quick", l("Quick Entry", "Hızlı Giriş"), true, None::<&str>)?;
+    [
+        ("open", l("Open ClaudeRust", "ClaudeRust’ı aç")),
+        ("new", l("New Chat", "Yeni sohbet")),
+        ("quick", l("Quick Entry", "Hızlı Giriş")),
+        ("quit", l("Quit ClaudeRust", "ClaudeRust’tan çık")),
+    ]
+}
+
+fn tray_menu(app: &AppHandle, turkish: bool) -> tauri::Result<Menu<tauri::Wry>> {
+    let [open, new_chat, quick, quit] = tray_items(turkish).map(|(id, label)| MenuItem::with_id(app, id, label, true, None::<&str>));
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", l("Quit ClaudeRust", "ClaudeRust’tan çık"), true, None::<&str>)?;
-    Menu::with_items(app, &[&open, &new_chat, &quick, &sep, &quit])
+    Menu::with_items(app, &[&open?, &new_chat?, &quick?, &sep, &quit?])
 }
 
 /// The tray menu again, in the UI's language (after the language setting changed).
@@ -231,7 +244,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn artifact_protocol(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+fn artifact_protocol<R: tauri::Runtime>(app: &AppHandle<R>, req: &tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
     let token = req.uri().path().trim_start_matches('/').to_string();
     let st = app.state::<Arc<AppState>>();
     let found = st.served.lock().get(&token).cloned();
@@ -470,8 +483,7 @@ pub fn run() {
                     .try_state::<Arc<AppState>>()
                     .map(|s| s.settings.read().keep_in_tray)
                     .unwrap_or(false);
-                let tray = TRAY_OK.load(std::sync::atomic::Ordering::SeqCst);
-                if (keep && tray) || cfg!(target_os = "macos") {
+                if hides_on_close(keep, TRAY_OK.load(std::sync::atomic::Ordering::SeqCst)) {
                     api.prevent_close();
                     let _ = window.hide();
                     if let Some(w) = window.app_handle().get_webview_window("main") {
@@ -740,6 +752,8 @@ pub fn run() {
                     while (!st.runs.lock().is_empty() || st.shells.any_running()) && start.elapsed() < std::time::Duration::from_millis(2500) {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
+                    // the chats' kept Claude Code processes (not in `runs`: no turn holds them)
+                    claudecode::end_all_warm(&st).await;
                     // the incognito chats still open, once their turns stopped
                     incognito::sweep(&st.db, &st.data_dir);
                     st.mcp.stop_all().await
@@ -748,4 +762,56 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tray_menu_is_in_the_ui_language() {
+        let ids = |tr| tray_items(tr).map(|(id, _)| id);
+        // the ids the tray's menu handler acts on
+        assert_eq!(ids(false), ["open", "new", "quick", "quit"]);
+        assert_eq!(ids(true), ids(false));
+        assert_eq!(tray_items(false).map(|(_, l)| l), ["Open ClaudeRust", "New Chat", "Quick Entry", "Quit ClaudeRust"]);
+        assert_eq!(tray_items(true).map(|(_, l)| l), ["ClaudeRust’ı aç", "Yeni sohbet", "Hızlı Giriş", "ClaudeRust’tan çık"]);
+    }
+
+    #[test]
+    fn closing_the_window_quits_unless_a_tray_keeps_the_app() {
+        assert!(hides_on_close(true, true));
+        // no tray (some Linux desktops): hiding would leave no way back
+        assert_eq!(hides_on_close(true, false), cfg!(target_os = "macos"));
+        assert_eq!(hides_on_close(false, true), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn the_artifact_protocol_serves_kept_documents_with_their_security_headers() {
+        let dir = std::env::temp_dir().join(format!("cr-lib-{}", util::new_id()));
+        let st = Arc::new(AppState::new(db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")));
+        st.served.lock().insert("tok".into(), ("text/html".into(), b"<p>hi</p>".to_vec()));
+        st.served.lock().insert("app".into(), (artifacts::MCP_APP_SERVED.into(), b"<p>app</p>".to_vec()));
+        let app = tauri::test::mock_app();
+        app.manage(st);
+        let get = |path: &str| artifact_protocol(app.handle(), &tauri::http::Request::builder().uri(format!("artifact://localhost/{path}")).body(vec![]).unwrap());
+        let r = get("tok");
+        assert_eq!(r.status(), 200);
+        let h = |r: &tauri::http::Response<Vec<u8>>, name: &str| r.headers()[name].to_str().unwrap().to_string();
+        assert_eq!(h(&r, "Content-Type"), "text/html");
+        assert_eq!(h(&r, "Content-Security-Policy"), artifacts::protocol_csp("text/html"));
+        assert_eq!(h(&r, "Cache-Control"), "no-store");
+        assert_eq!(h(&r, "X-Content-Type-Options"), "nosniff");
+        assert_eq!(r.body(), b"<p>hi</p>");
+        // an MCP app gets its own policy
+        let r = get("app");
+        assert_eq!(h(&r, "Content-Security-Policy"), artifacts::protocol_csp(artifacts::MCP_APP_SERVED));
+        assert_ne!(artifacts::protocol_csp(artifacts::MCP_APP_SERVED), artifacts::protocol_csp("text/html"));
+        for missing in ["other", "", "tok/x"] {
+            let r = get(missing);
+            assert_eq!(r.status(), 404, "{missing}");
+            assert_eq!(h(&r, "Content-Type"), "text/plain");
+            assert!(r.headers().get("Content-Security-Policy").is_none());
+        }
+    }
 }

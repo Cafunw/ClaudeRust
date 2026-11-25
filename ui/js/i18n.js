@@ -866,6 +866,7 @@ const en = {
   art_csp_blocked_script: 'The artifact tried to load {uri}, which isn’t one of the libraries artifacts can use (each at one version), so it was blocked.',
   mcp_config_reloaded: 'The MCP config file changed: servers reloaded.',
   art_interrupted: 'Interrupted', art_interrupted_note: 'This artifact was cut off before it was finished, so parts of it may be missing or not work.',
+  sc_panes_term: 'In the terminal, these keys go to the shell.',
 };
 
 const tr = {
@@ -1734,6 +1735,7 @@ const tr = {
   art_csp_blocked_script: 'Artifact {uri} adresini yüklemeye çalıştı; bu, artifact’lerin kullanabileceği kütüphanelerden (her biri tek bir sürümde) biri olmadığı için engellendi.',
   mcp_config_reloaded: 'MCP yapılandırma dosyası değişti: sunucular yeniden yüklendi.',
   art_interrupted: 'Yarıda kesildi', art_interrupted_note: 'Bu artifact bitmeden kesildi; bazı kısımları eksik olabilir ya da çalışmayabilir.',
+  sc_panes_term: 'Terminaldeyken bu tuşlar kabuğa gider.',
 };
 
 const dicts = { en, tr };

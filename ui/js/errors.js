@@ -55,6 +55,7 @@ export const ERROR_TEXT = {
   rate_limit_error: () => t('err_rate_limit'),
   overloaded_error: () => t('err_overloaded'),
   credit_low: ['Your credit balance is too low. Add credits to your Anthropic account, or use your Claude account.', 'Kredi bakiyeniz çok düşük. Anthropic hesabınıza kredi ekleyin veya Claude hesabınızı kullanın.'],
+  prompt_too_long: ['This conversation is now longer than the model can take in. Start a new chat, or remove some large attachments.', 'Bu sohbet artık modelin alabileceğinden uzun. Yeni bir sohbet başlatın ya da büyük ekleri kaldırın.'],
   // Claude Code (the Claude account's engine)
   claude_code: ['Claude Code stopped with an error.', 'Claude Code bir hatayla durdu.'],
   cli_timeout: (p, lang) => (lang === 'tr' ? `Claude ${took(p.s, lang)} içinde yanıt vermedi.` : `Claude didn’t answer within ${took(p.s, lang)}.`),
@@ -65,6 +66,8 @@ export const ERROR_TEXT = {
     ? `Claude planınızın kullanım sınırına ulaştınız. ${p.resets_at ? `Sınır ${when(p.resets_at, lang)} itibarıyla sıfırlanır.` : 'Sıfırlandığında yeniden deneyin.'}`
     : `You’ve reached your Claude plan’s usage limit. ${p.resets_at ? `It resets ${when(p.resets_at, lang)}.` : 'Try again once it resets.'}`),
   cli_session_lost: ['Claude Code no longer has this conversation’s session. Send the message again to start a new one.', 'Claude Code bu sohbetin oturumunu artık bulamıyor. Yeni bir oturum için mesajı yeniden gönderin.'],
+  cc_history_replayed: ['This chat goes on in a new Claude Code session, rebuilt from its history.', 'Bu sohbet, geçmişinden yeniden kurulan yeni bir Claude Code oturumunda sürüyor.'],
+  cc_history_partial: ['This chat goes on in a new Claude Code session, rebuilt from its history; some of its oldest messages or attachments were too much to include.', 'Bu sohbet, geçmişinden yeniden kurulan yeni bir Claude Code oturumunda sürüyor; en eski mesajlarından ya da eklerinden bazıları eklenemeyecek kadar fazlaydı.'],
   cli_no_session: ['This conversation has no Claude Code session yet: send a message first.', 'Bu sohbetin henüz bir Claude Code oturumu yok: önce bir mesaj gönderin.'],
   cli_sign_in_failed: ['Sign-in failed.', 'Oturum açılamadı.'],
   cli_sign_in_timeout: (p, lang) => (lang === 'tr' ? `Oturum açma ${p.n} dakika içinde tamamlanmadı.` : `Sign-in didn’t finish within ${p.n} ${many(p.n, 'minute', 'minutes')}.`),

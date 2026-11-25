@@ -1,33 +1,13 @@
-// npm run test:ui — round 10 Settings items: every page renders into its own
-// container (a slow page never draws into the next one), the chosen option of
-// a segmented control is visible in both themes, and an outside edit of the
-// MCP config is announced.
+// npm run test:ui — segmented controls (Settings, Todos and Usage filters):
+// the chosen option is visible in both themes and is said to a screen reader.
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { contrast } from '../e2e/contrast.mjs';
-import { setLanguage, t } from '../js/i18n.js';
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
 const CSS = read('../css/app.css');
-const SETTINGS = read('../js/settings.js');
-
-test('each Settings page renders into a container of its own, replaced when another page is shown', () => {
-  const show = SETTINGS.slice(SETTINGS.indexOf('function show(id)'), SETTINGS.indexOf('// redraw for changes made elsewhere'));
-  assert.match(show, /const page = h\('<div class="settings-page"><\/div>'\);\s*body\.replaceChildren\(page\);/);
-  assert.match(show, /RENDER\[id\]\(page, /, 'the page draws into its container, not the shared body');
-  assert.doesNotMatch(show, /RENDER\[id\]\(body/);
-});
-
-test('Settings → Skills shows the list of the folder picked last, not of a slower earlier pick', () => {
-  const src = read('../js/skills_page.js');
-  const draw = src.slice(src.indexOf('const draw = async () => {'), src.indexOf('actions.append('));
-  assert.match(draw, /const mine = \+\+drawn;/);
-  // both ways out of the await (a list, an error) check that no newer draw started meanwhile
-  assert.equal(draw.match(/if \(mine !== drawn\) return;/g).length, 2);
-  assert.ok(draw.indexOf('if (mine !== drawn) return;') < draw.indexOf('list.replaceChildren('));
-});
 
 /** The custom properties of the first rule whose selector starts with `sel`. */
 function tokens(sel) {
@@ -75,11 +55,7 @@ test('the chosen option of a segmented control stands out in both themes (WCAG 1
   assert.match(CSS, /@media \(forced-colors: active\) \{ \.segmented button\.on \{ outline:/, 'high-contrast mode, which drops shadows, keeps a mark');
 });
 
-test('an outside edit of the MCP config is announced, in both languages', () => {
-  assert.match(SETTINGS, /onBackend\('mcp-config-reloaded', \(\) => toast\(t\('mcp_config_reloaded'\)\)\)/);
-  setLanguage('en');
-  assert.equal(t('mcp_config_reloaded'), 'The MCP config file changed: servers reloaded.');
-  setLanguage('tr');
-  assert.equal(t('mcp_config_reloaded'), 'MCP yapılandırma dosyası değişti: sunucular yeniden yüklendi.');
-  setLanguage('en');
+test('the Todos and Usage filters say which option is chosen', () => {
+  assert.match(read('../js/todos_ui.js'), /class="todos-filters segmented" role="group"><button data-k="" class="\$\{kind \? '' : 'on'\}" aria-pressed="\$\{!kind\}">.*aria-pressed="\$\{kind === k\}"/);
+  assert.match(read('../js/usage_ui.js'), /<div class="segmented" role="group">.*aria-pressed="\$\{x === d\}"/);
 });

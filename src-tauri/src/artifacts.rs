@@ -1101,6 +1101,15 @@ mod tests {
         assert!(export_file(SHEET, "a", "x", "docx").unwrap_err().contains("Sheet"));
     }
 
+    /// A Doc's task item shows its checkbox in the bullet's place, not both: the page's CSS drops the bullet of
+    /// an item whose checkbox comes first in it (a tight list) or in its first paragraph (a loose one).
+    #[test]
+    fn a_docs_task_items_have_no_bullet() {
+        assert!(doc_html("- [ ] todo\n- [x] done\n").contains("<li><input disabled=\"\" type=\"checkbox\"/>\ntodo</li>"));
+        assert!(doc_html("- [ ] todo\n\n- [x] done\n").contains("<li>\n<p><input disabled=\"\" type=\"checkbox\"/>\ntodo</p>"));
+        assert!(TYPES_CSS.contains(".doc li:has(> input[type=\"checkbox\"]:first-child, > p:first-child > input[type=\"checkbox\"]:first-child) { list-style: none; }"));
+    }
+
     #[test]
     fn an_edit_in_place_is_a_new_version_claude_reads_as_the_users() {
         let first = "<antArtifact identifier=\"budget\" type=\"sheet\" title=\"Budget\">\nItem,Cost\nRent,1000\n</antArtifact>".to_string();

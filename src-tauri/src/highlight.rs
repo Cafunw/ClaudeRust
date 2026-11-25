@@ -25,8 +25,49 @@ const MAX_HIGHLIGHT_BYTES: usize = 300_000;
 /// Light, then dark.
 static PALETTES: LazyLock<[Palette; 2]> = LazyLock::new(|| {
     let set = two_face::theme::extra();
-    [EmbeddedThemeName::OneHalfLight, EmbeddedThemeName::OneHalfDark].map(|n| Palette::new(set.get(n)))
+    [(EmbeddedThemeName::OneHalfLight, 0), (EmbeddedThemeName::OneHalfDark, 1)].map(|(n, t)| Palette::new(set.get(n), BACKGROUNDS[t]))
 });
+/// The surfaces code is shown on, light then dark, each the one that gives
+/// the least contrast: app.css `--code-bg` (code blocks, attachment preview)
+/// in light, `--bg-1` (file viewer) in dark.
+const BACKGROUNDS: [Color; 2] = [Color { r: 0xf6, g: 0xf6, b: 0xf4, a: 0xff }, Color { r: 0x1f, g: 0x1f, b: 0x1f, a: 0xff }];
+/// WCAG AA for normal text, with a little room for rounding.
+const MIN_CONTRAST: f64 = 4.6;
+
+fn luminance(c: Color) -> f64 {
+    let lin = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+fn contrast(a: Color, b: Color) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// Tests: the contrast of two `#rrggbb` colours.
+#[cfg(test)]
+pub(crate) fn contrast_hex(a: &str, b: &str) -> f64 {
+    let c = |h: &str| {
+        let n = u32::from_str_radix(h.trim_start_matches('#'), 16).unwrap();
+        Color { r: (n >> 16) as u8, g: (n >> 8) as u8, b: n as u8, a: 0xff }
+    };
+    contrast(c(a), c(b))
+}
+
+/// `c`, darkened toward black on a light background or lightened toward
+/// white on a dark one just enough to be readable: the theme's hue stays.
+fn readable(c: Color, bg: Color) -> Color {
+    let to = if luminance(bg) > 0.5 { 0.0 } else { 255.0 };
+    let mix = |v: u8, t: f64| (f64::from(v) + (to - f64::from(v)) * t).round() as u8;
+    (0..=100)
+        .map(|i| f64::from(i) / 100.0)
+        .map(|t| Color { r: mix(c.r, t), g: mix(c.g, t), b: mix(c.b, t), a: c.a })
+        .find(|&x| contrast(x, bg) >= MIN_CONTRAST)
+        .unwrap_or(c)
+}
 const THEME_SCOPES: [&str; 2] = [":root[data-theme=\"light\"]", ":root[data-theme=\"dark\"]"];
 
 /// How a run of code looks in one theme.
@@ -82,12 +123,13 @@ struct Palette {
 }
 
 impl Palette {
-    fn new(theme: &Theme) -> Palette {
-        let mut colors = vec![theme.settings.foreground.unwrap_or(Color::BLACK)];
+    fn new(theme: &Theme, bg: Color) -> Palette {
+        let mut colors = vec![readable(theme.settings.foreground.unwrap_or(Color::BLACK), bg)];
         let mut fonts = vec![FontStyle::empty()];
         let mut rules = vec![];
         for (order, item) in theme.scopes.iter().enumerate() {
-            if let Some(c) = item.style.foreground.filter(|c| !colors.contains(c)) {
+            let style = StyleModifier { foreground: item.style.foreground.map(|c| readable(c, bg)), ..item.style };
+            if let Some(c) = style.foreground.filter(|c| !colors.contains(c)) {
                 colors.push(c);
             }
             // font styles add up, down the scopes
@@ -100,7 +142,7 @@ impl Palette {
             for sel in &item.scope.selectors {
                 let parts: Vec<Vec<u16>> = sel.extract_scopes().into_iter().map(|s| atoms(s).collect()).collect();
                 let last = mask(parts.last().into_iter().flatten().copied());
-                rules.push((parts.iter().map(Vec::len).sum::<usize>(), order, Rule { parts, last, style: item.style }));
+                rules.push((parts.iter().map(Vec::len).sum::<usize>(), order, Rule { parts, last, style }));
             }
         }
         // as in CSS: the most specific rule first, then the last one
@@ -506,6 +548,31 @@ mod tests {
         assert!(highlight("a { color: red; }\n", "css").contains("color: <span class=\"FF\">red</span>;"));
         let [l, d] = &*PALETTES;
         assert!(l.looks.len() <= 26 && d.looks.len() <= 26, "a slot is one letter");
+    }
+
+    /// Every colour a token class can have reads at WCAG AA (4.5:1) on each
+    /// surface app.css shows code on, in its theme.
+    #[test]
+    fn token_colours_meet_contrast() {
+        let css = include_str!("../../ui/css/app.css");
+        let (light, dark) = css.split_once(":root[data-theme=\"dark\"] {").unwrap();
+        let token = |block: &str, name: &str| {
+            let v = block.split(&format!("{name}: #")).nth(1).unwrap();
+            let n = u32::from_str_radix(&v[..6], 16).unwrap();
+            Color { r: (n >> 16) as u8, g: (n >> 8) as u8, b: n as u8, a: 0xff }
+        };
+        for (t, block) in [light, dark].into_iter().enumerate() {
+            let surfaces = [token(block, "--code-bg"), token(block, "--bg-1")];
+            assert!(surfaces.contains(&BACKGROUNDS[t]), "theme {t}: BACKGROUNDS is not one of app.css's code surfaces");
+            for &(c, _) in &PALETTES[t].looks {
+                for bg in surfaces {
+                    let r = contrast(c, bg);
+                    assert!(r >= 4.5, "theme {t}: #{:02x}{:02x}{:02x} on #{:02x}{:02x}{:02x} is {r:.2}:1", c.r, c.g, c.b, bg.r, bg.g, bg.b);
+                }
+            }
+        }
+        // colours that already read keep their value
+        assert_eq!(readable(Color::BLACK, BACKGROUNDS[0]), Color::BLACK);
     }
 
     /// Stripped of its tags, the HTML is the code; each character's class

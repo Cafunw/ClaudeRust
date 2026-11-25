@@ -154,11 +154,15 @@ pub async fn auth_status(override_path: &str) -> Value {
 /// The running sign-in, so a second one (or Cancel) can stop it.
 static LOGIN: parking_lot::Mutex<Option<CancellationToken>> = parking_lot::Mutex::new(None);
 
+/// Counts sign-ins and sign-outs: a chat's kept process (`Warm`) from before one isn't used again.
+static SIGN_INS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// `claude auth login`: the CLI opens the browser and ends when the sign-in
 /// does. Resolves with the new status, or `{"cancelled": true}`.
 pub async fn auth_login(override_path: &str) -> AppResult<Value> {
     crate::shellenv::ready().await;
     let cli = find_cli(override_path).ok_or_else(not_installed)?;
+    SIGN_INS.fetch_add(1, Ordering::SeqCst);
     let cancel = CancellationToken::new();
     if let Some(old) = LOGIN.lock().replace(cancel.clone()) {
         old.cancel();
@@ -210,6 +214,7 @@ pub fn auth_login_cancel() {
 pub async fn auth_logout(override_path: &str) -> AppResult<()> {
     crate::shellenv::ready().await;
     let cli = find_cli(override_path).ok_or_else(not_installed)?;
+    SIGN_INS.fetch_add(1, Ordering::SeqCst);
     match cli_output(&cli, &["auth", "logout"], 20).await {
         Some(o) if o.status.success() => Ok(()),
         Some(o) => {
@@ -224,14 +229,44 @@ pub async fn auth_logout(override_path: &str) -> AppResult<()> {
 /// ignored there) and counts it in this cap: at 64 the CLI answered "exceeded the 64 output token maximum".
 pub const TITLE_MAX_TOKENS: u32 = 1024;
 
-/// A short title for a conversation that runs on the Claude account (no API key to ask): one `one_shot` call,
-/// about 600 tokens in. None when the conversation doesn't run through the CLI or the call fails.
-pub async fn title(st: &AppState, conv: &crate::db::Conversation, user_text: &str, assistant_text: &str) -> Option<String> {
+/// A short title for a conversation that runs on the Claude account (no API key to ask): asked of the chat's
+/// kept process when it has one (the CLI's `generate_session_title`, no process started), else one `one_shot`
+/// call, about 600 tokens in. None when the conversation doesn't run through the CLI or the call fails.
+pub async fn title(st: &Arc<AppState>, conv: &crate::db::Conversation, user_text: &str, assistant_text: &str) -> Option<String> {
     if !uses_cli(st, conv).await {
         return None;
     }
-    let text = format!("<conversation>\nUser: {}\n\nAssistant: {}\n</conversation>", truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
+    let (user_text, assistant_text) = (truncate_chars(user_text, 1500), truncate_chars(assistant_text, 600));
+    if let Some(said) = warm_title(st, &conv.id, &format!("User: {user_text}\n\nAssistant: {assistant_text}")).await {
+        return said.as_deref().and_then(crate::engine::clean_title);
+    }
+    let text = format!("<conversation>\nUser: {user_text}\n\nAssistant: {assistant_text}\n</conversation>");
     crate::engine::clean_title(&one_shot(st, crate::prompts::TITLE_PROMPT, &text, TITLE_MAX_TOKENS, Duration::from_secs(45)).await.ok()?)
+}
+
+/// The title the chat's kept process writes: Some(None) when it answered without one, None when there is no
+/// such process or it gave no answer (a CLI without the request).
+async fn warm_title(st: &Arc<AppState>, conv_id: &str, description: &str) -> Option<Option<String>> {
+    let mut w = st.cc_warm.lend(conv_id)?;
+    let id = new_id();
+    write_line(&mut w.proc.stdin, &json!({"type": "control_request", "request_id": id, "request": {"subtype": "generate_session_title", "description": description, "persist": false}})).await;
+    let answer = tokio::time::timeout(Duration::from_secs(45), async {
+        while let Some(l) = w.proc.out.recv().await {
+            let v: Value = serde_json::from_str(&l).unwrap_or_default();
+            if v["type"] == "control_response" && v["response"]["request_id"] == id.as_str() {
+                return Some(v["response"].clone());
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    give_back(st, conv_id, w);
+    let r = answer?;
+    // (the CLI says `"title": null` when it has none)
+    let answered = r["subtype"] == "success" && r["response"].as_object().is_some_and(|o| o.contains_key("title"));
+    answered.then(|| r["response"]["title"].as_str().map(String::from))
 }
 
 /// The `result` line of a `--output-format json` run: the whole output, or (with a warning line before it,
@@ -609,6 +644,221 @@ async fn write_line(stdin: &mut Option<tokio::process::ChildStdin>, v: &Value) {
     }
 }
 
+/// A running CLI: its input, its output lines (read beside it, so one kept between turns never blocks on a
+/// full pipe) and the last lines it wrote to stderr.
+struct Proc {
+    child: tokio::process::Child,
+    stdin: Option<tokio::process::ChildStdin>,
+    out: tokio::sync::mpsc::UnboundedReceiver<String>,
+    err_tail: Arc<parking_lot::Mutex<VecDeque<String>>>,
+    err_reader: tokio::task::JoinHandle<()>,
+}
+
+impl Proc {
+    fn start(cmd: &mut tokio::process::Command) -> std::io::Result<Proc> {
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take();
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let (tx, out) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let Some(stdout) = stdout else { return };
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+        let err_tail: Arc<parking_lot::Mutex<VecDeque<String>>> = Arc::default();
+        let tail = err_tail.clone();
+        let err_reader = tokio::spawn(async move {
+            let Some(stderr) = stderr else { return };
+            // read to the end, whatever the encoding (a message in the system
+            // code page must not stop it): the CLI blocks on a full pipe
+            let mut r = BufReader::new(stderr);
+            while let Ok(Some((l, _))) = crate::mcp::read_line_lossy(&mut r, 8 * 1024).await {
+                let mut t = tail.lock();
+                if t.len() > 40 {
+                    t.pop_front();
+                }
+                t.push_back(l);
+            }
+        });
+        Ok(Proc { child, stdin, out, err_tail, err_reader })
+    }
+
+    /// Let it exit on its own (or stop it, `broke_off`), then read what it last wrote: a process it left
+    /// running can keep the pipe open.
+    async fn stop(self, broke_off: bool) {
+        stop_cli(self.child, self.stdin, broke_off).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.err_reader).await;
+    }
+}
+
+/// A chat's CLI kept for its next turn: the CLI goes on reading stream-json messages, so the next message goes
+/// straight to it instead of starting the CLI again (some 3 s of a turn on Haiku). A turn uses it only when it would start the
+/// same CLI at the same point of the same session (`warm_key`); otherwise it is ended and a new one started.
+pub struct Warm {
+    proc: Proc,
+    key: String,
+    /// the chat tools it was started with, as they are now (`load_tools` adds to them)
+    tools: Arc<SdkTools>,
+    session: String,
+    /// the row the session ends at
+    tip: String,
+}
+
+enum Slot {
+    Idle(Box<Warm>, u64),
+    /// in use beside a turn (a title, the end of a Stop): a turn waits for it
+    Busy,
+}
+
+/// The chats' kept CLIs: at most `WARM_MAX`, each until it has been idle `WARM_IDLE`.
+#[derive(Default)]
+pub struct WarmPool {
+    slots: parking_lot::Mutex<HashMap<String, Slot>>,
+    gen: std::sync::atomic::AtomicU64,
+}
+
+const WARM_IDLE: Duration = Duration::from_secs(300);
+const WARM_MAX: usize = 2;
+
+impl WarmPool {
+    /// The chat's kept CLI, once a title or a Stop that has it is done (waiting at most 10 s).
+    async fn take(&self, conv_id: &str) -> Option<Warm> {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let mut slots = self.slots.lock();
+                match slots.remove(conv_id) {
+                    Some(Slot::Idle(w, _)) => return Some(*w),
+                    Some(Slot::Busy) if Instant::now() < until => {
+                        slots.insert(conv_id.to_string(), Slot::Busy);
+                    }
+                    _ => return None,
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The chat's kept CLI, marked busy until `give_back`.
+    fn lend(&self, conv_id: &str) -> Option<Warm> {
+        let mut slots = self.slots.lock();
+        match slots.remove(conv_id)? {
+            Slot::Idle(w, _) => {
+                slots.insert(conv_id.to_string(), Slot::Busy);
+                Some(*w)
+            }
+            busy => {
+                slots.insert(conv_id.to_string(), busy);
+                None
+            }
+        }
+    }
+
+    /// A turn's CLI that still ends in the background: the chat's next turn waits for it.
+    fn busy(&self, conv_id: &str) {
+        self.slots.lock().insert(conv_id.to_string(), Slot::Busy);
+    }
+
+    /// No longer busy; false when it wasn't (a turn that waited no longer went on without it).
+    fn done(&self, conv_id: &str) -> bool {
+        let mut slots = self.slots.lock();
+        let busy = matches!(slots.get(conv_id), Some(Slot::Busy));
+        if busy {
+            slots.remove(conv_id);
+        }
+        busy
+    }
+
+    /// Keep `w` for the chat's next turn; the oldest other beyond `WARM_MAX` ends.
+    fn put(st: &Arc<AppState>, conv_id: &str, w: Warm) {
+        let gen = st.cc_warm.gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut gone = vec![];
+        {
+            let mut slots = st.cc_warm.slots.lock();
+            if let Some(Slot::Idle(old, _)) = slots.insert(conv_id.to_string(), Slot::Idle(Box::new(w), gen)) {
+                gone.push(*old);
+            }
+            let mut idle: Vec<(u64, String)> = slots.iter().filter_map(|(k, s)| if let Slot::Idle(_, g) = s { Some((*g, k.clone())) } else { None }).collect();
+            idle.sort_unstable();
+            for (_, k) in idle.iter().take(idle.len().saturating_sub(WARM_MAX)) {
+                if let Some(Slot::Idle(old, _)) = slots.remove(k) {
+                    gone.push(*old);
+                }
+            }
+        }
+        for w in gone {
+            end(w);
+        }
+        let (st, conv_id) = (st.clone(), conv_id.to_string());
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(WARM_IDLE).await;
+            let mut slots = st.cc_warm.slots.lock();
+            if matches!(slots.get(&conv_id), Some(Slot::Idle(_, g)) if *g == gen) {
+                if let Some(Slot::Idle(w, _)) = slots.remove(&conv_id) {
+                    end(*w);
+                }
+            }
+        });
+    }
+}
+
+/// End a kept CLI: its input closes and it exits by itself (or is stopped).
+fn end(w: Warm) {
+    tauri::async_runtime::spawn(w.proc.stop(false));
+}
+
+/// A CLI lent out (`WarmPool::lend`) back to its chat.
+fn give_back(st: &Arc<AppState>, conv_id: &str, w: Warm) {
+    if st.cc_warm.done(conv_id) {
+        WarmPool::put(st, conv_id, w);
+    } else {
+        end(w);
+    }
+}
+
+/// End the chat's kept CLI, if it has one (the chat was deleted); one in use beside a turn ends when it is given
+/// back.
+pub fn end_warm(st: &AppState, conv_id: &str) {
+    if let Some(Slot::Idle(w, _)) = st.cc_warm.slots.lock().remove(conv_id) {
+        end(*w);
+    }
+}
+
+/// End every chat's kept CLI: on a sign-in or sign-out (they run on the account they started with), and when
+/// the app quits.
+pub async fn end_all_warm(st: &AppState) {
+    let idle: Vec<Box<Warm>> = st.cc_warm.slots.lock().extract_if(|_, s| matches!(s, Slot::Idle(..))).filter_map(|(_, s)| if let Slot::Idle(w, _) = s { Some(w) } else { None }).collect();
+    futures_util::future::join_all(idle.into_iter().map(|w| w.proc.stop(false))).await;
+}
+
+/// What a chat's CLI is started with, apart from where its session resumes: the program, its folder, its
+/// arguments, its prompt and its tools, and the sign-in it runs on. Two turns with the same key can share one.
+fn warm_key(cli: &std::path::Path, cwd: &str, args: &[String], system: &str, tools: &SdkTools) -> String {
+    let mut kept = vec![];
+    let mut skip = false;
+    for a in args {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        match a.as_str() {
+            "--resume" | "--resume-session-at" => skip = true,
+            "--fork-session" => {}
+            _ => kept.push(a.as_str()),
+        }
+    }
+    let mut unloaded: Vec<String> = tools.unloaded.lock().iter().cloned().collect();
+    unloaded.sort_unstable();
+    let listed: Vec<Value> = tools.tools.iter().map(|(s, n, t)| json!([s, n, t.description, t.input_schema])).collect();
+    let mut mcp: Vec<&String> = tools.mcp.iter().collect();
+    mcp.sort_unstable();
+    let all = json!([cli, cwd, kept, system, listed, mcp, unloaded, SIGN_INS.load(Ordering::SeqCst)]);
+    crate::util::sha256_hex(all.to_string().as_bytes())
+}
+
 /// Run one user turn through the Claude Code CLI.
 /// How a turn ended, when it didn't fail outright.
 enum Outcome {
@@ -618,8 +868,23 @@ enum Outcome {
     ResumeLost,
     /// A message was stored as the CLI went away and no turn took it: its own turn.
     Next(String),
-    /// The CLI refused a flag the app can do without (`OLD_CLIS`); nothing was stored.
+    /// The CLI refused a flag the app can do without (`OLD_CLIS`), or the chat's kept CLI had gone; nothing
+    /// was stored.
     Again,
+    /// The CLI didn't take the earlier conversation as messages (`replay`: one too old for them); nothing
+    /// was stored. Once more with it as text.
+    Digest,
+}
+
+/// How a turn starts its session.
+#[derive(Clone, Copy, PartialEq)]
+enum Start {
+    /// where the conversation's CLI session is, when it still has one
+    Resume,
+    /// in a new session that is given the earlier conversation (its own was lost)
+    Fresh,
+    /// as `Fresh`, the earlier conversation as text
+    Digest,
 }
 
 /// CLIs, by path, too old for `--thinking-display` (they exit on an unknown option).
@@ -628,13 +893,14 @@ static OLD_CLIS: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::Mutex::new(Vec:
 
 pub async fn run<R: Runtime>(app: &AppHandle<R>, st: &Arc<AppState>, conv_id: &str, user_msg_id: String, cancel: &CancellationToken) -> AppResult<()> {
     crate::shellenv::ready().await;
-    let (mut id, mut fresh) = (user_msg_id, false);
+    let (mut id, mut start) = (user_msg_id, Start::Resume);
     loop {
-        match run_once(app, st, conv_id, id.clone(), cancel, fresh).await? {
+        match run_once(app, st, conv_id, id.clone(), cancel, start).await? {
             Outcome::Done => return Ok(()),
             // Start over in a new session that gets the earlier conversation as context.
-            Outcome::ResumeLost => fresh = true,
-            Outcome::Next(next) => (id, fresh) = (next, false),
+            Outcome::ResumeLost => start = Start::Fresh,
+            Outcome::Digest => start = Start::Digest,
+            Outcome::Next(next) => (id, start) = (next, Start::Resume),
             Outcome::Again => {}
         }
     }
@@ -673,8 +939,76 @@ fn history_context(path: &[Message]) -> String {
     }
 }
 
-/// The first line the CLI reads: the project files the session lacks, the earlier conversation (when a
-/// new session replaces one), then the message without the API engine's reminders.
+/// The images and PDFs a new session is given again of the earlier conversation, newest first: how many, and
+/// their size (base64), well below what one request to the model takes.
+const REPLAY_MEDIA: usize = 80;
+const REPLAY_MEDIA_BYTES: usize = 20_000_000;
+
+/// The earlier conversation as the stream-json lines that rebuild it in a new CLI session: each of the person's
+/// messages as it was sent, its images and PDFs too (`shouldQuery: false`: the CLI takes it in and answers
+/// nothing), and each answer's text. Tool calls and their results go as short notes, thinking not at all.
+/// Newest first within `text_budget` characters and the media limits; true when something was left out.
+/// Each group goes once the CLI has taken the one before (its `result`); the last one is for the new message.
+fn replay(path: &[Message], text_budget: usize) -> (Vec<Vec<Value>>, bool) {
+    // the person's message, then all that came until the next one
+    let mut turns: Vec<(Vec<Value>, Vec<Value>)> = vec![];
+    for m in path {
+        let blocks = m.content.as_array().cloned().unwrap_or_default();
+        if m.role == "user" && !render::is_tool_result_msg(m) {
+            turns.push((blocks.into_iter().filter(|b| !is_reminder(b) && matches!(b["type"].as_str(), Some("text" | "image" | "document"))).collect(), vec![]));
+            continue;
+        }
+        let Some((_, answer)) = turns.last_mut() else { continue };
+        for b in blocks {
+            let note = match b["type"].as_str() {
+                Some("text") => b["text"].as_str().unwrap_or("").to_string(),
+                Some("tool_use" | "server_tool_use") => format!("[Called the tool {} with {}]", b["name"].as_str().unwrap_or("?"), truncate_chars(&b["input"].to_string(), 300)),
+                Some("tool_result") => format!("[Tool result: {}]", truncate_chars(&render::plain_text(&b["content"]), 500)),
+                _ => continue,
+            };
+            if !note.trim().is_empty() {
+                answer.push(json!({"type": "text", "text": note}));
+            }
+        }
+    }
+    let (mut chars, mut media, mut bytes, mut from, mut partial) = (0, 0, 0, 0, false);
+    for (i, (asked, answer)) in turns.iter_mut().enumerate().rev() {
+        let size: usize = asked.iter().chain(answer.iter()).filter_map(|b| b["text"].as_str()).map(|t| t.chars().count()).sum();
+        if chars + size > text_budget {
+            (from, partial) = (i + 1, true);
+            break;
+        }
+        chars += size;
+        for b in asked.iter_mut().filter(|b| b["type"] != "text") {
+            let n = b.to_string().len();
+            if media < REPLAY_MEDIA && bytes + n <= REPLAY_MEDIA_BYTES {
+                (media, bytes) = (media + 1, bytes + n);
+            } else {
+                *b = json!({"type": "text", "text": "[An attachment that isn't sent again]"});
+                partial = true;
+            }
+        }
+    }
+    let line = |role: &str, content: Vec<Value>| json!({"type": role, "message": {"role": role, "content": content}, "parent_tool_use_id": null, "session_id": ""});
+    let mut groups = vec![vec![]];
+    for (i, (mut asked, answer)) in turns.into_iter().enumerate().skip(from) {
+        if i == from && from > 0 {
+            asked.insert(0, json!({"type": "text", "text": "[The start of this conversation is left out: it is too long to give again.]"}));
+        }
+        if asked.is_empty() {
+            asked.push(json!({"type": "text", "text": "[A message with nothing that can be given again]"}));
+        }
+        let mut u = line("user", asked);
+        u["shouldQuery"] = json!(false);
+        groups.last_mut().unwrap().push(u);
+        groups.push(if answer.is_empty() { vec![] } else { vec![line("assistant", answer)] });
+    }
+    (groups, partial)
+}
+
+/// The first line the CLI reads: the project files the session lacks, the earlier conversation as text (when a
+/// new session replaces one on a CLI that doesn't take it as messages), then the message without the API
+/// engine's reminders.
 fn first_input_line(message: &Value, files: Vec<Value>, history: &str, human: bool) -> Value {
     let mut content = files;
     if !history.is_empty() {
@@ -1124,8 +1458,10 @@ async fn run_once<R: Runtime>(
     conv_id: &str,
     user_msg_id: String,
     cancel: &CancellationToken,
-    fresh: bool,
+    start: Start,
 ) -> AppResult<Outcome> {
+    // the chat's kept CLI (or, once a Stop's CLI has ended, nothing)
+    let mut warm = st.cc_warm.take(conv_id).await;
     let conv = st.db.conv_get(conv_id)?;
     let settings = st.settings.read().clone();
     let user = st.db.msg_get(&user_msg_id)?;
@@ -1196,9 +1532,11 @@ async fn run_once<R: Runtime>(
     // a project's PDFs and images, and the chat prompt file (kept until the turn ends)
     let mut project_files: Vec<Value> = vec![];
     let mut _prompt_file: Option<PromptFile> = None;
+    let mut system = String::new();
     if chat {
         // our chat prompt (instructions, style, project knowledge) replaces the coding one
         let rc = crate::engine::build_request_context(st, &conv, &settings).await?;
+        system = rc.system.clone();
         let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &rc.system) {
             Ok(f) => f,
             Err(e) => return fail(AppError::coded("prompt_write_failed", json!({"path": cwd}), format!("Could not write the chat prompt (in {cwd}): {e}"))),
@@ -1242,17 +1580,20 @@ async fn run_once<R: Runtime>(
     let mut cost_before = 0.0;
     // the messages the CLI session already holds: those up to where it resumes
     let mut held: &[Message] = &[];
+    // the kept CLI holds the session where this turn resumes it
+    let mut warm_here = false;
     if let Some(i) = prev_at {
         let p = &path[i];
         if let Some(sid) = p.meta["cc_session"].as_str() {
+            let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
+            warm_here = at_tip && warm.as_ref().is_some_and(|w| w.session == sid && w.tip == p.id);
             // (cc_replay: changed since the session holds it, an artifact edited in place)
-            if fresh || p.meta["cc_replay"] == true || !transcript_exists(sid) {
-                with_history = true;
+            if start != Start::Resume || p.meta["cc_replay"] == true || !(warm_here || transcript_exists(sid)) {
+                (with_history, warm_here) = (true, false);
             } else {
                 held = &path[..=i];
                 args.push("--resume".into());
                 args.push(sid.to_string());
-                let at_tip = conv.options["cc_tip"].as_str() == Some(p.id.as_str());
                 cost_before = resumed_cost(at_tip, &p.meta, || restored_cost(sid));
                 if !at_tip {
                     args.push("--resume-session-at".into());
@@ -1291,55 +1632,73 @@ async fn run_once<R: Runtime>(
         args.extend(off);
     }
 
-    let history = if with_history { history_context(&path[..path.len().saturating_sub(1)]) } else { String::new() };
+    // the earlier conversation for a new session: as the messages it was (`replay`), or, on a CLI too old for
+    // them, as text
+    let digest = with_history && start == Start::Digest;
+    let history = if digest { history_context(&path[..path.len().saturating_sub(1)]) } else { String::new() };
+    let text_budget = crate::models::info(&conv.model).context as usize * 2;
+    let (groups, partial) = if with_history && !digest { replay(&path[..path.len().saturating_sub(1)], text_budget) } else { (vec![vec![]], false) };
+    let mut replay_lines: VecDeque<Vec<Value>> = groups.into();
     let (files, file_keys) = unsent_files(project_files, held);
     // A person typed it: the CLI then honours what only a person may type, such as the "ultracode"
     // keyword. Not over a replayed conversation, whose earlier words aren't this message's.
     let message = if continuing { continue_request(&user.content) } else { user.content.clone() };
     let first_line = first_input_line(&message, files, &history, !chat && !with_history && !continuing);
+    if let Some(last) = replay_lines.back_mut() {
+        last.push(first_line);
+    }
     if !file_keys.is_empty() {
         let mut meta = user.meta.clone();
         meta["cc_files"] = json!(file_keys);
         st.db.msg_update(&user_msg_id, &user.content, &meta)?;
     }
 
-    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
-    cmd.current_dir(&cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // Don't make the CLI think it's nested inside another Claude Code session.
-    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
-        cmd.env_remove(k);
-    }
-    // Own process group, so the CLI and everything it started (background
-    // shells, MCP servers) can be stopped together.
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return fail(AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display()))),
+    // A chat's kept CLI takes the message when this turn would start the same CLI where it is; any other is
+    // ended. Not with a spending limit: the CLI counts it over its whole run.
+    let key = warm_key(&cli, &cwd, &args, &system, &sdk_tools);
+    let mut session_id: Option<String> = None;
+    let reused = match warm.take().map(|mut w| (matches!(w.proc.child.try_wait(), Ok(None)), w)) {
+        Some((true, mut w)) if warm_here && w.key == key => {
+            // what it wrote while it waited (the end of the turn before)
+            while w.proc.out.try_recv().is_ok() {}
+            session_id = Some(w.session);
+            sdk_tools = w.tools;
+            Some(w.proc)
+        }
+        Some((_, w)) => {
+            // ended before the new one starts: two CLIs never write one session
+            w.proc.stop(false).await;
+            None
+        }
+        None => None,
     };
-    let mut stdin = child.stdin.take();
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let err_tail: Arc<parking_lot::Mutex<VecDeque<String>>> = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
-    let err_reader = {
-        let err_tail = err_tail.clone();
-        tokio::spawn(async move {
-            // read to the end, whatever the encoding (a message in the system
-            // code page must not stop it): the CLI blocks on a full pipe
-            let mut r = BufReader::new(stderr);
-            while let Ok(Some((l, _))) = crate::mcp::read_line_lossy(&mut r, 8 * 1024).await {
-                let mut t = err_tail.lock();
-                if t.len() > 40 {
-                    t.pop_front();
-                }
-                t.push_back(l);
+    // (an incognito chat's CLI ends with each turn, as its transcripts are swept: incognito.rs)
+    let keep_warm = chat && budget <= 0.0 && !conv.incognito;
+    let was_warm = reused.is_some();
+    let proc = match reused {
+        Some(p) => p,
+        None => {
+            let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
+            cmd.current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            // Don't make the CLI think it's nested inside another Claude Code session.
+            for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+                cmd.env_remove(k);
             }
-        })
+            // Own process group, so the CLI and everything it started (background
+            // shells, MCP servers) can be stopped together.
+            #[cfg(unix)]
+            cmd.process_group(0);
+            match Proc::start(&mut cmd) {
+                Ok(p) => p,
+                Err(e) => return fail(AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display()))),
+            }
+        }
     };
+    let Proc { child, mut stdin, mut out, err_tail, err_reader } = proc;
     // the line to this run: Stop for one workflow, a message while one runs
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
     st.cc_ctl.lock().insert(conv_id.to_string(), Ctl { tx: ctl_tx, waiting: false, spare: false });
@@ -1347,10 +1706,17 @@ async fn run_once<R: Runtime>(
     let mut servers: Vec<&str> = sdk_tools.tools.iter().map(|(s, ..)| s.as_str()).collect();
     servers.sort_unstable();
     servers.dedup();
-    if !servers.is_empty() {
+    if !servers.is_empty() && !was_warm {
         write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "initialize", "sdkMcpServers": servers}})).await;
     }
-    write_line(&mut stdin, &first_line).await;
+    for l in replay_lines.pop_front().unwrap_or_default() {
+        write_line(&mut stdin, &l).await;
+    }
+    // (a retry with the text digest follows an attempt that said so already)
+    if with_history && !digest && prev_at.is_none_or(|i| path[i].meta["cc_replay"] != true) {
+        let (kind, said) = if partial { ("cc_history_partial", "This chat goes on in a new Claude Code session, rebuilt from its history; some of its oldest messages or attachments were too much to include.") } else { ("cc_history_replayed", "This chat goes on in a new Claude Code session, rebuilt from its history.") };
+        let _ = app.emit("notice", crate::error::coded_notice(kind, Value::Null, said));
+    }
     // The CLI drops ultracode without a word when the account has dynamic
     // workflows off: ask what it applied.
     let uc_check = ultracode_asked.then(new_id);
@@ -1388,10 +1754,10 @@ async fn run_once<R: Runtime>(
     let seeded = ts.rows.len();
     let mcp: HashMap<String, (String, String)> = HashMap::new();
     let math = settings.latex_enabled;
-    let mut session_id: Option<String> = None;
     let mut result: Option<Value> = None;
     let mut interrupted = false;
-    let mut interrupt_deadline: Option<Instant> = None;
+    // the turn ended with the CLI waiting for the chat's next message: it is kept for it
+    let mut kept = false;
     // When the CLI reported its result, and how long it then gets to exit. It
     // can stay alive afterwards (a background shell, say); the turn still ends
     // then, unless a workflow (ultracode) runs: those report in a later turn.
@@ -1417,7 +1783,6 @@ async fn run_once<R: Runtime>(
     let mut delivered = false;
     let mut tip: Option<String> = None;
     let mut last_wf_emit = Instant::now() - Duration::from_secs(1);
-    let mut lines = BufReader::new(stdout).lines();
     let mut awaiting: HashMap<String, String> = HashMap::new();
     let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<PermDone>();
     // answers to the CLI from tasks that run beside the event loop (MCP tool calls)
@@ -1515,15 +1880,16 @@ async fn run_once<R: Runtime>(
     let events: AppResult<()> = async {
         loop {
             let line = tokio::select! {
-                l = lines.next_line() => l,
+                l = out.recv() => l,
+                // The reply stays as it is at the Stop, which ends the turn at once: the CLI's answer to the
+                // interrupt, and its end, come beside the chat's next turn (`after_stop`).
                 _ = cancel.cancelled(), if !interrupted => {
                     interrupted = true;
-                    interrupt_deadline = Some(Instant::now() + Duration::from_secs(5));
                     for id in &bg {
                         write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "stop_task", "task_id": id}})).await;
                     }
                     write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}})).await;
-                    continue;
+                    break;
                 }
                 Some(done) = perm_rx.recv() => {
                     let key = rid_key(&done.cli_request_id);
@@ -1564,18 +1930,29 @@ async fn run_once<R: Runtime>(
                     }
                     continue;
                 }
-                _ = tokio::time::sleep(Duration::from_millis(250)), if interrupt_deadline.is_some() || result_at.is_some() => {
-                    let now = Instant::now();
-                    let interrupt_over = interrupt_deadline.map(|d| now > d).unwrap_or(false);
-                    let result_over = result_at.map(|t| now.duration_since(t) > result_grace).unwrap_or(false);
-                    if interrupt_over || result_over {
+                _ = tokio::time::sleep(Duration::from_millis(250)), if result_at.is_some() => {
+                    if result_at.is_some_and(|t| t.elapsed() > result_grace) {
                         break;
                     }
                     continue;
                 }
             };
-            let Ok(Some(line)) = line else { break };
+            let Some(line) = line else { break };
             let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+            // the earlier conversation going in: the next part once the CLI has taken one
+            if !replay_lines.is_empty() {
+                match ev["type"].as_str() {
+                    Some("result") => {
+                        for l in replay_lines.pop_front().unwrap_or_default() {
+                            write_line(&mut stdin, &l).await;
+                        }
+                        continue;
+                    }
+                    // it answers what it was only to take in: a CLI too old for that (`Outcome::Digest`)
+                    Some("stream_event" | "assistant") => break,
+                    _ => {}
+                }
+            }
             if let Some(info) = crate::usage::info_of(&ev) {
                 crate::usage::record(app, st, info);
             }
@@ -1806,6 +2183,10 @@ async fn run_once<R: Runtime>(
                     idle = true;
                     // the spending limit ends the turn, workflows or not
                     let over_budget = ev["subtype"].as_str().is_some_and(|t| t.contains("budget"));
+                    if keep_warm && !over_budget && bg.is_empty() && !report_due && pending_say.is_empty() && ev["is_error"] != true {
+                        kept = true;
+                        break;
+                    }
                     if interrupted || over_budget || (bg.is_empty() && !report_due) {
                         result_at = Some(Instant::now());
                         result_grace = Duration::from_secs(3);
@@ -1843,19 +2224,29 @@ async fn run_once<R: Runtime>(
         st.pending_perms.lock().remove(&req_id);
         let _ = app.emit("permission-resolved", json!({"request_id": req_id, "conversation_id": conv_id}));
     }
-    // Let the CLI exit on its own, then stop it and everything it started.
-    stop_cli(child, stdin, events.is_err()).await;
-    // what it last wrote (why it exited, a lost session) is read before it's looked at; a process it left
-    // running can keep the pipe open
-    let _ = tokio::time::timeout(Duration::from_secs(1), err_reader).await;
+    let tail = err_tail.clone();
+    let mut proc = Some(Proc { child, stdin, out, err_tail, err_reader });
+    // the earlier conversation didn't all go in: the CLI ended, or answered what it was only to take in
+    let replay_cut = !replay_lines.is_empty() && !interrupted && ts.rows.len() == seeded;
+    // Let the CLI exit on its own, then stop it and everything it started (what it last wrote, why it
+    // exited or a lost session, is read before it's looked at). A kept one goes on; a stopped one ends
+    // beside the next turn.
+    if events.is_err() || replay_cut || !(interrupted || kept) {
+        if let Some(p) = proc.take() {
+            p.stop(events.is_err() || replay_cut).await;
+        }
+    }
     events?;
+    if replay_cut {
+        return Ok(Outcome::Digest);
+    }
     // a turn ended by a Stop that spared the workflows ends stopped too, not failed
     let stopped = interrupted || turn_stopped;
 
     // Bookkeeping on the last assistant row.
     let err_text = {
-        let t = err_tail.lock();
-        t.iter().rev().take(8).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        let t = tail.lock();
+        t.iter().skip(t.len().saturating_sub(8)).cloned().collect::<Vec<_>>().join("\n")
     };
     let mut error: Option<String> = None;
     let mut budget_stop: Option<Value> = None;
@@ -1882,16 +2273,20 @@ async fn run_once<R: Runtime>(
         }
         None => {}
     }
-    let error = error.map(|e| turn_error(e, &st.usage_limits.lock()));
-    // a CLI from before --thinking-display refuses to start with it: once more without it, from now on
-    if ts.rows.len() == seeded && !interrupted && !delivered && err_text.contains("--thinking-display") && !OLD_CLIS.lock().contains(&cli) {
-        OLD_CLIS.lock().push(cli);
+    let error = error.map(|e| turn_error(e, result.as_ref().unwrap_or(&Value::Null), &st.usage_limits.lock()));
+    // a CLI from before --thinking-display refuses to start with it: once more without it, from now on;
+    // the chat's kept CLI had gone before it read the message: once more with a new one
+    let old_cli = err_text.contains("--thinking-display") && !OLD_CLIS.lock().contains(&cli);
+    if ts.rows.len() == seeded && !interrupted && !delivered && (old_cli || (was_warm && result.is_none())) {
+        if old_cli {
+            OLD_CLIS.lock().push(cli);
+        }
         // nothing ran: the session's tip is where it was
         let tip = conv.options["cc_tip"].clone();
         update_conv_options(st, conv_id, |o| o["cc_tip"] = tip);
         return Ok(Outcome::Again);
     }
-    if !fresh && ts.rows.len() == seeded && !interrupted && !delivered {
+    if start == Start::Resume && ts.rows.len() == seeded && !interrupted && !delivered {
         let text = format!("{} {}", error.as_ref().map(|e| e.to_string()).unwrap_or_default(), err_text);
         if is_resume_lost(&text) {
             return Ok(Outcome::ResumeLost);
@@ -1915,13 +2310,24 @@ async fn run_once<R: Runtime>(
     }
     // Remember where the CLI session ends so the next message resumes there.
     let tip_id = ts.rows.iter().rev().find(|r| r.meta["cc_uuid"].is_string()).map(|r| r.id.clone()).or(tip);
-    if let Some(tip_id) = tip_id {
+    if let Some(tip_id) = tip_id.clone() {
         update_conv_options(st, conv_id, |o| o["cc_tip"] = json!(tip_id));
     }
     if let Some(r) = ts.rows.last() {
         st.db.conv_set_leaf(conv_id, Some(&r.id))?;
     }
     emit(app, st, conv_id, &mut ts, &mcp, math, &HashMap::new(), true);
+    if let Some(p) = proc {
+        if interrupted {
+            st.cc_warm.busy(conv_id);
+            let row = ts.rows.iter().rev().find(|r| r.role == "assistant").map(|r| r.id.clone());
+            tauri::async_runtime::spawn(after_stop(app.clone(), st.clone(), conv_id.to_string(), p, row, ts.cost_before));
+        } else if let (true, Some(session), Some(tip)) = (kept, session_id, tip_id) {
+            WarmPool::put(st, conv_id, Warm { proc: p, key, tools: sdk_tools.clone(), session, tip });
+        } else {
+            tauri::async_runtime::spawn(p.stop(false));
+        }
+    }
     // a message that came in as the CLI went away (it is stored, but no turn took it): its own run
     let mut orphan = pending_say.pop_back();
     while let Ok(c) = ctl_rx.try_recv() {
@@ -1964,14 +2370,7 @@ fn settle_rows(
     }
     let row = &mut ts.rows[i];
     if let Some(r) = result {
-        // a budget stop reports no usage (all zeros): the streamed one stays
-        if r["usage"]["output_tokens"].as_u64().is_some_and(|n| n > 0) {
-            row.meta["usage"] = r["usage"].clone();
-        }
-        row.meta["cost_usd"] = turn_cost(r, ts.cost_before);
-        // the session's running total, which the next resume starts from
-        row.meta["cc_cost_total"] = r["total_cost_usd"].clone();
-        row.meta["duration_ms"] = wall_ms.map(|ms| json!(ms)).unwrap_or_else(|| r["duration_ms"].clone());
+        result_meta(&mut row.meta, r, ts.cost_before, wall_ms);
     }
     // unfinished when stopped, or when the CLI went away mid-reply (as a dropped stream leaves it on the API)
     let cut_off = interrupted || (result.is_none() && error.is_some());
@@ -1999,10 +2398,54 @@ fn settle_rows(
     Ok(true)
 }
 
-/// A failed turn as the UI says it (ui/js/errors.js): coded by what the CLI said, the usage limit with when it resets.
-fn turn_error(message: String, limits: &Value) -> AppError {
+/// What the CLI's `result` says about the answer it ends: usage, its own cost, the session's running total
+/// and how long it took.
+fn result_meta(meta: &mut Value, r: &Value, cost_before: f64, wall_ms: Option<u64>) {
+    // a budget stop reports no usage (all zeros): the streamed one stays
+    if r["usage"]["output_tokens"].as_u64().is_some_and(|n| n > 0) {
+        meta["usage"] = r["usage"].clone();
+    }
+    meta["cost_usd"] = turn_cost(r, cost_before);
+    // the session's running total, which the next resume starts from
+    meta["cc_cost_total"] = r["total_cost_usd"].clone();
+    meta["duration_ms"] = wall_ms.map(|ms| json!(ms)).unwrap_or_else(|| r["duration_ms"].clone());
+}
+
+/// How long a stopped CLI has to answer its interrupt (and say what the turn cost) before it is ended.
+const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// The end of a turn that was stopped, beside the chat's next turn (which waits for it, `WarmPool::take`): the
+/// CLI's answer to the interrupt, whose cost goes on the stopped reply `row`, then the CLI's end.
+async fn after_stop<R: Runtime>(app: AppHandle<R>, st: Arc<AppState>, conv_id: String, mut p: Proc, row: Option<String>, cost_before: f64) {
+    let answer = tokio::time::timeout(STOP_GRACE, async {
+        while let Some(l) = p.out.recv().await {
+            let v: Value = serde_json::from_str(&l).unwrap_or_default();
+            if v["type"] == "result" {
+                return Some(v);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    if let (Some(r), Some(Ok(mut m))) = (&answer, row.map(|id| st.db.msg_get(&id))) {
+        result_meta(&mut m.meta, r, cost_before, None);
+        if st.db.msg_update(&m.id, &m.content, &m.meta).is_ok() {
+            emit_conv_updated(&app, &conv_id);
+        }
+    }
+    p.stop(answer.is_none()).await;
+    st.cc_warm.done(&conv_id);
+}
+
+/// A failed turn as the UI says it (ui/js/errors.js): coded by what the CLI said, the usage limit with when it
+/// resets, and the API's failures as the API engine has them (`result` is the CLI's, null when none came).
+fn turn_error(message: String, result: &Value, limits: &Value) -> AppError {
     let lower = message.to_lowercase();
-    if message.contains("Not logged in") || message.contains("/login") {
+    // the API's status: in the result (`api_error_status`), or the text of a CLI before it ("API Error: 529 {…}")
+    let status = result["api_error_status"].as_u64().or_else(|| message.strip_prefix("API Error: ")?.get(..3)?.parse().ok());
+    if message.contains("Not logged in") || message.contains("/login") || status == Some(401) {
         return AppError::coded("cli_not_signed_in", Value::Null, "You're not signed in to Claude. Open Settings → Account and sign in with your Claude account (or add an API key).");
     }
     if lower.contains("usage limit") || lower.contains("hit your limit") {
@@ -2016,17 +2459,25 @@ fn turn_error(message: String, limits: &Value) -> AppError {
     if is_resume_lost(&message) {
         return AppError::coded("cli_session_lost", Value::Null, message);
     }
-    AppError::coded("claude_code", Value::Null, message)
+    if result["terminal_reason"] == "prompt_too_long" || lower.starts_with("prompt is too long") {
+        return AppError::coded("prompt_too_long", Value::Null, message);
+    }
+    // no answer at all: the connection (the CLI after its retries, or its older "API Error: Connection error.")
+    let no_answer = result["terminal_reason"] == "api_error" || (lower.starts_with("api error") && ["connection", "timed out", "econn", "fetch failed"].iter().any(|w| lower.contains(w)));
+    let kind = match status {
+        Some(529) => "overloaded_error",
+        Some(429) => "rate_limit_error",
+        Some(s) if s >= 500 => "api_error",
+        Some(_) => "invalid_request_error",
+        None if no_answer => "network",
+        None => return AppError::coded("claude_code", Value::Null, message),
+    };
+    AppError::Api { status: status.unwrap_or(0) as u16, kind: kind.into(), message }
 }
 
-/// A failure as a row's meta keeps it: what the UI reads to say it (`error.rs` serializes the same fields).
+/// A failure as a row's meta keeps it: what the UI reads to say it, as the API engine stores its own.
 fn error_meta(e: &AppError) -> Value {
-    let mut v = json!({"message": e.to_string(), "kind": e.kind()});
-    let params = e.params();
-    if !params.is_null() {
-        v["params"] = params;
-    }
-    v
+    serde_json::to_value(e).unwrap_or_default()
 }
 
 /// Whether a reply is only the text of the error its turn ended with.
@@ -2232,7 +2683,7 @@ mod tests {
     #[test]
     fn a_failed_turn_is_coded_by_what_the_cli_said() {
         let limits = json!({"limiting": "five_hour", "limits": [{"key": "seven_day", "resets_at": 1}, {"key": "five_hour", "resets_at": 1_795_536_000_000i64}]});
-        let coded = |m: &str, l: &Value| serde_json::to_value(turn_error(m.into(), l)).unwrap();
+        let coded = |m: &str, l: &Value| serde_json::to_value(turn_error(m.into(), &Value::Null, l)).unwrap();
         let out = coded("Not logged in · Please run /login", &Value::Null);
         assert_eq!(out["kind"], "cli_not_signed_in");
         assert!(out["message"].as_str().unwrap().starts_with("You're not signed in"), "{out}");
@@ -2241,9 +2692,31 @@ mod tests {
         assert_eq!((unknown["kind"].as_str(), unknown.get("params")), (Some("cli_usage_limit"), None));
         assert_eq!(coded("Credit balance is too low", &Value::Null)["kind"], "credit_low");
         assert_eq!(coded("No conversation found with session ID: x", &Value::Null)["kind"], "cli_session_lost");
-        let other = coded("API Error: 500", &Value::Null);
-        assert_eq!((other["kind"].as_str(), other["message"].as_str()), (Some("claude_code"), Some("API Error: 500")));
-        assert_eq!(error_meta(&turn_error("x".into(), &Value::Null)), json!({"message": "x", "kind": "claude_code"}));
+        let other = coded("Something odd", &Value::Null);
+        assert_eq!((other["kind"].as_str(), other["message"].as_str()), (Some("claude_code"), Some("Something odd")));
+        assert_eq!(error_meta(&turn_error("x".into(), &Value::Null, &Value::Null)), json!({"message": "x", "kind": "claude_code", "status": 0}));
+
+        // the API's failures as Claude Code 2.1.326 ends a turn on them (its result line; probed against a mock API),
+        // and as older CLIs said them: the kinds and statuses the API engine has, so the UI says them alike
+        let api = |text: &str, status: Value, reason: &str| {
+            let r = json!({"type": "result", "subtype": "success", "is_error": true, "result": text, "terminal_reason": reason, "api_error_status": status});
+            let e = serde_json::to_value(turn_error(text.into(), &r, &Value::Null)).unwrap();
+            (e["kind"].as_str().unwrap_or_default().to_string(), e["status"].as_u64().unwrap_or_default(), e["message"] == text)
+        };
+        let k = |kind: &str, status: u64| (kind.to_string(), status, true);
+        assert_eq!(api("API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.", json!(529), "api_error"), k("overloaded_error", 529));
+        assert_eq!(api("API Error: 500 Internal server error. This is a server-side issue, usually temporary.", json!(500), "api_error"), k("api_error", 500));
+        assert_eq!(api("API Error: 429 Rate limited.", json!(429), "api_error"), k("rate_limit_error", 429));
+        assert_eq!(api("API Error: Connection dropped (ECONNRESET). Check the gateway set in ANTHROPIC_BASE_URL, then try again.", Value::Null, "api_error"), k("network", 0));
+        assert_eq!(api("Prompt is too long · the request is ~250000 tokens (limit 200000)", json!(400), "prompt_too_long"), k("prompt_too_long", 0));
+        assert_eq!(api("API Error: 400 Bad request", json!(400), "api_error"), k("invalid_request_error", 400));
+        let old = |text: &str| api(text, Value::Null, "");
+        assert_eq!(old(r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#), k("overloaded_error", 529));
+        assert_eq!(old("API Error: 503 upstream connect error"), k("api_error", 503));
+        assert_eq!(old("API Error: Connection error."), k("network", 0));
+        assert_eq!(old("API Error: Request timed out."), k("network", 0));
+        assert_eq!(old("API Error: Claude's response exceeded the 64 output token maximum."), k("claude_code", 0));
+        assert_eq!(api("API Error: 401 OAuth token expired · Please run /login", json!(401), "api_error").0, "cli_not_signed_in");
 
         let said = json!({"is_error": true, "result": "Not logged in · Please run /login"});
         assert!(echoes_error(&json!([{"type": "text", "text": "Not logged in · Please run /login\n"}]), &said));
@@ -2259,7 +2732,7 @@ mod tests {
         let reply = Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: "assistant".into(), content: json!([{"type": "text", "text": "Not logged in · Please run /login"}]), meta: json!({"engine": ENGINE}), created_at: 1 };
         st.db.msg_insert(&reply).unwrap();
         let mut ts = TurnState { rows: vec![reply.clone()], current: None, streaming: None, thinking: Default::default(), first_id: None, siblings: json!({}), tracker: Default::default(), last_emit: Instant::now(), cost_before: 0.0 };
-        let e = turn_error("Not logged in · Please run /login".into(), &Value::Null);
+        let e = turn_error("Not logged in · Please run /login".into(), &Value::Null, &Value::Null);
         assert!(settle_rows(&st, &conv.id, &mut ts, &Some(said), None, false, Some(&e), None).unwrap());
         let stored = st.db.msg_get(&reply.id).unwrap();
         assert_eq!((stored.content, stored.meta["error"]["kind"].as_str()), (json!([]), Some("cli_not_signed_in")));
@@ -2381,7 +2854,7 @@ mod tests {
     async fn an_sdk_tool_call_goes_to_the_apps_connection() {
         let dir = std::env::temp_dir().join(format!("cr-cc-sdk-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let st = Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")));
         let mut all = crate::past_chats::mcp_tools();
         // a connected server that happens to have the name: its tools are its own
         all.extend([tool("weather", "get_forecast"), tool(crate::past_chats::SERVER, "query")]);
@@ -2475,7 +2948,7 @@ mod tests {
     async fn a_real_cli_writes_a_title() {
         let dir = std::env::temp_dir().join(format!("cr-cc-title-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let st = AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json"));
+        let st = Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")));
         st.settings.write().chat_engine = "claude-code".into();
         let conv = st.db.conv_create("chat", "claude-sonnet-5-5", None, None, &json!({})).unwrap();
         let t = title(&st, &conv, "How do I make soft-boiled eggs for breakfast?", "Boil water, cook the eggs for six minutes, then cool them.").await;
@@ -2685,6 +3158,36 @@ mod tests {
         ];
         let h = history_context(&path);
         assert_eq!(h, "User: fix it\n\nAssistant: Looking.\n\nAssistant: Done.");
+    }
+
+    #[test]
+    fn a_replayed_history_keeps_the_newest_within_its_limits() {
+        let m = |role: &str, content: Value| Message { id: new_id(), conversation_id: "c".into(), parent_id: None, role: role.into(), content, meta: json!({}), created_at: 0 };
+        let img = |data: &str| json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}});
+        let said = |t: &str| json!([{"type": "text", "text": t}]);
+        let mut path = vec![m("user", said("one")), m("assistant", said("first answer"))];
+        for i in 0..REPLAY_MEDIA + 1 {
+            path.push(m("user", json!([{"type": "text", "text": format!("q{i}")}, img("AAAA")])));
+            path.push(m("assistant", json!([{"type": "thinking", "thinking": "x"}, {"type": "text", "text": "ok"}])));
+        }
+        // all of it: one line per message (the person's taken in without an answer), the next part after each
+        let (groups, partial) = replay(&path, 1_000_000);
+        assert_eq!(groups.len(), path.len() / 2 + 1);
+        assert_eq!(groups[0], vec![json!({"type": "user", "message": {"role": "user", "content": said("one")}, "parent_tool_use_id": null, "session_id": "", "shouldQuery": false})]);
+        assert_eq!(groups[1][0], json!({"type": "assistant", "message": {"role": "assistant", "content": said("first answer")}, "parent_tool_use_id": null, "session_id": ""}));
+        assert_eq!(groups.last().unwrap(), &vec![json!({"type": "assistant", "message": {"role": "assistant", "content": said("ok")}, "parent_tool_use_id": null, "session_id": ""})], "thinking left out");
+        // one picture over the limit: the oldest goes as a note
+        let sent: Vec<&Value> = groups.iter().flatten().flat_map(|l| l["message"]["content"].as_array().unwrap()).filter(|b| b["type"] == "image").collect();
+        assert_eq!((sent.len(), partial), (REPLAY_MEDIA, true));
+        assert_eq!(groups[1][1]["message"]["content"][1]["text"], "[An attachment that isn't sent again]");
+        // too much text: the oldest messages go, and the first one kept says so
+        let (groups, partial) = replay(&path[path.len() - 4..], 5);
+        assert!(partial);
+        assert_eq!(groups[0][0]["message"]["content"][0]["text"], "[The start of this conversation is left out: it is too long to give again.]");
+        assert_eq!(groups[0][0]["message"]["content"][1]["text"], format!("q{REPLAY_MEDIA}"));
+        assert_eq!(groups.len(), 2);
+        // nothing before: the new message alone
+        assert_eq!(replay(&[], 10), (vec![vec![]], false));
     }
 
     /// A project's text file goes in the chat's prompt file, its PDFs and images in the first line the CLI

@@ -79,6 +79,11 @@ export function renderOnboarding(view, done) {
     done();
   };
   const acct = $('[data-f=acct]', view);
+  // focus starts at the top field; a signed-in account's button takes it unless the user has started typing
+  const nameIn = $('[data-f=name]', view);
+  let typed = false, primary = null;
+  nameIn.addEventListener('input', () => { typed = true; }, { once: true });
+  nameIn.focus();
   accountStatus().then((a) => {
     acct.innerHTML = '';
     if (!a.found) {
@@ -87,10 +92,12 @@ export function renderOnboarding(view, done) {
       const b = button(t('acct_continue_as', { email: a.email || planName(a) || 'Claude' }), 'accent lg', useAccount);
       b.style.width = '100%';
       acct.appendChild(b);
+      primary = b;
+      if (document.activeElement === nameIn && !typed) b.focus();
     } else {
       acct.appendChild(signInButton('accent lg', useAccount, { wide: true }));
     }
   });
-  view.querySelectorAll('input').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); }));
-  $('[data-f=key]', view).focus();
+  // Enter in the name field takes the signed-in account's way, in the key fields the key's
+  view.querySelectorAll('input').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { if (i === nameIn && primary) primary.click(); else submit(); } }));
 }

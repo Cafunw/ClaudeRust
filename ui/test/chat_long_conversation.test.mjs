@@ -1,7 +1,17 @@
-// npm run test:ui — when a closed conversation's memory is given back (ui/js/turnwindow.js trimmer).
+// npm run test:ui — long conversations (ui/js/turnwindow.js): far turns are
+// parked, and a closed conversation's memory is given back (the trimmer).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TRIM_TURNS, trimmer } from '../js/turnwindow.js';
+import { TRIM_TURNS, trimmer, parked } from '../js/turnwindow.js';
+
+test('far turns are parked, near ones drawn, and the band between keeps each as it is', () => {
+  const view = 800;
+  assert.equal(parked(0, view, true), false, 'on screen');
+  assert.equal(parked(1000, view, true), false, 'within two screens');
+  assert.equal(parked(4000, view, false), true, 'beyond four screens');
+  assert.equal(parked(2500, view, false), false, 'between: drawn stays drawn');
+  assert.equal(parked(2500, view, true), true, 'between: parked stays parked');
+});
 
 function setup(t, busy = () => false) {
   t.mock.timers.enable({ apis: ['setTimeout'] });

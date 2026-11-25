@@ -1,7 +1,7 @@
-// npm run test:ui — round 10 Code tab and chat view items (EV8-16..19 and the sweep):
-// live regions that empty once said and on a language change, Tab that wraps
-// instead of landing on <body>, focus kept on a control drawn again, the
-// header's title before the crumbs, the Code home's mark and worktree card.
+// npm run test:ui — screen reader and keyboard focus: live regions that empty
+// once said and on a language change, controls that say their state, Tab that
+// wraps instead of landing on <body>, focus kept on a control drawn again, and
+// focus tracking that keeps no closed chat alive.
 import './stub_globals.mjs';
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,14 +9,8 @@ import { readFileSync } from 'node:fs';
 import { announce, clearAnnouncements, SAID_MS, wrapStep, tabStop, controlKey, copyOf } from '../js/a11y.js';
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
-const css = read('../css/app.css');
-// the declarations of the rule whose selector list is exactly `sel` (the last one wins, as in CSS)
-const rule = (sel) => {
-  const all = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((m) => m[1].trim().endsWith(sel) && m[1].trim().split('\n').pop().trim() === sel);
-  return all.length ? all[all.length - 1][2] : null;
-};
 
-test('EV8-16: a live region empties once said, and at once on a language change', () => {
+test('a live region empties once said, and at once on a language change', () => {
   const made = [];
   globalThis.document.body = { appendChild(el) { el.isConnected = true; } };
   globalThis.document.createElement = () => { const el = { textContent: '', isConnected: false, setAttribute() {}, className: '' }; made.push(el); return el; };
@@ -44,7 +38,7 @@ test('EV8-16: a live region empties once said, and at once on a language change'
   assert.match(read('../js/a11y.js'), /new MutationObserver\(clearAnnouncements\)\.observe\(document\.documentElement, \{ attributes: true, attributeFilter: \['lang'\] \}\)/);
 });
 
-test('EV8-16: the sidebar toggle says whether the sidebar is open, kept current', () => {
+test('the sidebar toggle says whether the sidebar is open, kept current', () => {
   const sb = read('../js/sidebar.js');
   assert.match(sb, /data-act="toggle"[^>]*aria-expanded="\$\{!store\.sidebarCollapsed\}"/);
   assert.match(sb, /classList\.toggle\('collapsed', on\);\s*\n\s*\$\('#sidebar \[data-act=toggle\]'\)\?\.setAttribute\('aria-expanded', String\(!on\)\)/);
@@ -54,7 +48,7 @@ test('EV8-16: the sidebar toggle says whether the sidebar is open, kept current'
   assert.match(read('../js/panes/terminal.js'), /term\.textarea\.setAttribute\('aria-label', t\('ws_terminal'\)\)/);
 });
 
-test('EV8-19: past the last control Tab wraps to the first (Shift+Tab back), never to <body>', () => {
+test('past the last control Tab wraps to the first (Shift+Tab back), never to <body>', () => {
   const [a, b, c] = ['first', 'middle', 'last'];
   assert.equal(wrapStep([a, b, c], c, false), a);
   assert.equal(wrapStep([a, b, c], a, true), c);
@@ -71,7 +65,7 @@ test('EV8-19: past the last control Tab wraps to the first (Shift+Tab back), nev
   assert.ok(!tabStop(el(0, false)), 'not shown');
 });
 
-test('EV8-19: a control drawn again (its title arrived, it was starred) gets the focus back', () => {
+test('a control drawn again (its title arrived, it was starred) gets the focus back', () => {
   const el = (tag, cls, attrs = {}) => ({ tagName: tag, classList: cls ? cls.split(' ') : [], attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })) });
   const oldTitle = el('BUTTON', 'title-btn', { 'aria-haspopup': 'menu', title: 'Untitled' });
   const newTitle = el('BUTTON', 'title-btn', { 'aria-haspopup': 'menu', title: 'Add mul function to calc.py' });
@@ -92,39 +86,15 @@ test('EV8-19: a control drawn again (its title arrived, it was starred) gets the
   assert.match(read('../js/util.js'), /const hadFocus = m\.el\.contains\(document\.activeElement\);\s*\n\s*m\.el\.remove\(\);\s*\n\s*if \(hadFocus && m\.anchor && m\.anchor\.isConnected\) m\.anchor\.focus/);
 });
 
-test('EV8-19: on the Code home Tab meets the box\'s "+" before the row under the box', () => {
+test('on the Code home Tab meets the box\'s "+" before the row under the box', () => {
   const code = read('../js/code.js');
   assert.match(code, /\$\('\[data-act=attach\]', composer\.el\)\.after\(envRow\)/);
   assert.doesNotMatch(code, /composer-bar', composer\.el\)\.prepend\(envRow\)/);
 });
 
-test('EV8-17: the session title keeps its room; crumbs and the watch badge give way first', () => {
-  const give = rule('.topbar .crumb, .topbar .active-tool.wt');
-  assert.ok(give && /flex-shrink:\s*100/.test(give) && /min-width:\s*28px/.test(give), 'crumbs shrink a hundred times faster, down to their icon');
-  assert.doesNotMatch(css, /\.topbar \.crumb \{[^}]*min-width:\s*64px/, 'no crumb keeps 64 px ahead of the title');
-  assert.match(css, /@container \(max-width: 640px\) \{\s*\n\s*\.topbar \.watch-badge > span:not\(\.wb-ok\):not\(\.wb-err\) \{ display: none; \}/);
-  assert.match(css, /@container \(max-width: 400px\) \{[^}]*\.topbar \.ctx-meter \.pct \{ display: none; \}/);
-  const title = rule('.topbar .title-btn');
-  assert.ok(title && /flex-shrink:\s*1\b/.test(title), 'the title shrinks last');
-});
-
-test('EV8-18: the Code home mark heads the stage, the worktree hint sits under its label', () => {
-  const code = read('../js/code.js');
-  assert.match(code, /<div class="code-stage"><span class="env-mark">\$\{spark\(24\)\}<\/span>\s*\n\s*<div class="env-card"><div class="env-list">/);
-  const mark = rule('.env-mark');
-  assert.ok(mark && !/position:\s*absolute/.test(mark), 'no longer pinned over the card\'s border');
-  const wt = rule('.env-card.env-wt');
-  assert.ok(wt && !/flex-direction:\s*row/.test(wt), 'label and hint stacked, not two narrow columns');
-  assert.ok(!/white-space:\s*nowrap/.test(rule('.env-wt span') || ''), 'the hint wraps in a narrow window instead of being cut');
-});
-
-test('sweep: a narrow Sessions page keeps its head on one row (Routines and Import as icons, still named)', () => {
-  const code = read('../js/code.js');
-  for (const act of ['routines', 'import']) assert.match(code, new RegExp(`class="btn sess-sec" data-act="${act}" title="[^"]+" aria-label="[^"]+">\\$\\{icon\\([^)]*\\)\\}<span class="lbl">`));
-  assert.match(css, /@media \(max-width: 600px\) \{ \.page-head \.sess-sec \.lbl \{ display: none; \} \}/);
-});
-
-test('sweep: a narrow chat keeps a gap under the composer\'s note', () => {
-  const narrow = css.slice(css.indexOf('@media (max-width: 760px) {'));
-  assert.match(narrow.slice(0, narrow.indexOf('}\n}') + 3), /\.chat-bottom \{ padding: 0 12px 6px; \}/);
+test('where focus was is remembered weakly, so a closed chat can be collected', () => {
+  const a11y = read('../js/a11y.js');
+  assert.match(a11y, /lastOutside = new WeakRef\(e\.target\)/);
+  assert.match(a11y, /ancestors\.push\(new WeakRef\(p\)\)/);
+  assert.doesNotMatch(a11y, /lastOutside = e\.target|ancestors\.push\(p\)/);
 });

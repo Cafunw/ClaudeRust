@@ -89,15 +89,24 @@ export function convTitle(c) {
 }
 
 /** One line of a message without its Markdown: code fences, table pipes and
- *  rules, heading, quote and bullet marks, bold, code ticks, link targets. */
+ *  rules, heading, quote and bullet marks, emphasis, code ticks, links and
+ *  images (as their text), also where the snippet's "…" cut them off. */
 function plainLine(line) {
   if (/^\s*(```|~~~)/.test(line) || /^[\s|:…-]*-{3,}[\s|:…-]*$/.test(line)) return '';
   // a table row (the snippet may cut it at either end, after "…")
   if (/^[\s…]*\||\|[\s…]*$/.test(line)) line = line.replace(/\s*\|\s*/g, ' ');
+  // a link target: up to its ")" (one nested pair, as in Wikipedia's), or cut off
+  const target = String.raw`\((?:[^()\s]|\([^()\s]*\))*\)?`;
   return line
-    .replace(/^([\s…]*)(?:#{1,6}|>+|[-*+])\s+/, '$1')
-    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
-    .replace(/\*\*|__|~~|`/g, '');
+    .replace(/^([\s…]*)(?:#{1,6}|>+|[-*+])\s+(?:\[[ xX]\]\s+)?/, '$1')
+    .replace(new RegExp(String.raw`!?\[([^\]\n]*)\]${target}`, 'g'), '$1')
+    .replace(new RegExp(String.raw`\]${target}`, 'g'), '')
+    .replace(/<(https?:\/\/[^>\s]+)>/g, '$1')
+    .replace(/\*\*|__|~~|`/g, '')
+    // *italic* and _italic_ (not 2 * 3, 2*3 or snake_case), then a * whose pair the snippet cut off
+    .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, '$1$2')
+    .replace(/(^|[^\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, '$1$2')
+    .replace(/(^|[\s…(])\*(?=[^\s*])|([^\s*])\*(?=$|[\s….,;:!?)])/g, '$1$2');
 }
 
 /** A search snippet as HTML: plain text, with the backend's match markers

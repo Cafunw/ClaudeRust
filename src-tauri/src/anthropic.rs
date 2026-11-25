@@ -449,7 +449,14 @@ pub fn api_error(status: u16, body: &str) -> AppError {
         message = format!("Invalid API key ({message})");
     }
     // the UI says this one in its language (errors.js)
-    let kind = if message.to_lowercase().contains("credit balance is too low") { "credit_low".into() } else { kind };
+    let lower = message.to_lowercase();
+    let kind = if lower.contains("credit balance is too low") {
+        "credit_low".into()
+    } else if lower.contains("prompt is too long") {
+        "prompt_too_long".into()
+    } else {
+        kind
+    };
     AppError::Api {
         status,
         kind,
@@ -861,6 +868,8 @@ mod tests {
         assert_eq!(e.kind(), "invalid_request_error");
         let low = api_error(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#);
         assert_eq!(low.kind(), "credit_low");
+        let long = api_error(400, r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 215000 tokens > 200000 maximum"}}"#);
+        assert_eq!(long.kind(), "prompt_too_long");
         assert_eq!(e.to_string(), "bad");
     }
 

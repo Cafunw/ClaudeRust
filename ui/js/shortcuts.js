@@ -34,9 +34,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   // Alt+1..8: side-panel panes of a code session, in the order of their tabs
-  // (the key's code: ⌥1 types "¡" on macOS)
+  // (the key's code: ⌥1 types "¡" on macOS). The terminal keeps them, as in
+  // Desktop: shells use Alt+digit (readline's and PowerShell's digit-argument).
   const digit = /^Digit([1-8])$/.exec(e.code || '');
-  if (e.altKey && !e.ctrlKey && !e.metaKey && digit && workspace.context()) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && digit && workspace.context() && !inTerminal(e)) {
     const pane = workspace.tabOrder()[+digit[1] - 1];
     if (!pane) return;
     e.preventDefault();
@@ -46,6 +47,9 @@ window.addEventListener('keydown', (e) => {
   if (keymap.matches(e, 'shortcuts')) { e.preventDefault(); openShortcuts(); }
 }, true);
 window.addEventListener('keyup', (e) => { if (e.key === 'Control') cycle = null; });
+
+/** Whether a key event is typed into the integrated terminal. */
+export const inTerminal = (e) => !!(e.target && e.target.closest && e.target.closest('.xterm'));
 
 export function openShortcuts() {
   const rows = [
@@ -75,7 +79,7 @@ export function openShortcuts() {
   modal({
     title: t('sc_sheet_title'),
     body: `<table class="kv shortcuts">${rows.map(([a, k]) => `<tr><td>${esc(a)}</td><td><kbd>${esc(k)}</kbd></td></tr>`).join('')}</table>
-      <p class="muted small" style="margin-top:10px">${esc(workspace.paneHints())}</p><p class="muted small">${esc(t('sc_customize'))}</p>`,
+      <p class="muted small" style="margin-top:10px">${esc(workspace.paneHints())} ${esc(t('sc_panes_term'))}</p><p class="muted small">${esc(t('sc_customize'))}</p>`,
   });
 }
 

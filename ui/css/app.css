@@ -29,7 +29,7 @@
   --surface-2: #fcfcfb;
   --text-0: #131313;
   --text-1: #383835;
-  /* text-2 and text-3 keep WCAG AA (4.5:1) on the page, sidebar and quiet fills (ui/test/qa7chat_contrast.test.mjs) */
+  /* text-2 and text-3 keep WCAG AA (4.5:1) on the page, sidebar and quiet fills (ui/test/theme_contrast.test.mjs) */
   --text-2: #64625e;
   --text-3: #706e69;
   --border: rgba(20, 20, 19, 0.1);
@@ -193,7 +193,7 @@ html[data-hidden] .chat-link .dot, html[data-hidden] .task-row .dot, html[data-h
 .sidebar.collapsed .nav-item { justify-content: center; padding: 0; }
 .sidebar.collapsed .nav-item .label, .sidebar.collapsed .nav-item .kbd { display: none; }
 .kbd { margin-left: auto; font-size: 11.5px; color: var(--text-2); opacity: 0; transition: opacity .15s; }
-/* text-2 is under 4.5:1 on the dark active row (ui/test/r8_ui_items.test.mjs) */
+/* text-2 is under 4.5:1 on the dark active row (ui/test/sidebar_rows.test.mjs) */
 .nav-item.active .kbd { color: var(--text-1); }
 .nav-item:hover .kbd { opacity: 1; }
 
@@ -326,7 +326,7 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .segmented.fill button { flex: 1 1 auto; padding: 4px 6px; }
 /* the chosen option: its own fill, and a ring of 3:1 or more against the track
    and the fill, so it reads as chosen without telling greys apart (WCAG 1.4.11;
-   ui/test/r10_settings_pages.test.mjs) */
+   ui/test/segmented_controls.test.mjs) */
 .segmented button.on { background: var(--bg-0); color: var(--text-0); box-shadow: inset 0 0 0 1px rgba(20, 20, 19, 0.6), var(--shadow-sm); }
 :root[data-theme="dark"] .segmented button.on { background: rgba(255, 255, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7); }
 @media (forced-colors: active) { .segmented button.on { outline: 2px solid Highlight; outline-offset: -2px; } }
@@ -514,6 +514,11 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .md th { background: var(--bg-2); font-weight: 600; }
 .md tr:last-child td { border-bottom: none; }
 .md input[type="checkbox"] { margin-right: 6px; }
+/* a task item (markdown.rs: its checkbox first, in the item or its first paragraph): the box stands where the bullet was */
+.md li:has(> input[type="checkbox"]:first-child, > p:first-child > input[type="checkbox"]:first-child) { list-style: none; }
+.md li > input[type="checkbox"]:first-child, .md li > p:first-child > input[type="checkbox"]:first-child { font-size: inherit; margin-left: calc(2px - 1.6em); }
+/* it shows a state rather than being a control turned off: full colour */
+.md li > input[type="checkbox"]:disabled, .md li > p > input[type="checkbox"]:disabled { opacity: 1; }
 .md .raw-html { white-space: pre-wrap; }
 .md .footnote-definition { font-size: 0.9em; color: var(--text-2); }
 .md .math-display { display: block; overflow-x: auto; overflow-y: hidden; margin: 0.6em 0 1em; text-align: center; }
@@ -704,6 +709,8 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .card.artifact-tile { padding: 0; gap: 0; min-height: 0; overflow: hidden; border-color: var(--border); }
 .artifact-tile .preview { height: 104px; border-radius: 0; border: none; margin: 0; background: var(--bg-3); }
 .artifact-tile .cap { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* artifact_preview.js: the thumbnail of a page that threw (danger on the tile's own --bg-3: 4.97:1 light, 5.78:1 dark) */
+.art-thumb-error { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px 14px; box-sizing: border-box; text-align: center; font-size: 12.5px; color: var(--danger); }
 .artifact-tile .t { font-weight: 400; }
 @media (max-width: 760px) { .grid.projects { grid-template-columns: 1fr; } }
 .card.project-card { flex-direction: row; align-items: center; gap: 12px; min-height: 0; padding: 14px; border-color: transparent; }
@@ -830,7 +837,9 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 .palette .res.kb, .palette .res:hover { background: var(--row-hover); }
 .palette .res .t { font-weight: 400; }
 .palette .res .s { color: var(--text-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.palette .res mark { background: var(--accent-soft); color: inherit; border-radius: 3px; padding: 0 1px; }
+/* a search snippet's match (util.js snippetHtml), in the palette and the sessions list alike: the
+   strongest text colour, as the snippet's own (--text-2) falls under 4.5:1 on the tint in dark */
+.palette .res mark, .list-item .d mark { background: var(--accent-soft); color: var(--text-0); border-radius: 3px; padding: 0 1px; }
 
 /* onboarding */
 .onboard { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }

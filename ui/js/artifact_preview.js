@@ -1,12 +1,14 @@
-// The Artifacts gallery's thumbnails: what each artifact looks like, drawn so
-// nothing of it runs. A web page or deck is its own page in a frame with no
-// scripts at all (sandbox=""), shrunk to the card; an SVG an image; a sheet
-// its first cells worked out, a dashboard its first figures and chart, a doc
-// its rendered start; code its text. React and Mermaid need their libraries
-// to draw anything, which a thumbnail doesn't load: their type, title and
-// first heading.
+// The Artifacts gallery's thumbnails: what each artifact looks like. A web
+// page or deck is its own page in a frame, shrunk to the card: with no scripts
+// at all (sandbox="") unless it needs them to draw anything (React, Mermaid, a
+// page with a script), then in the panel's sandbox and policy, inert (it can't
+// take focus or be clicked); one that throws becomes an error tile. An SVG is
+// an image; a sheet its first cells worked out, a dashboard its first figures
+// and chart, a doc its rendered start; code its text; anything else its type,
+// title and first heading.
 import { call, artifactUrl } from './api.js';
 import { esc } from './util.js';
+import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { parseCsv, evaluate, display, hasHeader, isErr } from './artifact_types/sheet.js';
 import { parseDashboard, chartSvg, formatValue } from './artifact_types/dashboard.js';
@@ -34,10 +36,11 @@ export function sheetCorner(content, { r = 6, c = 5, lang = 'en' } = {}) {
   return { head: hasHeader(rows), rows: shown };
 }
 
-async function frame(el, a, dark, w, h, contain) {
+async function frame(el, a, dark, w, h, contain, scripts = false) {
   const token = await call('serve_artifact', { kind: a.kind, content: a.content, dark });
   const f = document.createElement('iframe');
-  f.setAttribute('sandbox', '');
+  f.setAttribute('sandbox', scripts ? 'allow-scripts' : '');
+  f.inert = true;
   f.setAttribute('tabindex', '-1');
   f.setAttribute('aria-hidden', 'true');
   f.setAttribute('referrerpolicy', 'no-referrer');
@@ -48,8 +51,25 @@ async function frame(el, a, dark, w, h, contain) {
   fit();
   f.src = artifactUrl(token);
   el.appendChild(f);
-  new ResizeObserver(fit).observe(el);
+  // one per box, which can get a new frame (artifacts.js lets a running one go off screen)
+  if (el.__fit) el.__fit.disconnect();
+  el.__fit = new ResizeObserver(fit);
+  el.__fit.observe(el);
 }
+
+/** The tile of an artifact whose page threw: what the panel would say. */
+export function errorTile(el) {
+  el.innerHTML = `<div class="art-thumb-error">${icon('alert', 20)}<div>${esc(t('art_error'))}</div></div>`;
+}
+
+// a thumbnail's page that throws says so (artifact_hook.js): its tile shows it, and the page draws no overlay
+window.addEventListener('message', (e) => {
+  if (!e.data || e.data.__artifact !== 'error') return;
+  const f = [...document.querySelectorAll('.artifact-tile .preview iframe')].find((x) => x.contentWindow === e.source);
+  if (!f) return;
+  e.source.postMessage({ __artifact: 'error-ack' }, '*');
+  errorTile(f.parentElement);
+});
 
 function tile(el, a, iconName) {
   const head = firstHeading(a.kind, a.content);
@@ -63,7 +83,9 @@ export async function renderPreview(el, a, { dark, lang, iconName }) {
     case 'image/svg+xml':
       el.innerHTML = `<img alt="" src="${esc(svgUrl(a.content))}" style="width:100%;height:100%;object-fit:contain;padding:8px;box-sizing:border-box">`;
       return;
-    case 'text/html': return frame(el, a, dark, 1024, 680, false);
+    case 'text/html': return frame(el, a, dark, 1024, 680, false, /<script/i.test(a.content));
+    case 'application/vnd.ant.react': return frame(el, a, dark, 1024, 680, false, true);
+    case 'application/vnd.ant.mermaid': return frame(el, a, dark, 1024, 680, true, true);
     case SLIDES: return frame(el, a, dark, 1920, 1080, true);
     case 'text/markdown':
     case DOC: {

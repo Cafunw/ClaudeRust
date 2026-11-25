@@ -430,6 +430,75 @@ test('a long conversation opens on its last turns and loads the rest as you scro
   await waitFor('the last answer again', `__e2e.turns().at(-1).text.includes('Answer ${n - 1}')`);
 });
 
+// a valid 1×1 PNG
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+/** The names of the attachments shown in the open chat's first user message. */
+const sentNames = `[...document.querySelectorAll('#view .turn.user .user-atts .att .n, #view .turn.user .user-atts img')].map((e) => e.alt || e.textContent).sort().join(',')`;
+
+test('a text file and an image attached to a message reach the model and stay in the message', { skip, timeout: 60000 }, async () => {
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await waitFor('the new chat composer', `!!document.querySelector('#view .welcome .composer textarea')`);
+  // pasted files take the composer's own path: read in the page, staged by the backend
+  await ev(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['e2e attached line\\n'], 'e2e-notes.txt', { type: 'text/plain' }));
+    dt.items.add(new File([Uint8Array.from(atob(${JSON.stringify(PNG_1PX)}), (c) => c.charCodeAt(0))], 'e2e-dot.png', { type: 'image/png' }));
+    document.querySelector('#view .composer textarea').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  })()`);
+  await waitFor('both chips staged', `(() => { const c = [...document.querySelectorAll('#view .composer .attachments .att')]; return c.length === 2 && !c.some((x) => x.classList.contains('loading')); })()`);
+  assert.ok(await ev(`__e2e.type('e2e with files')`), 'the send button is enabled');
+  const id = await convId();
+  made.push(id);
+  await idle();
+  // (the mock keeps the streamed requests only: title requests aren't among them)
+  const req = mock.requests.findLast((r) => [r.messages.at(-1).content].flat().some((b) => b.type === 'document'));
+  assert.ok(req, 'a request carried the file');
+  const content = req.messages.at(-1).content;
+  const doc = content.find((b) => b.type === 'document');
+  assert.equal(doc.title, 'e2e-notes.txt');
+  assert.equal(doc.source.type, 'text');
+  assert.match(doc.source.data, /e2e attached line/);
+  const img = content.find((b) => b.type === 'image');
+  assert.equal(img?.source.media_type, 'image/png');
+  assert.ok(content.some((b) => b.type === 'text' && b.text.includes('e2e with files')));
+  assert.equal(await waitFor('the attachments in the message', sentNames), 'e2e-dot.png,e2e-notes.txt');
+  // stored with the message: there again when the chat is opened again
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await ev(`__e2e.emit('navigate', { name: 'chat', params: { id: ${JSON.stringify(id)} } })`);
+  assert.equal(await waitFor('the attachments after reopening', sentNames), 'e2e-dot.png,e2e-notes.txt');
+});
+
+test('a chat started in a project gets its instructions and knowledge file', { skip, timeout: 60000 }, async () => {
+  const p = await ev(`__e2e.invoke('create_project', { name: 'e2e project', description: '' })`);
+  try {
+    await ev(`__e2e.invoke('update_project', { req: { id: ${JSON.stringify(p.id)}, instructions: 'Always answer as the e2e project.' } })`);
+    await ev(`__e2e.emit('navigate', { name: 'project', params: { id: ${JSON.stringify(p.id)} } })`);
+    await waitFor('the project page', `!!document.querySelector('#view .knowledge') && !!document.querySelector('#view .composer-slot .composer textarea')`);
+    // a file dropped on the knowledge panel, as from the file manager
+    await ev(`(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['e2e knowledge: the answer is 42'], 'e2e-facts.md', { type: 'text/markdown' }));
+      document.querySelector('#view .knowledge').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    })()`);
+    await waitFor('the file in the knowledge list', `!!document.querySelector('#view .knowledge')?.innerText.includes('e2e-facts.md')`);
+    const data = await ev(`__e2e.invoke('get_project', { id: ${JSON.stringify(p.id)} })`);
+    assert.deepEqual(data.files.map((f) => [f.name, f.kind]), [['e2e-facts.md', 'text']]);
+    assert.ok(await ev(`__e2e.type('e2e in a project')`), 'the send button is enabled');
+    const id = await convId();
+    made.push(id);
+    await idle();
+    const req = mock.requests.findLast((r) => JSON.stringify(r.messages).includes('e2e in a project'));
+    const system = typeof req.system === 'string' ? req.system : req.system.map((b) => b.text).join('\n');
+    assert.ok(system.includes('<project_instructions>\nAlways answer as the e2e project.\n</project_instructions>'), system);
+    assert.ok(system.includes('<document name="e2e-facts.md">\ne2e knowledge: the answer is 42\n</document>'), system);
+    // the chat belongs to the project
+    const listed = await ev(`__e2e.invoke('list_conversations', { kind: 'chat', projectId: ${JSON.stringify(p.id)} })`);
+    assert.deepEqual(listed.map((c) => c.id), [id]);
+  } finally {
+    await ev(`__e2e.invoke('delete_project', { id: ${JSON.stringify(p.id)} })`).catch(() => {});
+  }
+});
+
 test('no uncaught errors in the page', { skip }, () => {
   assert.deepEqual(cdp.exceptions, []);
 });

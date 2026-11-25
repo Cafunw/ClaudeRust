@@ -27,19 +27,24 @@ use tokio_util::sync::CancellationToken;
 /// Plays the steps of `script.json` (one list per start of the CLI, each start takes the first) and logs
 /// its arguments, its prompt file, every line it reads and how it exited to `log.jsonl`. Steps: `["out", line]` writes a
 /// line, `["err", text]` writes to stderr, `["read", pattern]` waits for a line that has the pattern's
-/// fields, `["exit", code]` exits, `["stay"]` keeps it running after its input ends (as a background
+/// fields, `["answer", response]` answers the request it last read, `["exit", code]` exits, `["stay"]` keeps it running after its input ends (as a background
 /// process of the CLI's can), `["sleep", ms]` waits, `["cap", n]` answers as the CLI does when a reply needs `n`
 /// output tokens (thinking included) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is lower, and exits. Then, as the CLI
-/// does, it ends when its input does.
-/// Input that isn't JSON (a title's conversation) is logged as its text.
+/// does, it ends when its input does; until then a message or request that comes in (a chat's kept CLI: its next
+/// turn, a title) plays the next list.
+/// Input that isn't JSON (a title's conversation) is logged as its text. Every log line has the process's pid.
 const FAKE_CLI: &str = r#"
 const fs = require("fs");
 const path = require("path");
 const at = (f) => path.join(__dirname, f);
-const log = (o) => fs.appendFileSync(at("log.jsonl"), JSON.stringify(o) + "\n");
-const runs = JSON.parse(fs.readFileSync(at("script.json"), "utf8"));
-const steps = runs.shift() || [];
-fs.writeFileSync(at("script.json"), JSON.stringify(runs));
+const log = (o) => fs.appendFileSync(at("log.jsonl"), JSON.stringify({ pid: process.pid, ...o }) + "\n");
+const next = () => {
+  const runs = JSON.parse(fs.readFileSync(at("script.json"), "utf8"));
+  const steps = runs.shift() || [];
+  fs.writeFileSync(at("script.json"), JSON.stringify(runs));
+  return steps;
+};
+let steps = next();
 const promptAt = process.argv.indexOf("--system-prompt-file");
 log({ argv: process.argv.slice(2), pid: process.pid, prompt: promptAt > 0 ? fs.readFileSync(process.argv[promptAt + 1], "utf8") : null });
 process.on("exit", (code) => log({ exit: code }));
@@ -52,21 +57,28 @@ require("readline").createInterface({ input: process.stdin })
 const like = (v, p) => (p !== null && typeof p === "object" ? v != null && Object.keys(p).every((k) => like(v[k], p[k])) : v === p);
 const until = async (ready) => { while (!ready()) { if (closed) process.exit(3); await new Promise((r) => (wake = r)); } };
 const flushed = () => Promise.all([process.stdout, process.stderr].map((s) => new Promise((r) => s.write("", r))));
+let last = null;
+const asks = () => input.some((v) => v && (v.type === "user" || (v.type === "control_request" && v.request.subtype === "generate_session_title")));
 (async () => {
-  for (const [op, arg] of steps) {
-    if (op === "out") process.stdout.write(JSON.stringify(arg) + "\n");
-    else if (op === "err") process.stderr.write(arg + "\n");
-    else if (op === "read") { let i = -1; await until(() => (i = input.findIndex((v) => like(v, arg))) >= 0); input.splice(0, i + 1); }
-    else if (op === "exit") { await flushed(); process.exit(arg); }
-    else if (op === "stay") setInterval(() => {}, 1 << 30);
-    else if (op === "sleep") await new Promise((r) => setTimeout(r, arg));
-    else if (op === "cap" && Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) < arg) {
-      const max = process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
-      process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: `API Error: Claude's response exceeded the ${max} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.` }) + "\n");
-      await flushed(); process.exit(1);
+  for (;;) {
+    for (const [op, arg] of steps) {
+      if (op === "out") process.stdout.write(JSON.stringify(arg) + "\n");
+      else if (op === "err") process.stderr.write(arg + "\n");
+      else if (op === "read") { let i = -1; await until(() => (i = input.findIndex((v) => like(v, arg))) >= 0); last = input[i]; input.splice(0, i + 1); }
+      else if (op === "answer") process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: last.request_id, response: arg } }) + "\n");
+      else if (op === "exit") { await flushed(); process.exit(arg); }
+      else if (op === "stay") setInterval(() => {}, 1 << 30);
+      else if (op === "sleep") await new Promise((r) => setTimeout(r, arg));
+      else if (op === "cap" && Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) < arg) {
+        const max = process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+        process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: `API Error: Claude's response exceeded the ${max} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.` }) + "\n");
+        await flushed(); process.exit(1);
+      }
     }
+    while (!closed && !asks()) await new Promise((r) => (wake = r));
+    if (closed) break;
+    steps = next();
   }
-  while (!closed) await new Promise((r) => (wake = r));
 })();
 "#;
 
@@ -128,10 +140,11 @@ impl Cli {
         let text = std::fs::read_to_string(self.dir.join("log.jsonl")).unwrap_or_default();
         let mut out: Vec<Run> = vec![];
         for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+            let pid = v["pid"].as_u64().unwrap_or_default() as u32;
             if let Some(a) = v["argv"].as_array() {
                 let args = a.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect();
-                out.push(Run { args, prompt: v["prompt"].as_str().map(String::from), pid: v["pid"].as_u64().unwrap_or_default() as u32, input: vec![], exit: None });
-            } else if let Some(r) = out.last_mut() {
+                out.push(Run { args, prompt: v["prompt"].as_str().map(String::from), pid, input: vec![], exit: None });
+            } else if let Some(r) = out.iter_mut().rev().find(|r| r.pid == pid) {
                 if v["in"].is_null() {
                     r.exit = v["exit"].as_i64();
                 } else {
@@ -200,6 +213,14 @@ fn tool_result(sid: &str, uuid: &str, tool_use_id: &str, result: &str) -> Value 
         "parent_tool_use_id": null, "session_id": sid, "uuid": uuid}))
 }
 
+/// The CLI taking in a message of the earlier conversation that it is not to answer (`shouldQuery: false`).
+fn taken(sid: &str) -> Vec<Value> {
+    vec![
+        read(json!({"type": "user", "shouldQuery": false})),
+        out(json!({"type": "result", "subtype": "success", "is_error": false, "duration_ms": 0, "num_turns": 0, "result": "", "session_id": sid, "total_cost_usd": 0, "usage": {"input_tokens": 0, "output_tokens": 0}})),
+    ]
+}
+
 /// The end of a turn, with the session's running cost.
 fn result(sid: &str, total_cost: f64) -> Value {
     out(json!({"type": "result", "subtype": "success", "is_error": false, "duration_ms": 1234, "num_turns": 1, "result": "", "session_id": sid,
@@ -210,7 +231,7 @@ fn result(sid: &str, total_cost: f64) -> Value {
 
 type Events = Arc<Mutex<Vec<(String, Value)>>>;
 
-const EVENTS: [&str; 6] = ["turn", "permission-request", "permission-resolved", "usage-limits-changed", "cc-waiting", "workflows-changed"];
+const EVENTS: [&str; 7] = ["turn", "permission-request", "permission-resolved", "usage-limits-changed", "cc-waiting", "workflows-changed", "notice"];
 
 /// Folders removed when dropped.
 struct TempDirs(Vec<PathBuf>);
@@ -323,6 +344,17 @@ impl Harness {
     fn texts(&self) -> Vec<Value> {
         self.path().into_iter().map(|m| m.content).collect()
     }
+
+    /// How start `n` of the CLI ended, once it has (None: it was killed).
+    async fn exit_of(&self, n: usize) -> Option<i64> {
+        until("the CLI to end", || {
+            // gone first: what it logged as it went is in the log by then
+            let gone = !alive(self.cli.runs().get(n)?.pid);
+            let r = self.cli.runs().into_iter().nth(n)?;
+            (r.exit.is_some() || gone).then_some(r.exit)
+        })
+        .await
+    }
 }
 
 /// The turn's end, or a failed test when it takes over 30 s.
@@ -411,7 +443,9 @@ fn a_chat_turn_streams_its_reply_and_stores_it_with_its_cost() {
         let listed = run.answer("mcp-1")["response"]["mcp_response"]["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).map(String::from).collect::<Vec<_>>();
         assert!(listed.contains(&"recent_chats".to_string()), "{listed:?}");
         assert_eq!(run.answer("mcp-2")["response"]["mcp_response"]["result"], json!({"content": [{"type": "text", "text": "No previous chats found."}], "isError": false}));
-        assert_eq!(run.exit, Some(0), "it ended by itself once its input closed");
+        assert_eq!(run.exit, None, "kept for the chat's next message");
+        claudecode::end_warm(&h.st, &h.conv);
+        assert_eq!(h.exit_of(0).await, Some(0), "it ended by itself once its input closed");
     });
 }
 
@@ -529,7 +563,7 @@ fn a_cli_that_dies_mid_reply_leaves_the_reply_so_far_with_its_error() {
         assert_eq!(path.len(), 2);
         let a = &path[1];
         assert_eq!(a.content, text("Partial answer"), "what had streamed in is kept");
-        assert_eq!(a.meta["error"], json!({"message": err, "kind": "claude_code"}));
+        assert_eq!(a.meta["error"], json!({"message": err, "kind": "claude_code", "status": 0}));
         assert!(a.meta["stop_reason"].is_null() && a.meta["stopped"].is_null(), "unfinished, not stopped: {}", a.meta);
         assert_eq!(h.cli.runs()[0].exit, Some(1));
     });
@@ -621,12 +655,55 @@ fn stop_interrupts_the_cli_and_keeps_the_reply_so_far() {
 
         let a = &h.path()[1];
         assert_eq!(a.content, text("Partial answer"));
-        assert_eq!((a.meta["stopped"].as_bool(), a.meta["cost_usd"].as_f64()), (Some(true), Some(0.004)));
+        assert_eq!(a.meta["stopped"].as_bool(), Some(true));
         assert!(a.meta["stop_reason"].is_null() && a.meta["error"].is_null(), "{}", a.meta);
+        assert!(!h.st.cc_ctl.lock().contains_key(&h.conv), "the line to the CLI is gone");
+        // the CLI's answer to the interrupt comes after the turn ended: what it cost goes on the reply
+        let cost = until("the stopped turn's cost", || h.st.db.msg_get(&a.id).unwrap().meta["cost_usd"].as_f64()).await;
+        assert!(close(Some(cost), 0.004), "{cost}");
+        assert_eq!(h.exit_of(0).await, Some(0), "it ended by itself once its input closed");
         let run = &h.cli.runs()[0];
         assert_eq!(run.input.iter().filter(|l| l["request"]["subtype"] == "interrupt").count(), 1);
-        assert_eq!(run.exit, Some(0), "it ended by itself once its input closed");
-        assert!(!h.st.cc_ctl.lock().contains_key(&h.conv), "the line to the CLI is gone");
+    });
+}
+
+#[test]
+fn stop_is_at_once_even_when_the_cli_goes_on() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        // a CLI that takes no notice of the interrupt: its reply goes on streaming for seconds
+        let mut steps = vec![read_user(), init(&sid)];
+        steps.extend(streamed_text(&sid, "msg_1", &["Before "], false));
+        for _ in 0..40 {
+            steps.extend([json!(["sleep", 100]), stream(&sid, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "late "}}))]);
+        }
+        // nothing of the stopped reply is in a session: the next turn's CLI is given the conversation again
+        let mut next = taken(&sid);
+        next.extend([read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text("Next answer")), result(&sid, 0.01)]);
+        h.cli.script(vec![steps, next]);
+        let user = h.say("Hi", None);
+        let turn = h.start(&user);
+        until("the reply to start", || h.st.live.lock().get(&h.conv).filter(|l| l.content.to_string().contains("Before")).map(|_| ())).await;
+        let t0 = Instant::now();
+        engine::stop(&h.st, &h.conv);
+        finish(turn).await.expect("Stop is not an error");
+        let took = t0.elapsed();
+        assert!(took < Duration::from_secs(1), "the turn ended {took:?} after the Stop");
+
+        // the reply is what had come at the Stop, on screen and stored, and nothing more comes
+        let a = h.path()[1].clone();
+        let (shown, at_stop) = (h.events("turn").len(), a.content.clone());
+        assert!(at_stop.to_string().contains("Before") && a.meta["stopped"] == true, "{at_stop} {}", a.meta);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!((h.events("turn").len(), h.st.db.msg_get(&a.id).unwrap().content), (shown, at_stop));
+        // it is ended after a short grace, and the chat's next turn waits for that
+        let second = h.say("Again", None);
+        finish(h.start(&second)).await.unwrap();
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 2);
+        assert!(!alive(runs[0].pid), "the stopped CLI is gone");
+        assert_eq!(h.texts().last(), Some(&text("Next answer")));
     });
 }
 
@@ -660,16 +737,23 @@ Rent,1000
         h.transcript(&old, 0.01);
         // the person edits the sheet: the CLI's session still holds the reply as it was
         clauderust_lib::artifacts::artifact_edit(h.app.state(), h.conv.clone(), "b".into(), "Rent,1200".into()).await.unwrap();
-        h.cli.script(vec![vec![read_user(), init(&new), assistant(&new, "msg_2", "uuid-2", text("1200")), result(&new, 0.02)]]);
+        let mut second = taken(&new);
+        second.extend([read(json!({"type": "user", "message": {"content": [{"text": "What is the rent?"}]}})), init(&new), assistant(&new, "msg_2", "uuid-2", text("1200")), result(&new, 0.02)]);
+        h.cli.script(vec![second]);
         h.turn("What is the rent?", None).await.unwrap();
 
         let runs = h.cli.runs();
+        assert_eq!(runs.len(), 2, "the kept CLI holds the sheet as it was: a new one");
         assert!(!runs[1].has(&["--resume"]), "{:?}", runs[1].args);
-        let context = runs[1].first("user")["message"]["content"][0]["text"].as_str().unwrap().to_string();
-        assert!(context.starts_with("<earlier_conversation>") && context.contains("source=\"user\">
+        let lines: Vec<&Value> = runs[1].input.iter().filter(|l| l["type"] == "user" || l["type"] == "assistant").collect();
+        assert_eq!((lines[0]["message"]["content"].clone(), lines[0]["shouldQuery"].clone()), (text("A budget"), json!(false)));
+        let answer: String = lines[1]["message"]["content"].as_array().unwrap().iter().filter_map(|b| b["text"].as_str()).collect();
+        assert!(lines[1]["type"] == "assistant" && answer.contains("source=\"user\">
 Rent,1200
-</antArtifact>"), "{context}");
+</antArtifact>"), "{answer}");
+        assert_eq!((lines[2]["message"]["content"].clone(), lines[2]["shouldQuery"].is_null()), (text("What is the rent?"), true));
         assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["cc_session"], json!(new));
+        assert_eq!(h.exit_of(0).await, Some(0), "the kept one ended");
     });
 }
 
@@ -678,27 +762,76 @@ fn a_session_the_cli_lost_starts_over_with_the_conversation_as_context() {
     block_on(async {
         let h = Harness::new("code");
         let (old, new) = (new_id(), new_id());
-        h.cli.script(vec![vec![read_user(), init(&old), assistant(&old, "msg_1", "uuid-1", text("First answer")), result(&old, 0.01)]]);
-        h.turn("First", None).await.unwrap();
+        // a first message with a picture and a PDF, answered after a tool call (and some thinking)
+        let picture = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}});
+        let pdf = json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}, "title": "brief.pdf"});
+        let asked = json!([{"type": "text", "text": "First"}, picture, pdf]);
+        let call = json!({"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "a.txt"}});
+        h.cli.script(vec![vec![
+            read_user(),
+            init(&old),
+            assistant(&old, "msg_1", "uuid-1", json!([{"type": "thinking", "thinking": "Hmm.", "signature": "s"}, {"type": "text", "text": "Let me look."}, call])),
+            tool_result(&old, "uuid-2", "toolu_1", "the file's text"),
+            assistant(&old, "msg_2", "uuid-3", text("First answer")),
+            result(&old, 0.01),
+        ]]);
+        let first = Message { id: new_id(), conversation_id: h.conv.clone(), parent_id: None, role: "user".into(), content: asked.clone(), meta: json!({}), created_at: 1 };
+        h.st.db.msg_insert(&first).unwrap();
+        h.st.db.conv_set_leaf(&h.conv, Some(&first.id)).unwrap();
+        finish(h.start(&first.id)).await.unwrap();
         h.transcript(&old, 0.01);
         // the CLI cleaned up its transcript meanwhile: it says so and exits
-        h.cli.script(vec![
-            vec![json!(["err", format!("No conversation found with session ID: {old}")]), json!(["exit", 1])],
-            vec![read_user(), init(&new), assistant(&new, "msg_2", "uuid-2", text("Second answer")), result(&new, 0.02)],
-        ]);
+        let mut fresh = taken(&new);
+        fresh.extend([read(json!({"type": "user", "message": {"content": [{"text": "Second"}]}})), init(&new), assistant(&new, "msg_3", "uuid-4", text("Second answer")), result(&new, 0.02)]);
+        h.cli.script(vec![vec![json!(["err", format!("No conversation found with session ID: {old}")]), json!(["exit", 1])], fresh]);
         h.turn("Second", None).await.unwrap();
 
         let runs = h.cli.runs();
         assert_eq!(runs.len(), 3);
         assert!(runs[1].has(&["--resume", &old]), "{:?}", runs[1].args);
         assert!(!runs[2].has(&["--resume"]), "{:?}", runs[2].args);
-        let content = &runs[2].first("user")["message"]["content"];
-        let context = content[0]["text"].as_str().unwrap();
-        assert!(context.starts_with("<earlier_conversation>\nUser: First\n\nAssistant: First answer\n</earlier_conversation>"), "{context}");
-        assert_eq!(content[1], json!({"type": "text", "text": "Second"}));
+        // the conversation goes back as the messages it was: the person's with its picture and PDF, taken in
+        // without an answer; the answer's text, its tool call and result as short notes, no thinking
+        let lines: Vec<&Value> = runs[2].input.iter().filter(|l| l["type"] == "user" || l["type"] == "assistant").collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!((&lines[0]["type"], &lines[0]["message"]["content"], &lines[0]["shouldQuery"]), (&json!("user"), &asked, &json!(false)));
+        assert_eq!(lines[1]["type"], "assistant");
+        let said: Vec<&str> = lines[1]["message"]["content"].as_array().unwrap().iter().map(|b| b["text"].as_str().unwrap()).collect();
+        assert_eq!(said, ["Let me look.", r#"[Called the tool Read with {"file_path":"a.txt"}]"#, "[Tool result: the file's text]", "First answer"]);
+        assert_eq!((&lines[2]["message"]["content"], lines[2]["shouldQuery"].is_null()), (&text("Second"), true));
         // nothing of the attempt that failed is stored
-        assert_eq!(h.texts(), vec![text("First"), text("First answer"), text("Second"), text("Second answer")]);
+        assert_eq!(h.texts().last(), Some(&text("Second answer")));
+        assert_eq!(h.path().len(), 6);
         assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["cc_session"], json!(new));
+        let notices: Vec<Value> = h.events.lock().unwrap().iter().filter(|(n, _)| n == "notice").map(|(_, p)| p.clone()).collect();
+        assert_eq!(notices.iter().map(|n| n["kind"].clone()).collect::<Vec<_>>(), [json!("cc_history_replayed")], "the window says so");
+    });
+}
+
+#[test]
+fn a_cli_that_answers_the_history_it_was_given_gets_it_as_text() {
+    block_on(async {
+        let h = Harness::new("code");
+        let (old, new) = (new_id(), new_id());
+        h.cli.script(vec![vec![read_user(), init(&old), assistant(&old, "msg_1", "uuid-1", text("First answer")), result(&old, 0.01)]]);
+        h.turn("First", None).await.unwrap();
+        // no transcript: a new session. This CLI answers a message it was only to take in (one too old for that)
+        let mut eager = vec![read_user(), init(&new)];
+        eager.extend(streamed_text(&new, "msg_x", &["Answering history"], false));
+        eager.push(read(json!({"type": "assistant"})));
+        let digest = vec![read_user(), init(&new), assistant(&new, "msg_2", "uuid-2", text("Second answer")), result(&new, 0.02)];
+        h.cli.script(vec![eager, digest]);
+        h.turn("Second", None).await.unwrap();
+
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].first("user")["shouldQuery"], false);
+        let content = &runs[2].first("user")["message"]["content"];
+        assert!(content[0]["text"].as_str().unwrap().starts_with("<earlier_conversation>\nUser: First\n\nAssistant: First answer\n</earlier_conversation>"), "{content}");
+        assert_eq!(content[1], json!({"type": "text", "text": "Second"}));
+        assert_eq!(h.texts(), vec![text("First"), text("First answer"), text("Second"), text("Second answer")], "nothing of its answer is stored");
+        let notices = h.events.lock().unwrap().iter().filter(|(n, _)| n == "notice").count();
+        assert_eq!(notices, 1, "the retry with the text doesn't say it again");
     });
 }
 
@@ -787,9 +920,8 @@ fn a_turns_artifacts_go_to_the_gallery_and_leave_with_the_chat() {
         h.turn("Make a page", None).await.unwrap();
         assert_eq!(gallery(&h), [("page".to_string(), "<p>v2</p>".to_string())], "the update applied to the version before it");
         assert_eq!(h.st.db.search("Here", 5).unwrap().len(), 1, "every answer of the turn is searched, not only its last");
-        h.transcript(&sid, 0.01);
         h.turn("And notes", None).await.unwrap();
-        assert!(h.cli.runs()[1].has(&["--resume", &sid]));
+        assert_eq!(h.cli.runs().len(), 1, "the chat's kept CLI took the next message");
         assert_eq!(gallery(&h).iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["notes", "page"]);
         h.st.db.conv_delete(&h.conv).unwrap();
         assert!(gallery(&h).is_empty(), "the chat's artifacts go with it");
@@ -936,6 +1068,149 @@ fn switched_off_tools_are_denied_to_the_cli() {
         let run = &h.cli.runs()[0];
         // a whole server is its tools' prefix, in the characters the CLI keeps in a name
         assert!(run.has(&["--disallowedTools", "mcp__my_notes", "mcp__github__create_issue", "mcp__weather__get_forecast"]), "{:?}", run.args);
+    });
+}
+
+/// The CLI ending a turn on an API failure, as Claude Code 2.1.326 does (probed against a mock API): its own
+/// words in a message of its own, then the result with the API's status.
+fn api_failure(sid: &str, said: &str, status: Value, reason: &str) -> Vec<Value> {
+    vec![
+        assistant(sid, "synthetic", "uuid-e", text(said)),
+        out(json!({"type": "result", "subtype": "success", "is_error": true, "result": said, "terminal_reason": reason, "api_error_status": status, "session_id": sid, "total_cost_usd": 0})),
+    ]
+}
+
+#[test]
+fn an_api_failure_on_the_account_is_stored_as_the_api_engine_stores_it() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        let said = "API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.";
+        let mut steps = vec![read_user(), init(&sid), system(&sid, json!({"subtype": "api_retry", "attempt": 1, "max_retries": 10, "retry_delay_ms": 500, "error_status": 529, "error": "overloaded"}))];
+        steps.extend(api_failure(&sid, said, json!(529), "api_error"));
+        let mut network = vec![read_user(), init(&sid)];
+        network.extend(api_failure(&sid, "API Error: Connection dropped (ECONNRESET). Check the gateway set in ANTHROPIC_BASE_URL, then try again.", Value::Null, "api_error"));
+        let mut long = vec![read_user(), init(&sid)];
+        long.extend(api_failure(&sid, "Prompt is too long · the request is ~250000 tokens (limit 200000)", json!(400), "prompt_too_long"));
+        h.cli.script(vec![steps, network, long]);
+
+        h.turn("Hi", None).await.unwrap_err();
+        let a = &h.path()[1];
+        // as the API engine's own 529: the UI says "overloaded" in its language, with Retry; the CLI's words under Details
+        assert_eq!(a.meta["error"], json!({"message": said, "kind": "overloaded_error", "status": 529}));
+        assert_eq!(a.content, json!([]), "the CLI's words are the error's, not a reply");
+        assert_eq!(h.exit_of(0).await, Some(0), "not kept after a failure");
+        h.transcript(&sid, 0.0);
+        h.turn("Again", None).await.unwrap_err();
+        assert_eq!((h.path()[3].meta["error"]["kind"].as_str(), h.path()[3].meta["error"]["status"].as_u64()), (Some("network"), Some(0)));
+        h.turn("Once more", None).await.unwrap_err();
+        assert_eq!(h.path()[5].meta["error"]["kind"], "prompt_too_long");
+    });
+}
+
+/// Milliseconds from the start of a turn to its first text in the window.
+async fn first_text_ms(h: &Harness, id: &str) -> u128 {
+    let before = h.events("turn").len();
+    let t0 = Instant::now();
+    let turn = h.start(id);
+    until("the first text", || h.events("turn").iter().skip(before).any(|t| t.to_string().contains("Answer")).then_some(())).await;
+    let ms = t0.elapsed().as_millis();
+    finish(turn).await.unwrap();
+    ms
+}
+
+#[test]
+fn a_chats_next_message_goes_to_its_kept_cli() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        let answer = |n: &str, cost: f64| vec![read_user(), init(&sid), assistant(&sid, &format!("msg_{n}"), &format!("uuid-{n}"), text(&format!("Answer {n}"))), result(&sid, cost)];
+        h.cli.script(vec![answer("1", 0.01), answer("2", 0.03), answer("3", 0.04), answer("4", 0.05)]);
+        let cold = first_text_ms(&h, &h.say("First", None)).await;
+        let warm = first_text_ms(&h, &h.say("Second", None)).await;
+        eprintln!("first text: {cold} ms with a new CLI, {warm} ms with the kept one");
+        assert!(warm < cold, "{warm} ms kept, {cold} ms new");
+
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 1, "one CLI for both turns");
+        let said: Vec<&Value> = runs[0].input.iter().filter(|l| l["type"] == "user").map(|l| &l["message"]["content"]).collect();
+        assert_eq!(said, [&text("First"), &text("Second")]);
+        assert!(close(h.path()[3].meta["cost_usd"].as_f64(), 0.02), "its own cost from the running total: {}", h.path()[3].meta);
+        let conv = h.st.db.conv_get(&h.conv).unwrap();
+        assert_eq!(conv.options["cc_tip"].as_str(), Some(h.path()[3].id.as_str()));
+
+        // anything the kept CLI wasn't started with (here web search) starts a new one, at the session's tip
+        let mut options = conv.options.clone();
+        options["web_search"] = json!(true);
+        h.st.db.conv_set_options(&h.conv, &options).unwrap();
+        h.transcript(&sid, 0.03);
+        h.turn("Third", None).await.unwrap();
+        assert_eq!(h.exit_of(0).await, Some(0), "the old one ended");
+        let runs = h.cli.runs();
+        assert!(runs.len() == 2 && runs[1].has(&["--resume", &sid]) && runs[1].has(&["--tools", "WebSearch,WebFetch"]), "{:?}", runs.last().map(|r| &r.args));
+
+        // a message from further back (an edit) forks the session in a new CLI
+        let second = h.path()[2].clone();
+        h.transcript(&sid, 0.04);
+        h.turn("Second, again", second.parent_id.as_deref()).await.unwrap();
+        assert_eq!(h.exit_of(1).await, Some(0));
+        let runs = h.cli.runs();
+        assert!(runs.len() == 3 && runs[2].has(&["--resume-session-at", "uuid-1", "--fork-session"]), "{:?}", runs.last().map(|r| &r.args));
+        claudecode::end_warm(&h.st, &h.conv);
+        assert_eq!(h.exit_of(2).await, Some(0));
+    });
+}
+
+#[test]
+fn a_kept_cli_that_went_away_is_replaced() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let sid = new_id();
+        let answer = |n: &str| vec![read_user(), init(&sid), assistant(&sid, &format!("msg_{n}"), &format!("uuid-{n}"), text(&format!("Answer {n}"))), result(&sid, 0.01)];
+        h.cli.script(vec![answer("1"), answer("2")]);
+        h.turn("First", None).await.unwrap();
+        let pid = h.cli.runs()[0].pid;
+        #[cfg(windows)]
+        std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output().unwrap();
+        #[cfg(not(windows))]
+        std::process::Command::new("kill").args(["-9", &pid.to_string()]).output().unwrap();
+        until("the CLI to go", || (!alive(pid)).then_some(())).await;
+        h.transcript(&sid, 0.01);
+        h.turn("Second", None).await.unwrap();
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 2);
+        assert!(runs[1].has(&["--resume", &sid]), "{:?}", runs[1].args);
+        assert_eq!(h.texts(), vec![text("First"), text("Answer 1"), text("Second"), text("Answer 2")]);
+        claudecode::end_warm(&h.st, &h.conv);
+    });
+}
+
+#[test]
+fn a_chats_title_comes_from_its_kept_cli() {
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.settings.write().chat_engine = "claude-code".into();
+        let sid = new_id();
+        let title = vec![
+            read(json!({"type": "control_request", "request": {"subtype": "generate_session_title", "persist": false}})),
+            json!(["answer", {"title": "Greeting the user"}]),
+        ];
+        h.cli.script(vec![vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Hello!")), result(&sid, 0.01)], title]);
+        h.turn("Hi", None).await.unwrap();
+        let conv = h.st.db.conv_get(&h.conv).unwrap();
+        let t = claudecode::title(&h.st, &conv, "Hi", "Hello!").await;
+        assert_eq!(t.as_deref(), Some("Greeting the user"));
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 1, "no CLI started for the title");
+        let asked = runs[0].input.iter().find(|l| l["request"]["subtype"] == "generate_session_title").unwrap();
+        assert_eq!(asked["request"]["description"], "User: Hi\n\nAssistant: Hello!");
+        // and it is still the chat's for its next message
+        h.cli.script(vec![vec![read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text("More")), result(&sid, 0.02)]]);
+        h.turn("More please", None).await.unwrap();
+        assert_eq!(h.cli.runs().len(), 1);
+        // a sign-in, a sign-out or the app quitting ends every kept CLI
+        claudecode::end_all_warm(&h.st).await;
+        assert_eq!(h.exit_of(0).await, Some(0), "it ended once its input closed");
     });
 }
 

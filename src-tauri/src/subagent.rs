@@ -399,4 +399,97 @@ mod tests {
         assert!(r.usage_for("m").is_empty());
         assert_eq!(definition()["name"], "Task");
     }
+
+    fn agent(id: &str, conv: &str, parent_msg: &str, status: &str, started_at: i64, cancel: CancellationToken) -> SubAgent {
+        SubAgent {
+            id: id.into(), conv_id: conv.into(), parent_msg: parent_msg.into(), tool_use_id: format!("tu_{id}"), description: format!("task {id}"),
+            status: status.into(), started_at, finished_at: None, log: vec![], usage: Default::default(), cancel,
+        }
+    }
+
+    #[test]
+    fn stopping_one_sub_agent_leaves_the_turn_and_its_siblings_running() {
+        let r = Registry::default();
+        // each sub-agent's token is a child of its turn's (run_task)
+        let turn = CancellationToken::new();
+        r.map.lock().insert("a".into(), agent("a", "c", "m", "running", 1, turn.child_token()));
+        r.map.lock().insert("b".into(), agent("b", "c", "m", "running", 2, turn.child_token()));
+        r.map.lock().insert("done".into(), agent("done", "c", "m", "completed", 3, turn.child_token()));
+        assert!(r.stop("a"));
+        let token = |id: &str| r.map.lock()[id].cancel.clone();
+        assert!(token("a").is_cancelled());
+        assert!(!token("b").is_cancelled() && !turn.is_cancelled());
+        assert!(!r.stop("done"), "a finished sub-agent can't be stopped");
+        assert!(!token("done").is_cancelled());
+        assert!(!r.stop("missing"));
+        // stopping the turn stops every sub-agent it started
+        turn.cancel();
+        assert!(token("b").is_cancelled());
+    }
+
+    #[test]
+    fn deleting_a_conversation_stops_and_forgets_only_its_sub_agents() {
+        let r = Registry::default();
+        let (mine, other) = (CancellationToken::new(), CancellationToken::new());
+        r.map.lock().insert("a".into(), agent("a", "c", "m", "running", 1, mine.clone()));
+        r.map.lock().insert("b".into(), agent("b", "d", "n", "running", 2, other.clone()));
+        let mut usage = serde_json::Map::new();
+        usage.insert("output_tokens".into(), json!(7));
+        r.add_usage("a", &usage);
+        r.add_usage("b", &usage);
+        r.forget_conversation("c");
+        assert!(mine.is_cancelled() && !other.is_cancelled());
+        assert!(r.list("c").is_empty() && r.log("a").is_none());
+        assert_eq!(r.list("d").len(), 1);
+        assert!(r.usage_for("m").is_empty());
+        assert_eq!(r.usage_for("n")["output_tokens"], 7);
+        // clearing finished ones keeps a running sub-agent
+        r.clear_finished("d");
+        assert_eq!(r.list("d").len(), 1);
+    }
+
+    #[test]
+    fn usage_is_summed_per_response_and_the_list_is_newest_first() {
+        let r = Registry::default();
+        r.map.lock().insert("old".into(), agent("old", "c", "m1", "completed", 10, CancellationToken::new()));
+        r.map.lock().insert("new".into(), agent("new", "c", "m2", "running", 20, CancellationToken::new()));
+        let u = |v: Value| v.as_object().unwrap().clone();
+        r.add_usage("old", &u(json!({"input_tokens": 100, "cache_read_input_tokens": 5, "speed": "standard", "server_tool_use": {"web_search_requests": 1}})));
+        r.add_usage("old", &u(json!({"input_tokens": 50, "speed": "fast"})));
+        r.add_usage("new", &u(json!({"input_tokens": 1})));
+        // usage of an agent that's gone (cleared meanwhile) goes nowhere
+        r.add_usage("gone", &u(json!({"input_tokens": 1000})));
+        let m1 = r.usage_for("m1");
+        assert_eq!(m1["input_tokens"], 150);
+        assert_eq!(m1["cache_read_input_tokens"], 5);
+        assert_eq!(m1["speed"], "fast", "the latest speed is the one priced");
+        assert!(!m1.contains_key("server_tool_use"));
+        assert_eq!(r.usage_for("m2")["input_tokens"], 1);
+        assert!(r.usage_for("other").is_empty());
+        assert_eq!(r.map.lock()["old"].usage["input_tokens"], 150);
+
+        r.update("new", |s| s.log = vec!["Read a.rs".into(), "Bash ls".into()]);
+        assert_eq!(r.log("new").as_deref(), Some("Read a.rs\nBash ls"));
+        let list = r.list("c");
+        let ids: Vec<&str> = list.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert_eq!(list[0]["steps"], 2);
+        assert_eq!(list[0]["tool_use_id"], "tu_new");
+        assert_eq!(list[0]["status"], "running");
+        assert!(r.list("d").is_empty());
+    }
+
+    #[test]
+    fn tool_lines_name_the_target_and_stay_short() {
+        assert_eq!(tool_line("Grep", &json!({"pattern": "fn main"})), "Grep fn main");
+        assert_eq!(tool_line("Glob", &json!({"pattern": "**/*.rs"})), "Glob **/*.rs");
+        assert_eq!(tool_line("Edit", &json!({"file_path": "src/é.rs"})), "Edit src/é.rs");
+        assert_eq!(tool_line("WebFetch", &json!({"url": "https://x"})), "WebFetch");
+        assert_eq!(tool_line("Bash", &json!({})), "Bash");
+        let long = tool_line("Bash", &json!({"command": "ü".repeat(500)}));
+        assert_eq!(long, format!("Bash {}", "ü".repeat(140)));
+        let d = definition();
+        assert_eq!(d["input_schema"]["required"], json!(["description", "prompt"]));
+        assert_eq!(d["input_schema"]["properties"]["subagent_type"]["enum"], json!(["general-purpose", "explore"]));
+    }
 }

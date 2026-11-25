@@ -507,10 +507,14 @@ export async function renderGallery(view) {
     }
     grid.innerHTML = '';
     if (seen) seen.disconnect();
-    // a card's picture is drawn once it comes near the view
+    // a card's picture is drawn once it comes near the view; one whose page
+    // runs (each holds its own runtime) is let go once out of reach again
     seen = new IntersectionObserver((entries) => entries.forEach((en) => {
-      if (!en.isIntersecting) return;
-      seen.unobserve(en.target);
+      if (!en.isIntersecting) {
+        if (en.target.querySelector('iframe[sandbox="allow-scripts"]')) en.target.replaceChildren();
+        return;
+      }
+      if (en.target.childElementCount) return;
       const a = shown.get(en.target);
       renderPreview(en.target, a, { dark: isDark(), lang: currentLanguage(), iconName: iconFor(a.kind) }).catch(() => { en.target.innerHTML = `<pre>${esc(a.content.slice(0, 600))}</pre>`; });
     }), { rootMargin: '200px' });

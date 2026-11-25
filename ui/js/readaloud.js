@@ -15,8 +15,11 @@ export function speechText(md) {
     .replace(/<[^>\n]+>/g, ' ')
     .replace(/^ {0,3}\|?(\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*$/gm, ' ')
     .replace(/^ *\|(.*)\|? *$/gm, (_m, row) => `${row.split('|').map((c) => c.trim()).filter(Boolean).join(', ')}.`)
-    .replace(/^ {0,3}(#{1,6}|>+|[-*+]|\d+[.)])\s+/gm, '')
-    .replace(/(\*\*|__|~~|\*|_)(?=\S)([^\n]*?\S)\1/g, '$2')
+    .replace(/^ {0,3}(#{1,6}|>+|[-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?/gm, '')
+    .replace(/(\*\*|__|~~)(?=\S)([^\n]*?\S)\1/g, '$2')
+    // *italic* and _italic_, not 2*3*4 or snake_case_name
+    .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, '$1$2')
+    .replace(/(^|[^\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, '$1$2')
     .replace(/\$\$[\s\S]*?\$\$/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')

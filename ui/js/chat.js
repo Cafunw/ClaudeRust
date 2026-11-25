@@ -15,7 +15,7 @@ import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
 import { forgetConversation } from './artifact_storage.js';
-import { PAGE_TURNS, pageStart, parked } from './turnwindow.js';
+import { PAGE_TURNS, pageStart, parked, drawWithin, FRAME_BUDGET, OPEN_BUDGET } from './turnwindow.js';
 import { retryLabel } from './retry_ui.js';
 import { panelStep } from './branch_panel.js';
 import { announce, streamAnnouncer } from './a11y.js';
@@ -172,8 +172,18 @@ export async function openConversation(id, { focus = true } = {}) {
   renderTopbar();
   cur.order = data.turns.map((x) => x.id);
   for (const x of data.turns) cur.turns.set(x.id, x);
-  cur.shown = pageStart(data.turns, data.turns.length);
-  for (const turn of data.turns.slice(cur.shown)) upsertTurn(turn, false);
+  // the last page: what fits in a frame now, from the end where the view
+  // opens, and the rest in the frames after (a scroll up waits for it)
+  cur.shown = data.turns.length;
+  const from = pageStart(data.turns, cur.shown);
+  drawBefore(cur, from, OPEN_BUDGET);
+  if (cur.shown > from) {
+    const c = cur;
+    c.earlierP = drawBack(c, from).catch(errorToast).finally(() => {
+      c.earlierP = null;
+      if (cur === c) drawEarlierButton();
+    });
+  }
   drawEarlierButton();
   markLast();
   // first, so the panel rebuildArtifacts sees open is this conversation's
@@ -515,17 +525,38 @@ async function drawEarlier(c) {
     c.order = [...older.map((x) => x.id), ...c.order];
     c.shown = older.length;
   }
-  const turns = c.order.map((id) => c.turns.get(id));
-  const start = pageStart(turns, c.shown);
-  const anchor = c.els.get(c.order[c.shown]) || null;
-  const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
+  const start = pageStart(c.order.map((id) => c.turns.get(id)), c.shown);
   c.stick = false;
-  for (const turn of turns.slice(start, c.shown)) upsertTurn(turn, false, anchor);
-  c.shown = start;
-  if (anchor) c.scrollEl.scrollTop += anchor.getBoundingClientRect().top - y0;
+  await drawBack(c, start);
+  if (cur !== c) return;
   drawEarlierButton();
   rebuildArtifacts();
   updateScrollButton();
+}
+
+/** Draw the turns before the first one drawn, newest first, down to index
+ *  `start` while `budget` ms last (each laid out as it comes, so the budget
+ *  counts its layout too), keeping what's on screen where it was. */
+function drawBefore(c, start, budget) {
+  const anchor = c.els.get(c.order[c.shown]) || null;
+  const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
+  drawWithin(c.shown - start, () => {
+    c.shown--;
+    upsertTurn(c.turns.get(c.order[c.shown]), false, c.els.get(c.order[c.shown + 1]) || null);
+    void c.colEl.offsetHeight;
+  }, budget);
+  if (anchor) c.scrollEl.scrollTop += anchor.getBoundingClientRect().top - y0;
+}
+
+/** The same down to `start`, a frame's worth in each frame (never in a
+ *  scroll event's, which has its own work); a send meanwhile moves `shown`
+ *  back to the last page, which ends it. */
+async function drawBack(c, start) {
+  while (cur === c && c.shown > start) {
+    await new Promise((r) => requestAnimationFrame(r));
+    if (cur !== c || c.shown <= start) return;
+    drawBefore(c, start, FRAME_BUDGET);
+  }
 }
 
 /** Draw every turn (the find bar and the outline look through all of them). */
@@ -567,20 +598,24 @@ function park(el, height) {
   el.classList.add('parked');
 }
 
-/** Draw parked turns again from their data, keeping what's on screen where
- *  it is: one above the view can come out taller or shorter than its
- *  placeholder (the window was resized meanwhile). */
-function unpark(c, list) {
+/** Draw parked turns again from their data (in order, while `budget` ms
+ *  last), keeping what's on screen where it is: one above the view can come
+ *  out taller or shorter than its placeholder (the window was resized
+ *  meanwhile). How many were drawn. */
+function unpark(c, list, budget = Infinity) {
   const top = c.scrollEl.getBoundingClientRect().top;
   const anchor = c.order.slice(c.shown).map((id) => c.els.get(id)).find((el) => el && el.getBoundingClientRect().bottom > top);
   const y0 = anchor ? anchor.getBoundingClientRect().top : 0;
-  for (const [el, turn] of list) {
+  const n = drawWithin(list.length, (i) => {
+    const [el, turn] = list[i];
     el.classList.remove('parked');
     el.style.height = '';
     if (turn.role === 'user') renderUserTurn(el, turn); else renderAssistantTurn(el, turn);
-  }
+    if (budget !== Infinity) void el.offsetHeight; // the budget counts its layout too
+  }, budget);
   const dy = anchor ? anchor.getBoundingClientRect().top - y0 : 0;
   if (Math.abs(dy) >= 1) c.scrollEl.scrollTop += dy;
+  return n;
 }
 
 let parkFrame = 0;
@@ -604,13 +639,16 @@ function parkFar() {
     const r = el.getBoundingClientRect();
     const was = el.classList.contains('parked');
     // the answer coming in, and a turn being edited, stay drawn
-    const want = parked(Math.max(top - r.bottom, r.top - top - view, 0), view, was) && !turn.streaming && !el.contains(document.activeElement);
+    const dist = Math.max(top - r.bottom, r.top - top - view, 0);
+    const want = parked(dist, view, was) && !turn.streaming && !el.contains(document.activeElement);
     if (want && !was) go.push([el, r.height]);
-    else if (!want && was) back.push([el, turn]);
+    else if (!want && was) back.push([el, turn, dist]);
   }
   // (measured first: parking keeps every height, so nothing moves)
   for (const [el, height] of go) park(el, height);
-  if (back.length) unpark(c, back);
+  // the nearest first, a frame's worth; the rest on the next frame
+  back.sort((a, b) => a[2] - b[2]);
+  if (back.length && unpark(c, back, FRAME_BUDGET) < back.length) parkLater();
 }
 
 /** Draw every turn and keep them all drawn until `releaseAll` (the find bar searches the page). */

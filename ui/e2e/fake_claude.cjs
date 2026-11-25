@@ -4,10 +4,12 @@
 //   --version, auth status --json      -> a signed-in CLI 2.1
 //   -p --output-format json            -> a title (an error when CLAUDE_CODE_MAX_OUTPUT_TOKENS leaves no room for
 //                                          the ~255 tokens Haiku 5.5 thinks, as the real CLI does)
-//   -p --input-format stream-json      -> a turn, by the person's message:
+//   -p --input-format stream-json      -> a turn per message of the person's, as long as its input is open:
 //       "... artifact ..."             -> an HTML artifact
 //       "... echo ..."                 -> calls the e2e MCP server's echo tool, after asking permission
 //       anything else                  -> "Account answer to <text>. ..." in pieces
+//     a message with shouldQuery false (an earlier conversation) is taken in, unanswered, and a
+//     generate_session_title request gets "E2E account chat"
 // Each start, with its arguments and what it read, is logged to log.jsonl beside it.
 const fs = require('fs');
 const path = require('path');
@@ -91,8 +93,11 @@ function turns() {
       waiting.delete(v.response?.request_id);
       if (resolve) resolve(v.response);
     } else if (v.type === 'control_request') {
-      const response = v.request?.subtype === 'get_settings' ? { applied: {} } : {};
+      const response = v.request?.subtype === 'get_settings' ? { applied: {} } : v.request?.subtype === 'generate_session_title' ? { title: 'E2E account chat' } : {};
       write({ type: 'control_response', response: { subtype: 'success', request_id: v.request_id, response } });
+    } else if (v.type === 'user' && v.shouldQuery === false) {
+      // a message of an earlier conversation, taken in without an answer
+      write({ type: 'result', subtype: 'success', is_error: false, num_turns: 0, result: '', session_id: sid, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 } });
     } else if (v.type === 'user') {
       const text = (v.message.content || []).filter((b) => b.type === 'text' && !b.text.startsWith('<')).map((b) => b.text).join('\n');
       turn(text);

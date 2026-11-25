@@ -788,6 +788,7 @@ pub async fn update_conversation(app: AppHandle, state: St<'_>, req: ConvUpdate)
 pub async fn delete_conversation(app: AppHandle, state: St<'_>, id: String) -> AppResult<()> {
     let st = state.inner().clone();
     engine::stop(&st, &id);
+    crate::claudecode::end_warm(&st, &id);
     let conv = st.db.conv_get(&id).ok();
     let worktree = conv.as_ref().map(|c| c.options["worktree"].clone()).filter(|w| w.is_object());
     // a chat's CLI sessions, read while its messages are there; their transcripts go with it
@@ -1338,6 +1339,7 @@ pub async fn claude_auth_status(state: St<'_>) -> AppResult<Value> {
 #[tauri::command]
 pub async fn claude_auth_login(state: St<'_>) -> AppResult<Value> {
     let p = state.settings.read().claude_code_path.clone();
+    crate::claudecode::end_all_warm(&state).await;
     crate::claudecode::auth_login(&p).await
 }
 
@@ -1350,6 +1352,7 @@ pub async fn claude_auth_login_cancel() -> AppResult<()> {
 #[tauri::command]
 pub async fn claude_auth_logout(state: St<'_>) -> AppResult<()> {
     let p = state.settings.read().claude_code_path.clone();
+    crate::claudecode::end_all_warm(&state).await;
     crate::claudecode::auth_logout(&p).await
 }
 
@@ -1641,6 +1644,34 @@ mod tests {
         assert_eq!(st.db.conv_get(&again).unwrap().title, "Plan (fork)");
         // a message of another conversation
         assert_eq!(fork_into_new(&st, &fork, &a1).unwrap_err().to_string(), "Message not found in this conversation.");
+    }
+
+    /// The exported page follows the system's theme: its code is coloured in both, and its text, links,
+    /// diff counts and code tokens read at WCAG AA (4.5:1) on their surfaces.
+    #[tokio::test]
+    async fn the_exported_page_colours_its_code_and_reads_in_both_themes() {
+        let st = test_state();
+        let conv = st.db.conv_create("chat", "claude-opus-5-5", None, None, &json!({})).unwrap();
+        let msg = |role: &str, text: &str| crate::db::Message { id: new_id(), conversation_id: conv.id.clone(), parent_id: None, role: role.into(), content: json!([{"type": "text", "text": text}]), meta: json!({}), created_at: 0 };
+        let html = export_html(&st, &conv, &[msg("user", "code?"), msg("assistant", "```rust\n// a comment\nfn main() { let s = \"hi\"; }\n```")]).await;
+        assert!(!html.contains("data-theme"), "the page has no data-theme: rules scoped to one never apply");
+        assert!(html.contains(":root .hl-code") && html.contains("class=\"hl-"), "the code isn't coloured");
+        let colours = |css: &str| css.split("color: #").skip(1).map(|c| format!("#{}", &c[..6])).collect::<Vec<_>>();
+        let (light, dark) = html.split_once("@media (prefers-color-scheme: dark)").unwrap();
+        let hl = export_hl_css();
+        let (hl_light, hl_dark) = hl.split_once("@media").unwrap();
+        for (vars, tokens) in [(light, hl_light), (dark, hl_dark)] {
+            let var = |name: &str| vars.split(&format!("--{name}:")).nth(1).unwrap()[..7].to_string();
+            for name in ["fg", "muted", "accent", "add", "del"] {
+                let r = crate::highlight::contrast_hex(&var(name), &var("bg"));
+                assert!(r >= 4.5, "--{name} {} on --bg {} is {r:.2}:1", var(name), var("bg"));
+            }
+            assert!(!colours(tokens).is_empty());
+            for c in colours(tokens) {
+                let r = crate::highlight::contrast_hex(&c, &var("pre"));
+                assert!(r >= 4.5, "token {c} on --pre {} is {r:.2}:1", var("pre"));
+            }
+        }
     }
 
     fn test_state() -> Arc<AppState> {
@@ -3218,26 +3249,33 @@ pub async fn export_html(st: &AppState, conv: &crate::db::Conversation, path: &[
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{t}</title>
 <style>
-:root {{ --bg:#faf9f5; --fg:#1f1e1d; --muted:#6b6a68; --border:#e5e2d9; --accent:#c96442; --code:#f0eee6; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1f1e1d; --fg:#ecebe6; --muted:#a3a19c; --border:#3a3936; --code:#2a2927; }} }}
+:root {{ --bg:#faf9f5; --fg:#1f1e1d; --muted:#6b6a68; --border:#e5e2d9; --accent:#b1583a; --code:#f0eee6; --pre:#f6f6f4; --add:#30804c; --del:#c0453a; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1f1e1d; --fg:#ecebe6; --muted:#a3a19c; --border:#3a3936; --accent:#cc6c4b; --code:#2a2927; --pre:#1e1e1e; --add:#3a9a5b; --del:#cd6a61; }} }}
 body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif; }}
 main {{ max-width:820px; margin:0 auto; padding:32px 20px 60px; }}
 h1 {{ font-size:24px; margin:0 0 6px; }} h2 {{ font-size:17px; margin-top:28px; }}
 .meta {{ color:var(--muted); font-size:13px; margin-bottom:24px; }} .meta span+span:before {{ content:" · "; }}
 section {{ margin:18px 0; }} .who {{ font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }}
 .user .bubble {{ background:var(--code); border-radius:12px; padding:10px 14px; display:inline-block; max-width:100%; }}
-pre {{ background:var(--code); padding:10px 12px; border-radius:8px; overflow:auto; font-size:12.5px; }}
+pre {{ background:var(--pre); border:1px solid var(--border); padding:10px 12px; border-radius:8px; overflow:auto; font-size:12.5px; }}
 code {{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9em; }}
 details.tool {{ border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin:8px 0; font-size:13px; }}
 details.tool summary {{ cursor:pointer; }} table {{ border-collapse:collapse; }} td,th {{ border:1px solid var(--border); padding:4px 8px; }}
 .changes {{ list-style:none; padding:0; font-size:13px; }} .changes .st {{ display:inline-block; width:14px; font-weight:600; color:var(--accent); }}
-.add {{ color:#3a9a5b; }} .del {{ color:#c0453a; }} a {{ color:var(--accent); }}
+.add {{ color:var(--add); }} .del {{ color:var(--del); }} a {{ color:var(--accent); }}
 footer {{ color:var(--muted); font-size:12px; margin-top:40px; }}
 button {{ display:none; }} .code-block .lang {{ font-size:12px; color:var(--muted); }}
 {hl}
 </style></head>
 <body><main><h1>{t}</h1><div class="meta">{m}</div>{body}{changes}<footer>Exported from ClaudeRust · {date}</footer></main></body></html>
-"#, hl = crate::highlight::theme_css(), t = html_escape(&title), m = meta.into_iter().map(|x| format!("<span>{x}</span>")).collect::<String>())
+"#, hl = export_hl_css(), t = html_escape(&title), m = meta.into_iter().map(|x| format!("<span>{x}</span>")).collect::<String>())
+}
+
+/// The code colours for the exported page, which follows the system's theme (it has no `data-theme`).
+fn export_hl_css() -> String {
+    let css = crate::highlight::theme_css();
+    let theme = |scope: &str| css.lines().filter(|l| l.starts_with(scope)).map(|l| l.replace(scope, ":root")).collect::<Vec<_>>().join("\n");
+    format!("{}\n@media (prefers-color-scheme: dark) {{\n{}\n}}", theme(":root[data-theme=\"light\"]"), theme(":root[data-theme=\"dark\"]"))
 }
 
 // ------------------------------------------------------------- git history

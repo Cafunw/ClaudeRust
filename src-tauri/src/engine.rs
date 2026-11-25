@@ -977,20 +977,42 @@ pub(crate) fn notify_attention<R: Runtime>(app: &AppHandle<R>, st: &AppState, co
         .conv_get(conv_id)
         .map(|c| if c.title.is_empty() { "ClaudeRust".to_string() } else { c.title })
         .unwrap_or_else(|_| "ClaudeRust".into());
-    let tool = payload["tool"].as_str().unwrap_or("a tool");
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(attention_body(payload, st.turkish())).show();
+}
+
+/// What the notification that a session needs the user says, in the UI's language.
+fn attention_body(payload: &Value, tr: bool) -> String {
+    let tool = payload["tool"].as_str();
     let detail = payload["input"]["command"]
         .as_str()
         .or(payload["input"]["file_path"].as_str())
         .map(|d| format!(": {}", d.chars().take(80).collect::<String>()))
         .unwrap_or_default();
-    let body = match payload["kind"].as_str() {
-        Some("plan") => "Claude has a plan ready for your review.".to_string(),
-        Some("question") => "Claude has a question for you.".to_string(),
-        Some("budget") => format!("Paused: this turn reached its ${:.2} spending limit.", payload["budget"].as_f64().unwrap_or(0.0)),
-        _ => format!("Claude wants to use {tool}{detail}"),
-    };
-    use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title(title).body(body).show();
+    let budget = payload["budget"].as_f64().unwrap_or(0.0);
+    match (payload["kind"].as_str(), tr) {
+        (Some("plan"), false) => "Claude has a plan ready for your review.".into(),
+        (Some("plan"), true) => "Claude’un incelemeniz için hazır bir planı var.".into(),
+        (Some("question"), false) => "Claude has a question for you.".into(),
+        (Some("question"), true) => "Claude’un size bir sorusu var.".into(),
+        (Some("budget"), false) => format!("Paused: this turn reached its ${budget:.2} spending limit."),
+        (Some("budget"), true) => format!("Duraklatıldı: bu tur ${budget:.2} harcama sınırına ulaştı."),
+        (_, false) => format!("Claude wants to use {}{detail}", tool.unwrap_or("a tool")),
+        (_, true) => match tool {
+            Some(tool) => format!("Claude {tool} aracını kullanmak istiyor{detail}"),
+            None => format!("Claude bir araç kullanmak istiyor{detail}"),
+        },
+    }
+}
+
+/// What the notification that a turn ended says, in the UI's language.
+fn done_body(failed: bool, tr: bool) -> &'static str {
+    match (failed, tr) {
+        (true, false) => "The response failed. Open ClaudeRust to retry.",
+        (true, true) => "Yanıt başarısız oldu. Yeniden denemek için ClaudeRust’ı açın.",
+        (false, false) => "Claude finished responding.",
+        (false, true) => "Claude yanıtını bitirdi.",
+    }
 }
 
 fn notify_done<R: Runtime>(app: &AppHandle<R>, st: &AppState, conv_id: &str, failed: bool) {
@@ -1015,7 +1037,7 @@ fn notify_done<R: Runtime>(app: &AppHandle<R>, st: &AppState, conv_id: &str, fai
         .notification()
         .builder()
         .title(title)
-        .body(if failed { "The response failed. Open ClaudeRust to retry." } else { "Claude finished responding." })
+        .body(done_body(failed, st.turkish()))
         .show();
 }
 
@@ -2227,6 +2249,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cr-state-{}", crate::util::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         Arc::new(AppState::new(crate::db::Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")))
+    }
+
+    #[test]
+    fn desktop_notifications_are_in_the_ui_language() {
+        let tool = json!({"tool": "Bash", "input": {"command": "ls -la"}});
+        assert_eq!(attention_body(&tool, false), "Claude wants to use Bash: ls -la");
+        assert_eq!(attention_body(&tool, true), "Claude Bash aracını kullanmak istiyor: ls -la");
+        assert_eq!(attention_body(&json!({}), true), "Claude bir araç kullanmak istiyor");
+        assert_eq!(attention_body(&json!({}), false), "Claude wants to use a tool");
+        assert_eq!(attention_body(&json!({"kind": "budget", "budget": 2.5}), true), "Duraklatıldı: bu tur $2.50 harcama sınırına ulaştı.");
+        assert_eq!(attention_body(&json!({"kind": "budget", "budget": 2.5}), false), "Paused: this turn reached its $2.50 spending limit.");
+        for kind in ["plan", "question"] {
+            assert_ne!(attention_body(&json!({"kind": kind}), true), attention_body(&json!({"kind": kind}), false));
+        }
+        assert_eq!(done_body(false, true), "Claude yanıtını bitirdi.");
+        assert_eq!(done_body(true, false), "The response failed. Open ClaudeRust to retry.");
     }
 
     #[test]

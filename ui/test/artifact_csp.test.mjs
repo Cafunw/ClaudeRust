@@ -16,7 +16,7 @@ function frame() {
   const win = {
     parent: { postMessage: (m) => posted.push(structuredClone(m)) },
     addEventListener: (type, fn) => { listeners[type] = fn; },
-    // the overlay waits for the app to say it shows the error (qa7chat_artifact_error.test.mjs): no app here
+    // the overlay waits for the app to say it shows the error (artifact_error_overlay.test.mjs): no app here
     setTimeout: (fn) => { fn(); return 1; },
     clearTimeout: () => {},
     document: { getElementById: () => null, createElement: () => overlay, body: { appendChild: () => {} } },

@@ -1,12 +1,10 @@
 // npm run test:ui — the artifact panel as a sheet in narrow windows ("Back to
-// chat", then the topbar's toggle brings back what was shown), and the
-// keyboard path through a menu's controls (its switches and effort levels too).
+// chat", then the topbar's toggle brings back what was shown).
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { reopenId, wrapTab } from '../js/artifact_sheet.js';
-import { menuStep } from '../js/util.js';
 
 test('the toggle reopens the artifact shown last in this chat, while it is still there', () => {
   const ids = ['a', 'b', 'c'];
@@ -15,18 +13,6 @@ test('the toggle reopens the artifact shown last in this chat, while it is still
   assert.equal(reopenId(ids, 'chat1', { convId: 'chat1', identifier: 'gone' }), 'c', 'no longer on this branch: the newest');
   assert.equal(reopenId(ids, 'chat1', null), 'c');
   assert.equal(reopenId([], 'chat1', null), null);
-});
-
-test('arrows cycle through a menu\'s controls, Home and End jump to its ends', () => {
-  assert.equal(menuStep(4, -1, 'ArrowDown'), 0, 'from outside: the first');
-  assert.equal(menuStep(4, -1, 'ArrowUp'), 3, 'from outside: the last');
-  assert.equal(menuStep(4, 1, 'ArrowDown'), 2);
-  assert.equal(menuStep(4, 3, 'ArrowDown'), 0, 'wraps');
-  assert.equal(menuStep(4, 0, 'ArrowUp'), 3, 'wraps');
-  assert.equal(menuStep(4, 2, 'Home'), 0);
-  assert.equal(menuStep(4, 0, 'End'), 3);
-  assert.equal(menuStep(4, 1, 'Tab'), -1, 'other keys are left alone');
-  assert.equal(menuStep(0, -1, 'ArrowDown'), -1, 'an empty menu');
 });
 
 const CSS = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
