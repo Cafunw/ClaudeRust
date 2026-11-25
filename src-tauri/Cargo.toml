@@ -1,6 +1,6 @@
 [package]
 name = "clauderust"
-version = "0.1.10"
+version = "0.1.11"
 description = "An unofficial, lightweight desktop client for the Claude API, written in Rust"
 license = "MIT"
 repository = "https://github.com/Cafunw/ClaudeRust"
