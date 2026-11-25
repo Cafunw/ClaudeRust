@@ -3,6 +3,145 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.12] - 2026-11-25
+
+Less memory on your Claude account, support for the newer MCP protocol,
+artifact storage in the app's database, and fixes for the keyboard,
+contrast and Settings.
+
+**Improved**
+- On your Claude account only one Claude Code process is kept: that of
+  the chat in front. It ends after 90 seconds idle, or 30 seconds with the
+  window hidden or minimised, so memory stays low. A new chat's process
+  starts while you type its first message, so its first reply starts
+  sooner.
+- A reply on your Claude account is finished as soon as Claude Code
+  reports it done.
+- MCP servers on the newer protocol (2025-11-25) work. Settings and the
+  permission card show the servers' and tools' icons, the tools' titles
+  and descriptions, and whether a tool only reads or can destroy data.
+- MCP resources keep their pictures, PDFs and files, with their own
+  names, and resource templates can be filled in.
+- An MCP server can ask you to open a link: it is shown with its site,
+  with a warning for look-alike addresses, and opens only when you click
+  *Open*.
+- What artifacts store is kept in the app's database, up to 20 MB for
+  each artifact; what they stored before is moved over once.
+- The connector directory shows a distinct tile for each connector.
+- The Import page shows its progress while it reads Claude Code sessions.
+- The thinking effort you pick is remembered for the next new chat, and
+  separately for the next Code session.
+- A chat with very long replies opens on fewer of its last replies, so it
+  opens sooner; the earlier ones come as you scroll up.
+- In the Artifacts gallery, React and HTML thumbnails are drawn at about
+  the panel's width, so a small component shows larger.
+
+**Fixed**
+- Escape closes the search palette and dialogs from any control in them.
+- The Settings navigation works with the arrow keys, Home and End.
+- The Quick Entry shortcut is set with the key recorder.
+- Changing the Claude Code path updates its status at once, and chat
+  errors about Claude Code link to the right Settings page.
+- Switches and field borders are clearly visible in both themes.
+- Code no longer turns `<=` or `=>` into symbols.
+- Settings rows are aligned, and long navigation labels are no longer cut.
+- In Doc artifacts, task checkboxes no longer look faded.
+- `window.claude.complete` no longer stops after 100 calls in a
+  conversation.
+- A chat title that Claude Code is slow to write no longer makes the next
+  reply start a new Claude Code process.
+- A gallery tile scrolled away and back while it was being drawn no
+  longer gets two thumbnails.
+
+**Known limits**
+- Some features of Claude Desktop can't be offered: Anthropic's own
+  account connectors, publishing an artifact, and picking private Google
+  Drive files (the app has no Google sign-in). MCP sampling is not
+  supported.
+- On your Claude account a reply doesn't go on after the app quits.
+- On your Claude account `window.claude.complete` still starts a Claude
+  Code process of its own for each call.
+- If you send a new chat's first message before its early Claude Code
+  process is up, the message starts its own; the early one then stays
+  idle until another chat's process is kept or 90 seconds pass.
+- Rebuilding a chat whose Claude Code transcript is gone, and finishing
+  an artifact with *Continue* on your Claude account, were tried only
+  with a stand-in for Claude Code.
+- Opening a very long chat with many code blocks still has one short
+  stutter.
+- A very small component that isn't centred on its page still looks
+  small in its gallery tile.
+- The exported chat page's colours and the Turkish desktop notifications
+  were checked by tests, not by hand.
+- An unfinished artifact now ends where the next artifact starts, so an
+  artifact whose own text contains an artifact's opening tag is split
+  there.
+- There is no *Design* artifact, decks are 16:9 only, and the version
+  menu doesn't mark a version you edited as yours.
+- After you edit an artifact in place, the next reply on your Claude
+  account starts a new Claude Code session with the conversation sent
+  again, so that reply doesn't use the prompt cache.
+- In a doc saved as .docx, lists are typed bullets and numbers rather
+  than Word lists, and links are styled text that can't be clicked.
+- Printing decks and docs to PDF, the save dialogs of downloads, *Open*
+  and *Download* in an attachment's preview, and the tray menu itself
+  were not tried by hand, because they open the system's own windows.
+- The window's own memory use while idle is unchanged. Giving memory back
+  when the window is hidden or minimised, and ending the kept Claude Code
+  process 30 seconds after that, were checked in the code and tests, not
+  by hand.
+- An MCP config file edited outside the app that isn't valid JSON is
+  ignored without a notice until it is valid again; the servers keep
+  running as they were.
+- In a form an MCP server asks you to fill in, a choice of several
+  numbers is refused; choices of text work.
+- An MCP resource attached to a message that is never sent stays in
+  memory until the app quits.
+- Searching a large project on your Claude account was tried only with a
+  stand-in for Claude Code, and so was `window.claude.complete` there.
+- What you allow an artifact (a connector, or asking Claude) lasts until
+  the app restarts or the page reloads; then the artifact asks again. An
+  artifact can't be opened in its own window yet, and Tab pressed inside
+  an artifact can still leave the narrow sheet.
+- With both an API key and the Claude account as the chat engine, titles
+  are made with the API key first, so they use API credit.
+- The Node.js download was tried only against a local test server, not
+  against nodejs.org. Installing and updating from the extension
+  directory were tried only against local test servers; the listed
+  releases' addresses, sizes and SHA-256 come from GitHub's release API
+  and were not downloaded. Update notices cover only extensions the
+  directory lists.
+- The GitHub and Google link sources were tried only against local test
+  servers, and Google's export formats were not checked against Google.
+  Files that aren't shared by link can't be read.
+- Drafting a style was tried with an API key against a stand-in, not on
+  your Claude account.
+- Some messages are still English in the Turkish interface: the engine's
+  busy texts, its crash text, errors when continuing a reply, the success
+  text when a worktree's changes are applied, the diagnostics' labels,
+  and the error detail in the dialog shown when the database can't be
+  opened.
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply. A release build was not measured.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- An MCP App page can reach the hosts its server declares without asking
+  you first. MCP Apps are shown inline only: no side panel or full
+  screen, and an app can't update what Claude knows.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs (at fixed versions), so they need the internet.
+- Keeping the computer awake on macOS and Linux, and keeping tokens in the
+  config file on Linux, are untested on those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.11] - 2026-11-25
 
 Faster and more faithful replies on your Claude account, an immediate
