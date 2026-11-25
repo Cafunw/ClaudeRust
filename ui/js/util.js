@@ -229,7 +229,8 @@ export function showMenu(anchor, items, opts = {}) {
   if (opts.width) el.style.minWidth = opts.width + 'px';
   for (const it of items) {
     if (!it) continue;
-    if (it.sep) { el.appendChild(h('<div class="menu-sep"></div>')); continue; }
+    // (a line only between two groups: never first, twice in a row or last, whatever sections are empty)
+    if (it.sep) { if (el.lastElementChild && !el.lastElementChild.matches('.menu-sep')) el.appendChild(h('<div class="menu-sep"></div>')); continue; }
     if (it.header) { el.appendChild(h(`<div class="menu-label">${esc(it.header)}</div>`)); continue; }
     if (it.element) { el.appendChild(it.element); continue; }
     // a choice among several (a model, a version): which one is on is said, not only drawn
@@ -249,11 +250,15 @@ export function showMenu(anchor, items, opts = {}) {
     });
     el.appendChild(b);
   }
+  if (el.lastElementChild && el.lastElementChild.matches('.menu-sep')) el.lastElementChild.remove();
   document.body.appendChild(el);
   position(el, anchor, opts.placement || 'bottom-start');
   const outside = (e) => { if (!el.contains(e.target) && !(anchor && anchor.contains(e.target))) closeMenu(); };
   const key = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); closeMenu(); anchor && anchor.focus && anchor.focus(); return; }
+    // Tab leaves the menu, as a menu button's does: it closes, and the keyboard goes back to the button
+    // (from inside it) or on from the button; never on into a menu left open at the page's end
+    if (e.key === 'Tab') { if (el.contains(document.activeElement)) e.preventDefault(); closeMenu(); return; }
     // a text field keeps its own Home and End
     if ((e.key === 'Home' || e.key === 'End') && e.target.matches && e.target.matches('input:not([type=checkbox]), textarea')) return;
     // every control of the menu, its switches and effort levels too

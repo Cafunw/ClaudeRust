@@ -4,6 +4,9 @@
 //
 // Streaming Messages requests are answered by the last user message:
 //   "slow ..."                    -> 400 words at 50 ms each (to test Stop)
+//   "long ..."                    -> about 1,500 words of markdown at 10 ms a word (streaming cost)
+//   "think ..."                   -> streamed thinking, then a short answer
+//   "... cite ..."                -> a web search, then text that cites two pages (cited_text)
 //   "... echo ..."                -> calls the MCP server's echo tool, if offered
 //   "... write the file ..."      -> calls Write on <cwd>/e2e.txt (Code sessions)
 //   "... broken artifact ..."     -> an HTML artifact whose script throws
@@ -25,6 +28,20 @@ const MODELS = [['claude-opus-5-5', 'Claude Opus 5.5'], ['claude-sonnet-5-5', 'C
   .map(([id, display_name]) => ({ id, display_name, type: 'model', created_at: '2026-01-01T00:00:00Z' }));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// a reply with every kind of block markdown has, many times over
+const LONG = Array.from({ length: 12 }, (_, i) => `## Part ${i + 1}\n\nThis paragraph has **bold words**, *italic words*, \`inline code\` and a [link](https://example.com/${i}) in it, `
+  + 'and it goes on for a while so that a streamed reply wraps over several lines in the chat column. '.repeat(3)
+  + `\n\n- the first point of part ${i + 1}\n- a second point with **bold** text\n  - and a nested one\n\n`
+  + `\`\`\`rust\nfn part_${i}(x: u32) -> u32 {\n    x * ${i + 2} // a comment\n}\n\`\`\`\n\n| Column | Value |\n| --- | --- |\n| a | ${i} |\n| b | ${i * 2} |\n\n`).join('');
+
+export const CITED = {
+  url: 'https://blog.rust-lang.org/2026/', title: 'Rust Blog',
+  // markup in a page's passage must come out as text
+  text: 'Rust 1.95 <b>shipped</b> on "time" & with faster builds.',
+};
+// longer than the app shows
+const LONG_PASSAGE = `Example News reports ${'that compile times kept falling all year, '.repeat(20)}end.`;
 
 function json(res, status, value) {
   const body = JSON.stringify(value);
@@ -87,6 +104,41 @@ async function stream(res, body, mock) {
   let stop = 'end_turn';
   if (result) await text([`Done: ${resultText(result)}`], 0);
   else if (/^slow/i.test(asked)) await text(Array.from({ length: 400 }, (_, i) => `w${i} `), 50);
+  else if (/^long/i.test(asked)) await text(LONG.split(/(?<= )/), 10);
+  else if (/^think/i.test(asked)) {
+    send({ type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '' } });
+    for (const p of 'Let me reason about this step by step before I answer. '.repeat(6).split(/(?<= )/)) {
+      if (gone) return;
+      send({ type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: p } });
+      await sleep(15);
+    }
+    send({ type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: 'sig' } });
+    send({ type: 'content_block_stop', index });
+    index++;
+    await text('After thinking it through, the answer is 42.'.split(/(?<= )/), 30);
+  }
+  else if (/\bcite\b/i.test(asked)) {
+    send({ type: 'content_block_start', index, content_block: { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: {} } });
+    send({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: '{"query":"rust news"}' } });
+    send({ type: 'content_block_stop', index });
+    index++;
+    send({ type: 'content_block_start', index, content_block: { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [
+      { type: 'web_search_result', url: CITED.url, title: CITED.title, encrypted_content: 'x' },
+      { type: 'web_search_result', url: 'https://www.example.com/news', title: 'Example News', encrypted_content: 'y' }] } });
+    send({ type: 'content_block_stop', index });
+    index++;
+    const cited = (words, citation) => {
+      send({ type: 'content_block_start', index, content_block: { type: 'text', text: '', citations: [] } });
+      send({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: words } });
+      send({ type: 'content_block_delta', index, delta: { type: 'citations_delta', citation: { type: 'web_search_result_location', encrypted_index: 'z', ...citation } } });
+      send({ type: 'content_block_stop', index });
+      index++;
+    };
+    cited('Rust shipped a release this year', { url: CITED.url, title: CITED.title, cited_text: CITED.text });
+    await text([', and builds got faster'], 0);
+    cited(' across the board', { url: 'https://www.example.com/news', title: 'Example News', cited_text: LONG_PASSAGE });
+    await text(['.'], 0);
+  }
   else if (/\becho\b/i.test(asked) && echo) {
     await text(['Let me echo it.'], 0);
     tool('toolu_echo', echo, { text: 'hi' });

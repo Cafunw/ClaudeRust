@@ -5,6 +5,7 @@
 //! and goes to those two hosts only.
 
 use crate::attachments::{self, refuse, Attachment};
+use crate::db::{Db, FileSource};
 use crate::error::{AppError, AppResult};
 use crate::remote_files::{body_capped, clean_name, client, hand_over, under, unescape, Fence};
 use crate::state::AppState;
@@ -362,7 +363,88 @@ pub async fn github_list(url: String) -> AppResult<Value> {
 #[tauri::command]
 pub async fn github_add(state: St<'_>, url: String, sha: String, paths: Vec<String>, project_id: Option<String>) -> AppResult<Value> {
     let files = fetch(&Github::live(), saved_token().as_deref(), &url, &sha, &paths).await?;
-    hand_over(state.inner().clone(), project_id, files, attach).await
+    let st = state.inner().clone();
+    let added = hand_over(st.clone(), project_id.clone(), files, attach).await?;
+    // the files are in the project either way: a failure here only leaves them without Sync
+    if project_id.is_some() {
+        if let Err(e) = keep_sources(&st.db, &url, &sha, &paths, &added) {
+            log::warn!("keeping where the GitHub files came from: {e}");
+        }
+    }
+    Ok(added)
+}
+
+/// `repo`'s address as kept with its files: the same for every way of writing it.
+fn canonical(repo: &Repo) -> String {
+    let tree = if repo.rest.is_empty() { None } else { Some("tree") };
+    under(&Url::parse("https://github.com").expect("a URL"), [repo.owner.as_str(), &repo.name].into_iter().chain(tree).chain(repo.rest.iter().map(String::as_str))).to_string()
+}
+
+/// Note where each file `github_add` added to a project came from, so `github_sync` can fetch it again.
+fn keep_sources(db: &Db, url: &str, sha: &str, paths: &[String], added: &Value) -> AppResult<()> {
+    let repo = parse_repo(url)?;
+    let url = canonical(&repo);
+    for f in added["added"].as_array().into_iter().flatten() {
+        let (Some(id), Some(name)) = (f["id"].as_str(), f["name"].as_str()) else { continue };
+        if let Some(path) = paths.iter().find(|p| clean_name(&format!("{}/{p}", repo.name)) == name) {
+            db.project_file_source_set(&FileSource { file_id: id.into(), url: url.clone(), path: path.clone(), sha: sha.into() })?;
+        }
+    }
+    Ok(())
+}
+
+/// Sync the files of project `project_id` that came from the repository at
+/// `url` (an address as `get_project` gives it) with the newest commit of the
+/// same branch, tag or default branch: a file that changed is replaced, one
+/// that is gone from the repository or couldn't be fetched is kept as it was.
+/// `{repo, sha, up_to_date, updated: [names], unchanged, missing: [names], errors}`.
+async fn sync(gh: &Github, token: Option<&str>, db: Arc<Db>, project_id: &str, url: &str) -> AppResult<Value> {
+    let repo = parse_repo(url)?;
+    let (sources, files) = {
+        let (db, p) = (db.clone(), project_id.to_string());
+        tokio::task::spawn_blocking(move || Ok::<_, AppError>((db.project_file_sources(&p)?, db.project_files(&p)?))).await.map_err(|e| AppError::coded("github_failed", Value::Null, e.to_string()))??
+    };
+    let sources: Vec<FileSource> = sources.into_iter().filter(|s| s.url == url).collect();
+    if sources.is_empty() {
+        return Err(refuse("github_sync_none", "None of this project's files came from that repository. Add them from GitHub again to sync them.".into()));
+    }
+    let c = client(&gh.fence)?;
+    let (sha, _, _) = resolve(gh, &c, token, &repo).await?;
+    let stale: Vec<FileSource> = sources.iter().filter(|s| s.sha != sha).cloned().collect();
+    let paths: Vec<String> = stale.iter().map(|s| s.path.clone()).collect();
+    let fetched = if stale.is_empty() { vec![] } else { fetch(gh, token, url, &sha, &paths).await? };
+    let label = format!("{}/{}", repo.owner, repo.name);
+    let up_to_date = stale.is_empty();
+    tokio::task::spawn_blocking(move || {
+        let (mut updated, mut missing, mut errors) = (vec![], vec![], vec![]);
+        let mut unchanged = sources.len() - stale.len();
+        for (mut s, (_, bytes)) in stale.into_iter().zip(fetched) {
+            let Some(f) = files.iter().find(|f| f.id == s.file_id) else { continue };
+            s.sha.clone_from(&sha);
+            match bytes.and_then(|b| attach(&f.name, &b)) {
+                // GitHub answers 404 for a path that isn't in the commit
+                Err(e) if e.kind() == "github_not_found" => missing.push(f.name.clone()),
+                Err(e) => errors.push(json!({"kind": e.kind(), "message": e.to_string(), "name": f.name})),
+                Ok(a) if (a.data.as_str(), a.mime.as_str(), a.kind.as_str()) == (f.data.as_str(), f.mime.as_str(), f.kind.as_str()) => {
+                    db.project_file_source_sha(&s)?;
+                    unchanged += 1;
+                }
+                Ok(a) => {
+                    db.project_file_replace(&s, &a.mime, a.size as i64, &a.kind, &a.data)?;
+                    updated.push(f.name.clone());
+                }
+            }
+        }
+        Ok(json!({"repo": label, "sha": sha, "up_to_date": up_to_date, "updated": updated, "unchanged": unchanged, "missing": missing, "errors": errors}))
+    })
+    .await
+    .map_err(|e| AppError::coded("github_failed", Value::Null, e.to_string()))?
+}
+
+/// "Sync from GitHub" on the files of project `project_id` from the repository at `url`.
+#[tauri::command]
+pub async fn github_sync(state: St<'_>, project_id: String, url: String) -> AppResult<Value> {
+    sync(&Github::live(), saved_token().as_deref(), state.db.clone(), &project_id, &url).await
 }
 
 /// Whether a token is saved, and whether the store keeps it across restarts.
@@ -607,6 +689,87 @@ mod tests {
         }
         let e = fetch(&gh, Some(TOKEN), "https://github.com/a/b", SHA, &["nothing".into()]).await.unwrap()[0].1.as_ref().unwrap_err().to_string();
         assert!(!e.contains(TOKEN), "{e}");
+    }
+
+    #[test]
+    fn a_kept_address_is_one_for_every_way_of_writing_it() {
+        for (url, want) in [
+            ("github.com/a/b/", "https://github.com/a/b"),
+            ("https://www.github.com/a/b.git?tab=x", "https://github.com/a/b"),
+            ("https://github.com/a/b/blob/feature/x/src", "https://github.com/a/b/tree/feature/x/src"),
+            ("https://github.com/a/b/tree/main/my%20dir", "https://github.com/a/b/tree/main/my%20dir"),
+        ] {
+            let repo = parse_repo(url).unwrap();
+            assert_eq!(canonical(&repo), want, "{url}");
+            assert_eq!(parse_repo(want).unwrap(), repo, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn files_added_from_github_sync_with_the_newest_commit() {
+        const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        let head = Arc::new(parking_lot::Mutex::new(SHA));
+        let at = head.clone();
+        let (base, seen) = mock::serve(move |r| {
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            let raw = |sha: &str, p: &str| r.path == format!("/raw/a/b/{sha}/{p}");
+            match r.path.as_str() {
+                "/api/repos/a/b/commits/HEAD" => (200, vec![], at.lock().as_bytes().to_vec()),
+                _ if raw(SHA, "README.md") => (200, vec![], b"# Hello".to_vec()),
+                _ if raw(NEW, "README.md") => (200, vec![], b"# Hello again".to_vec()),
+                _ if raw(SHA, "src/a.rs") || raw(NEW, "src/a.rs") => (200, vec![], b"fn a() {}".to_vec()),
+                _ if raw(SHA, "gone.md") || raw(SHA, "pic.txt") => (200, vec![], b"text".to_vec()),
+                _ if raw(NEW, "pic.txt") => (200, vec![], png.into_inner()),
+                _ => (404, vec![], vec![]),
+            }
+        })
+        .await;
+        let gh = Github::at(&base);
+        let dir = std::env::temp_dir().join(format!("clauderust-ghsync-{}", crate::util::new_id()));
+        let st = Arc::new(AppState::new(Db::open_in_memory().unwrap(), dir.clone(), dir.join("mcp.json")));
+        let p = st.db.project_create("P", "").unwrap();
+        // as github_add adds them (the address written another way)
+        let url = "github.com/a/b/";
+        let paths: Vec<String> = ["README.md", "src/a.rs", "gone.md", "pic.txt"].map(String::from).to_vec();
+        let added = hand_over(st.clone(), Some(p.id.clone()), fetch(&gh, Some(TOKEN), url, SHA, &paths).await.unwrap(), attach).await.unwrap();
+        keep_sources(&st.db, url, SHA, &paths, &added).unwrap();
+        let kept = st.db.project_file_sources(&p.id).unwrap();
+        assert_eq!(kept.iter().map(|s| (s.url.as_str(), s.path.as_str())).collect::<Vec<_>>(), paths.iter().map(|p| ("https://github.com/a/b", p.as_str())).collect::<Vec<_>>());
+        let home = "https://github.com/a/b";
+
+        let r = sync(&gh, Some(TOKEN), st.db.clone(), &p.id, home).await.unwrap();
+        assert_eq!((r["up_to_date"].as_bool(), r["unchanged"].as_u64(), r["repo"].as_str()), (Some(true), Some(4), Some("a/b")), "{r}");
+        assert!(!seen.lock().iter().any(|s| s.path.starts_with("/raw/") && s.path.contains(NEW)), "nothing fetched at the same commit");
+
+        *head.lock() = NEW;
+        let r = sync(&gh, Some(TOKEN), st.db.clone(), &p.id, home).await.unwrap();
+        assert_eq!(r["up_to_date"], false);
+        assert_eq!(r["updated"], json!(["b/README.md"]));
+        assert_eq!(r["unchanged"], 1);
+        assert_eq!(r["missing"], json!(["b/gone.md"]), "gone upstream: said, and kept");
+        assert_eq!((r["errors"][0]["name"].as_str(), r["errors"][0]["kind"].as_str()), (Some("b/pic.txt"), Some("github_not_text")));
+        let files = st.db.project_files(&p.id).unwrap();
+        assert_eq!(files.len(), 4, "nothing removed");
+        let data = |n: &str| files.iter().find(|f| f.name == n).unwrap().data.clone();
+        assert_eq!((data("b/README.md").as_str(), data("b/gone.md").as_str(), data("b/pic.txt").as_str()), ("# Hello again", "text", "text"));
+        let sha_of = |path: &str| st.db.project_file_sources(&p.id).unwrap().into_iter().find(|s| s.path == path).unwrap().sha;
+        assert_eq!((sha_of("README.md"), sha_of("src/a.rs"), sha_of("gone.md")), (NEW.to_string(), NEW.to_string(), SHA.to_string()), "what failed is tried again next time");
+        assert!(seen.lock().iter().all(|s| s.auth.as_deref() == Some(&format!("Bearer {TOKEN}")[..])), "a private repository's token, as when adding");
+        assert!(!r.to_string().contains(TOKEN));
+
+        // again: only the two that didn't sync are fetched
+        seen.lock().clear();
+        let r = sync(&gh, None, st.db.clone(), &p.id, home).await.unwrap();
+        assert_eq!((r["updated"].as_array().unwrap().len(), r["unchanged"].as_u64()), (0, Some(2)));
+        assert_eq!(seen.lock().iter().filter(|s| s.path.starts_with("/raw/")).count(), 2);
+
+        // a file added another way (or before sources were kept) has nothing to sync with
+        assert_eq!(sync(&gh, None, st.db.clone(), &p.id, "https://github.com/a/other").await.unwrap_err().kind(), "github_sync_none");
+        let other = st.db.project_create("Q", "").unwrap();
+        hand_over(st.clone(), Some(other.id.clone()), vec![("b/README.md".into(), Ok(b"x".to_vec()))], attach).await.unwrap();
+        assert_eq!(sync(&gh, None, st.db.clone(), &other.id, home).await.unwrap_err().kind(), "github_sync_none");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

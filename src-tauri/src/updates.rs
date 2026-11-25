@@ -53,19 +53,33 @@ fn current_version(app: &AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// The update on offer, if any: `{available, current, version?, notes?, date?, releases_url}`.
-pub async fn check(app: &AppHandle) -> AppResult<Value> {
-    let found = updater(app)?.check().await.map_err(|e| AppError::coded("update_check_failed", Value::Null, format!("Couldn't check for updates: {e}")))?;
-    Ok(describe(&current_version(app), found.as_ref().map(|u| (u.version.as_str(), u.body.as_deref(), u.date.map(|d| d.to_string())))))
+/// What a check found, and whether the latest release has no signed
+/// manifest for this system: one published without the signing key
+/// (release.yml's unsigned path) has no `latest.json`, which is no update
+/// to offer rather than a failure. (The plugin says the same of any endpoint
+/// that refuses the request, a 404 among them.)
+fn outcome<T>(r: Result<Option<T>, tauri_plugin_updater::Error>) -> AppResult<(Option<T>, bool)> {
+    use tauri_plugin_updater::Error as E;
+    match r {
+        Ok(found) => Ok((found, false)),
+        Err(E::ReleaseNotFound | E::TargetNotFound(_) | E::TargetsNotFound(_)) => Ok((None, true)),
+        Err(e) => Err(AppError::coded("update_check_failed", Value::Null, format!("Couldn't check for updates: {e}"))),
+    }
 }
 
-fn describe(current: &str, update: Option<(&str, Option<&str>, Option<String>)>) -> Value {
+/// The update on offer, if any: `{available, current, version?, notes?, date?, no_manifest?, releases_url}`.
+pub async fn check(app: &AppHandle) -> AppResult<Value> {
+    let (found, no_manifest) = outcome(updater(app)?.check().await)?;
+    Ok(describe(&current_version(app), found.as_ref().map(|u| (u.version.as_str(), u.body.as_deref(), u.date.map(|d| d.to_string()))), no_manifest))
+}
+
+fn describe(current: &str, update: Option<(&str, Option<&str>, Option<String>)>, no_manifest: bool) -> Value {
     match update {
         Some((version, notes, date)) => json!({
             "available": true, "current": current, "version": version,
             "notes": notes.unwrap_or("").trim(), "date": date, "releases_url": RELEASES_URL,
         }),
-        None => json!({"available": false, "current": current, "releases_url": RELEASES_URL}),
+        None => json!({"available": false, "current": current, "no_manifest": no_manifest, "releases_url": RELEASES_URL}),
     }
 }
 
@@ -82,11 +96,7 @@ pub async fn install(app: &AppHandle) -> AppResult<()> {
 }
 
 async fn install_inner(app: &AppHandle) -> AppResult<()> {
-    let mut update = updater(app)?
-        .check()
-        .await
-        .map_err(|e| AppError::coded("update_check_failed", Value::Null, format!("Couldn't check for updates: {e}")))?
-        .ok_or_else(|| AppError::coded("update_none", Value::Null, "ClaudeRust is up to date."))?;
+    let mut update = outcome(updater(app)?.check().await)?.0.ok_or_else(|| AppError::coded("update_none", Value::Null, "ClaudeRust is up to date."))?;
     // The check's limit is for the check: as a total request timeout on the
     // download it would fail any installer that takes longer to arrive. (The
     // plugin documents the builder's timeout as covering downloads too;
@@ -147,12 +157,30 @@ mod tests {
 
     #[test]
     fn describes_updates() {
-        let v = describe("0.1.0", Some(("0.2.0", Some("  Faster.\n"), Some("2026-11-21".into()))));
+        let v = describe("0.1.0", Some(("0.2.0", Some("  Faster.\n"), Some("2026-11-21".into()))), false);
         assert_eq!(v["available"], true);
         assert_eq!((v["current"].as_str(), v["version"].as_str(), v["notes"].as_str()), (Some("0.1.0"), Some("0.2.0"), Some("Faster.")));
-        let none = describe("0.1.0", None);
-        assert_eq!(none["available"], false);
+        let none = describe("0.1.0", None, false);
+        assert_eq!((none["available"].as_bool(), none["no_manifest"].as_bool()), (Some(false), Some(false)));
         assert_eq!(none["releases_url"], RELEASES_URL);
+    }
+
+    #[test]
+    fn a_release_without_a_signed_manifest_is_no_update_not_an_error() {
+        use tauri_plugin_updater::Error as E;
+        // the plugin's answer when latest.json is missing (404), or has no entry for this system
+        for e in [E::ReleaseNotFound, E::TargetNotFound("linux-x86_64".into()), E::TargetsNotFound(vec!["windows-x86_64-nsis".into()])] {
+            let (found, no_manifest) = outcome::<()>(Err(e)).unwrap();
+            assert!(found.is_none() && no_manifest);
+        }
+        let v = describe("0.1.12", None, true);
+        assert_eq!((v["available"].as_bool(), v["no_manifest"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(outcome(Ok(Some(1))).unwrap(), (Some(1), false));
+        assert_eq!(outcome::<()>(Ok(None)).unwrap(), (None, false));
+        // offline, a bad signature or manifest: still a failure to say
+        for e in [E::Network("connection refused".into()), E::UnsupportedOs] {
+            assert_eq!(outcome::<()>(Err(e)).unwrap_err().kind(), "update_check_failed");
+        }
     }
 
     #[test]

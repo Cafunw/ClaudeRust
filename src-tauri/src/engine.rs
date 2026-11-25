@@ -887,7 +887,7 @@ impl RunSlot {
         let cancel = CancellationToken::new();
         let mut runs = st.runs.lock();
         if runs.contains_key(conv_id) {
-            return Err(AppError::msg(busy));
+            return Err(AppError::coded("conversation_busy", Value::Null, busy));
         }
         runs.insert(conv_id.to_string(), cancel.clone());
         Ok(RunSlot { st: st.clone(), conv_id: conv_id.to_string(), cancel, held: true })
@@ -2364,7 +2364,9 @@ mod tests {
         let st = test_state();
         let a = RunSlot::reserve(&st, "c", "busy").unwrap();
         // what a second send / regenerate / rewind / compact would hit
-        assert_eq!(RunSlot::reserve(&st, "c", "busy").err().map(|e| e.to_string()), Some("busy".into()));
+        let refused = RunSlot::reserve(&st, "c", "busy").err().unwrap();
+        // coded, so the UI says it in the person's language (errk_conversation_busy), the caller's text under Details
+        assert_eq!((refused.kind(), refused.to_string()), ("conversation_busy", "busy".into()));
         assert!(RunSlot::reserve(&st, "other", "busy").is_ok(), "other conversations aren't affected");
         // Stop reaches a reserved conversation like a running one
         stop(&st, "c");

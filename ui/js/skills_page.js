@@ -6,7 +6,7 @@ import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { call } from './api.js';
 import { store, emit } from './store.js';
-import { esc, h, modal, button, toast, errorToast, confirmDialog, promptDialog, humanSize } from './util.js';
+import { esc, h, modal, button, toast, errorToast, confirmDialog, promptDialog, humanSize, hasWords } from './util.js';
 import { notRegistered } from './optional_cmd.js';
 import { errorText } from './neterr.js';
 
@@ -26,6 +26,15 @@ export function sessionFolders(convs, currentId) {
 
 const folderName = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
 
+/** The skills whose name or description hold every word of `q` (any case, Turkish İ/ı too). */
+export const filterSkills = (skills, q) => skills.filter((s) => hasWords(`${s.name} ${s.description || ''}`, q));
+
+/** `skills` by where they come from, in this order, the groups that have some: [[source, skills]]. */
+export function groupSkills(skills) {
+  const of = (s) => (s.source === 'project' || s.source === 'plugin' ? s.source : 'personal');
+  return ['personal', 'project', 'plugin'].map((g) => [g, skills.filter((s) => of(s) === g)]).filter(([, l]) => l.length);
+}
+
 /** Settings → Skills; `tab.close()` closes Settings (for "Create skill"). */
 export async function renderSkills(body, tab) {
   body.appendChild(h(`<h3>${esc(t('sk_title'))}</h3>`));
@@ -34,16 +43,32 @@ export async function renderSkills(body, tab) {
   const actions = h('<div class="row" style="margin-bottom:12px;flex-wrap:wrap"></div>');
   const folders = sessionFolders(store.conversations, store.route.params && store.route.params.id);
   const pick = h(`<select class="select" style="width:auto;max-width:min(260px,100%);min-width:0" aria-label="${esc(t('sk_folder'))}"><option value="">${esc(t('sk_no_folder'))}</option>${folders.map((f, i) => `<option value="${esc(f)}" ${i === 0 ? 'selected' : ''} title="${esc(f)}">${esc(folderName(f))}</option>`).join('')}</select>`);
-  const list = h('<div></div>');
-  body.append(actions, list);
+  // (Esc empties it first, then closes Settings: a11y.js, as in every search field)
+  const filter = h(`<div class="search-box sk-filter">${icon('search', 15)}<input class="input" type="search" placeholder="${esc(t('sk_filter'))}" aria-label="${esc(t('sk_filter'))}"></div>`);
+  const input = filter.querySelector('input');
+  const list = h('<div class="sk-list"></div>');
+  body.append(actions, filter, list);
   const project = () => pick.value || null;
+  let skills = [];
+  const show = () => {
+    list.replaceChildren();
+    if (!skills.length) { list.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('book', 28)}<div style="margin-top:8px">${esc(t('sk_none'))}</div></div>`)); return; }
+    const shown = filterSkills(skills, input.value);
+    if (!shown.length) { list.appendChild(h(`<div class="empty-state" role="status" style="padding:30px">${esc(t('sk_no_match', { q: input.value.trim() }))}</div>`)); return; }
+    for (const [g, group] of groupSkills(shown)) {
+      const label = g === 'project' ? t('sk_src_project', { dir: folderName(project() || '') }) : g === 'plugin' ? t('sk_group_plugin') : t('sk_src_user');
+      list.appendChild(h(`<h4 class="sk-group">${esc(label)} <span class="muted">${group.length}</span></h4>`));
+      for (const s of group) list.appendChild(card(s, project(), draw));
+    }
+    clampDescriptions(list);
+  };
+  input.addEventListener('input', show);
 
   // the folder picked last wins: an earlier, slower list is dropped
   let drawn = 0;
   const draw = async () => {
     const mine = ++drawn;
     list.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
-    let skills;
     try { skills = await call('skills_list', { project: project() }); } catch (e) {
       if (mine !== drawn) return;
       list.replaceChildren(h(`<div class="empty-state" style="padding:30px">${esc(notRegistered(e) ? t('sk_unavailable') : errorText(e))}</div>`));
@@ -51,9 +76,7 @@ export async function renderSkills(body, tab) {
       return;
     }
     if (mine !== drawn) return;
-    list.replaceChildren();
-    if (!skills.length) list.appendChild(h(`<div class="empty-state" style="padding:30px">${icon('book', 28)}<div style="margin-top:8px">${esc(t('sk_none'))}</div></div>`));
-    for (const s of skills) list.appendChild(card(s, project(), draw));
+    show();
   };
   actions.append(
     button(t('sk_install'), 'primary', () => installSkill(project(), draw)),
@@ -68,15 +91,42 @@ export async function renderSkills(body, tab) {
   await draw();
 }
 
+/** About two lines of a description in a wide Settings: the start of a longer one, cut at a word, is
+ *  what a card shows (and a screen reader reads) until it is opened; CSS keeps it to two lines when narrower. */
+export function shortDescription(text, max = 170) {
+  if (text.length <= max) return text;
+  const at = text.lastIndexOf(' ', max);
+  return `${text.slice(0, at > max / 2 ? at : max).trimEnd()}…`;
+}
+
+/** Each description in `root` (its whole text in `__full`) is two lines at most; one cut short gets a button that shows it all. */
+function clampDescriptions(root) {
+  // (measured once drawn; shortcut: a later resize of Settings doesn't add or drop a button, the next draw does)
+  requestAnimationFrame(() => root.querySelectorAll('.sk-desc').forEach((d) => {
+    const short = d.textContent;
+    if (short === d.__full && d.scrollHeight <= d.clientHeight + 1) return;
+    const b = h(`<button class="sk-more" type="button" aria-expanded="false" aria-controls="${d.id}">${esc(t('sk_more'))}</button>`);
+    b.onclick = () => {
+      const open = d.classList.toggle('open');
+      d.textContent = open ? d.__full : short;
+      b.setAttribute('aria-expanded', String(open));
+      b.textContent = t(open ? 'sk_less' : 'sk_more');
+    };
+    d.after(b);
+  }));
+}
+
+let descId = 0;
+
 function card(s, project, redraw) {
-  const src = s.source === 'project' ? t('sk_src_project', { dir: folderName(project || '') }) : s.source === 'plugin' ? t('sk_src_plugin', { name: s.plugin || '' }) : t('sk_src_user');
-  // plugin skills belong to the CLI's plugin manager
+  // plugin skills belong to the CLI's plugin manager (the group says where the others come from)
   const own = s.source !== 'plugin';
   const c = h(`<div class="server"><div class="head">${icon('book', 16)}<div class="grow" style="min-width:0">
-    <div style="font-weight:600">${esc(s.name)} <span class="cd-cat">${esc(src)}</span></div>
-    <div class="small muted">${esc(s.description || '')}</div></div>
+    <div style="font-weight:600;overflow-wrap:anywhere">${esc(s.name)}${own ? '' : ` <span class="cd-cat">${esc(t('sk_src_plugin', { name: s.plugin || '' }))}</span>`}</div>
+    <div class="small muted sk-desc" id="sk-desc-${++descId}">${esc(shortDescription(s.description || ''))}</div></div>
     ${own ? `<button class="icon-btn sm" data-a="remove" title="${esc(t('sk_remove'))}" aria-label="${esc(t('sk_remove'))}: ${esc(s.name)}">${icon('trash', 15)}</button>
     <label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(t('enabled'))}: ${esc(s.name)}" ${s.enabled === false ? '' : 'checked'}><span class="track"></span></label>` : ''}</div></div>`);
+  c.querySelector('.sk-desc').__full = s.description || '';
   if (!own) return c;
   const where = { name: s.name, scope: s.source, project };
   c.querySelector('input').addEventListener('change', async (e) => {

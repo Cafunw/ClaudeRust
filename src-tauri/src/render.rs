@@ -3,7 +3,7 @@
 use crate::artifacts::{self, Segment};
 use crate::db::Message;
 use crate::markdown::{self, Opts};
-use crate::util::{escape_html, truncate_middle};
+use crate::util::{escape_html, truncate_chars, truncate_middle};
 use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -143,7 +143,34 @@ fn try_close(s: &str) -> Option<Value> {
     serde_json::from_str::<Value>(&out).ok()
 }
 
-static CITE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("\u{E000}(\\d+)\u{E001}").unwrap());
+/// A citation in a text being rendered: its page among the text's sources, then its passage among the quotes.
+static CITE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("\u{E000}(\\d+)(?::(\\d+))?\u{E001}").unwrap());
+
+/// The most of a cited passage a citation's card shows (ui/js/cite_card.js).
+const QUOTE_MAX: usize = 300;
+
+/// A citation's chip: the page's domain, with its title and the passage cited for the card.
+fn cite_chip(url: &str, title: &str, quote: Option<&str>) -> String {
+    let quote = quote.map(|q| format!(" data-quote=\"{}\"", escape_html(q))).unwrap_or_default();
+    format!("<a class=\"cite\" href=\"{}\" data-title=\"{}\"{quote}>{}</a>", escape_html(url), escape_html(title), escape_html(&domain_of(url)))
+}
+
+/// A citation's `cited_text` on one line and capped, or None without one.
+fn cited_passage(c: &Value) -> Option<String> {
+    let text = c["cited_text"].as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then(|| truncate_chars(&text, QUOTE_MAX))
+}
+
+/// `html` with each citation marker as its chip (one whose page isn't among `sources` is dropped).
+fn cite_chips(html: &str, sources: &[(String, String)], quotes: &[String]) -> String {
+    CITE_RE
+        .replace_all(html, |c: &regex::Captures| {
+            let i: usize = c[1].parse().unwrap_or(1);
+            let quote = c.get(2).and_then(|q| quotes.get(q.as_str().parse::<usize>().ok()?)).map(String::as_str);
+            sources.get(i.saturating_sub(1)).map(|(u, t)| cite_chip(u, t, quote)).unwrap_or_default()
+        })
+        .to_string()
+}
 
 fn domain_of(url: &str) -> String {
     url::Url::parse(url)
@@ -185,7 +212,7 @@ fn cite_links(html: &str, web: &[(String, String)], sources: &mut Vec<(String, S
             if !sources.iter().any(|(s, _)| s == u) {
                 sources.push((u.clone(), t.clone()));
             }
-            format!("{}<a class=\"cite\" href=\"{}\" title=\"{}\">{}</a>", &c[2], escape_html(u), escape_html(t), escape_html(&domain_of(u)))
+            format!("{}{}", &c[2], cite_chip(u, t, None))
         })
         .to_string()
 }
@@ -194,6 +221,7 @@ fn cite_links(html: &str, web: &[(String, String)], sources: &mut Vec<(String, S
 struct TextAcc {
     raw: String,
     sources: Vec<(String, String)>,
+    quotes: Vec<String>,
 }
 
 impl TextAcc {
@@ -214,7 +242,13 @@ impl TextAcc {
                         self.sources.len() - 1
                     }
                 };
-                self.raw.push_str(&format!("\u{E000}{}\u{E001}", idx + 1));
+                match cited_passage(c) {
+                    Some(q) => {
+                        self.raw.push_str(&format!("\u{E000}{}:{}\u{E001}", idx + 1, self.quotes.len()));
+                        self.quotes.push(q);
+                    }
+                    None => self.raw.push_str(&format!("\u{E000}{}\u{E001}", idx + 1)),
+                }
             }
         }
     }
@@ -296,21 +330,7 @@ fn finish_text(mut acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker,
         }
     }
     if !acc.sources.is_empty() {
-        let sources = &acc.sources;
-        html = CITE_RE
-            .replace_all(&html, |c: &regex::Captures| {
-                let i: usize = c[1].parse().unwrap_or(1);
-                match sources.get(i.saturating_sub(1)) {
-                    Some((u, t)) => format!(
-                        "<a class=\"cite\" href=\"{}\" title=\"{}\">{}</a>",
-                        escape_html(u),
-                        escape_html(t),
-                        escape_html(&domain_of(u))
-                    ),
-                    None => String::new(),
-                }
-            })
-            .to_string();
+        html = cite_chips(&html, &acc.sources, &acc.quotes);
     } else if html.contains('\u{E000}') {
         html = CITE_RE.replace_all(&html, "").to_string();
     }
@@ -322,8 +342,8 @@ fn finish_text(mut acc: TextAcc, ctx: &RenderCtx, tracker: &mut ArtifactTracker,
         .iter()
         .map(|(u, t)| json!({"url": u, "title": t, "domain": domain_of(u)}))
         .collect();
-    let markers = ['\u{E000}', '\u{E001}'];
-    let raw = if acc.raw.contains(markers) { acc.raw.replace(markers, "") } else { acc.raw };
+    // without the markers, and their numbers (it is what Copy copies)
+    let raw = if acc.raw.contains('\u{E000}') { CITE_RE.replace_all(&acc.raw, "").into_owned() } else { acc.raw };
     // moved in: `json!` would copy them, and they are most of a text part
     let mut part = json!({"kind": "text"});
     part["html"] = Value::String(html);
@@ -1141,7 +1161,7 @@ mod tests {
         assert_eq!(urls, ["https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html", "https://doc.rust-lang.org/std/?q=a&b=c"], "unsafe links left out");
         assert_eq!(search["results"][0]["domain"], "blog.rust-lang.org");
         let html = t["parts"][1]["html"].as_str().unwrap();
-        assert!(html.contains("It shipped in July<a class=\"cite\" href=\"https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html\" title=\"Rust 1.80\">blog.rust-lang.org</a>"), "{html}");
+        assert!(html.contains("It shipped in July<a class=\"cite\" href=\"https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html\" data-title=\"Rust 1.80\">blog.rust-lang.org</a>"), "{html}");
         assert!(html.contains("the docs<a class=\"cite\""), "{html}");
         assert!(html.contains("<a href=\"https://example.com\">elsewhere</a>"), "a page it didn't find stays a link: {html}");
         assert!(html.contains("<code>[x](https://blog"), "code is left alone: {html}");
@@ -1151,6 +1171,29 @@ mod tests {
         let refs: Vec<&Message> = failed.iter().collect();
         assert_eq!(assistant_turn(&refs, &ctx, &mut ArtifactTracker::default())["parts"][0]["kind"], "tool");
         assert_eq!(cli_search_results("Web search results for query: \"q\"\n\nNo links found."), Some(vec![]));
+    }
+
+    #[test]
+    fn a_citation_chip_carries_its_cited_passage_escaped_and_capped() {
+        let long = "word ".repeat(100);
+        let cite = |url: &str, quote: &str| json!({"type": "web_search_result_location", "url": url, "title": "A \"page\"", "cited_text": quote});
+        let path = [msg("a1", "assistant", json!([
+            {"type": "text", "text": "One", "citations": [cite("https://a.example/x", "It <b>shipped</b>\n on \"time\" & fast.")]},
+            {"type": "text", "text": ", two", "citations": [cite("https://a.example/x", &long), {"url": "https://b.example/", "title": "B"}]},
+            {"type": "text", "text": ", three", "citations": [cite("https://b.example/", "   ")]}
+        ]), json!({}))];
+        let (lt, st, mn) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let ctx = RenderCtx { math: false, live_tools: &lt, streaming_tools: &st, mcp_names: &mn, streaming_msg: None };
+        let refs: Vec<&Message> = path.iter().collect();
+        let t = assistant_turn(&refs, &ctx, &mut ArtifactTracker::default());
+        let html = t["parts"][0]["html"].as_str().unwrap();
+        let chip = "<a class=\"cite\" href=\"https://a.example/x\" data-title=\"A &quot;page&quot;\"";
+        assert!(html.contains(&format!("One{chip} data-quote=\"It &lt;b&gt;shipped&lt;/b&gt; on &quot;time&quot; &amp; fast.\">a.example</a>")), "on one line, escaped: {html}");
+        let capped = format!(" data-quote=\"{}…\"", "word ".repeat(60));
+        assert!(html.contains(&format!(", two{chip}{capped}>a.example</a>")), "the same page's own passage, capped: {html}");
+        assert!(html.contains("<a class=\"cite\" href=\"https://b.example/\" data-title=\"B\">b.example</a>, three<a class=\"cite\" href=\"https://b.example/\" data-title=\"B\">"), "none (or only spaces): no passage: {html}");
+        assert_eq!(t["parts"][0]["raw"], "One, two, three", "Copy gets no citation numbers");
+        assert_eq!(t["parts"][0]["sources"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -1615,43 +1658,14 @@ pub(crate) mod fixture {
 /// (kept verbatim), to check that they give byte-for-byte the same turns.
 #[cfg(test)]
 pub(crate) mod reference {
-    use super::{domain_of, ArtifactTracker, RenderCtx, CITE_RE};
+    // (the text and its citations are gathered and drawn as the current renderer does)
+    use super::{cite_chips, domain_of, ArtifactTracker, RenderCtx, TextAcc, CITE_RE};
     use crate::artifacts::{self, Segment};
     use crate::db::Message;
     use crate::markdown::{self, Opts};
     use crate::util::{escape_html, truncate_middle};
     use serde_json::{json, Value};
-    use std::collections::{HashMap, HashSet};
-
-    #[derive(Default)]
-    struct TextAcc {
-        raw: String,
-        sources: Vec<(String, String)>,
-    }
-
-    impl TextAcc {
-        fn push_block(&mut self, b: &Value) {
-            self.raw.push_str(b["text"].as_str().unwrap_or(""));
-            if let Some(cits) = b["citations"].as_array() {
-                let mut seen = HashSet::new();
-                for c in cits {
-                    let url = c["url"].as_str().unwrap_or("");
-                    if crate::markdown::safe_url(url).is_none() || !seen.insert(url.to_string()) {
-                        continue;
-                    }
-                    let title = c["title"].as_str().unwrap_or(url).to_string();
-                    let idx = match self.sources.iter().position(|(u, _)| u == url) {
-                        Some(i) => i,
-                        None => {
-                            self.sources.push((url.to_string(), title));
-                            self.sources.len() - 1
-                        }
-                    };
-                    self.raw.push_str(&format!("\u{E000}{}\u{E001}", idx + 1));
-                }
-            }
-        }
-    }
+    use std::collections::HashMap;
 
     fn artifact_card(a: &artifacts::ArtifactSpec, version: u32, cut: bool) -> String {
         format!(
@@ -1700,21 +1714,7 @@ pub(crate) mod reference {
             }
         }
         if !acc.sources.is_empty() {
-            let sources = acc.sources.clone();
-            html = CITE_RE
-                .replace_all(&html, |c: &regex::Captures| {
-                    let i: usize = c[1].parse().unwrap_or(1);
-                    match sources.get(i.saturating_sub(1)) {
-                        Some((u, t)) => format!(
-                            "<a class=\"cite\" href=\"{}\" title=\"{}\">{}</a>",
-                            escape_html(u),
-                            escape_html(t),
-                            escape_html(&domain_of(u))
-                        ),
-                        None => String::new(),
-                    }
-                })
-                .to_string();
+            html = cite_chips(&html, &acc.sources, &acc.quotes);
         } else if html.contains('\u{E000}') {
             html = CITE_RE.replace_all(&html, "").to_string();
         }
@@ -1723,7 +1723,7 @@ pub(crate) mod reference {
             .iter()
             .map(|(u, t)| json!({"url": u, "title": t, "domain": domain_of(u)}))
             .collect();
-        Some(json!({"kind": "text", "html": html, "sources": sources, "raw": acc.raw.replace(['\u{E000}', '\u{E001}'], "")}))
+        Some(json!({"kind": "text", "html": html, "sources": sources, "raw": CITE_RE.replace_all(&acc.raw, "")}))
     }
 
     fn tool_result_view(block: &Value) -> Value {

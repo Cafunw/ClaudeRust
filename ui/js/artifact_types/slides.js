@@ -255,6 +255,8 @@ function boot(content) {
   window.addEventListener('message', (e) => {
     if (e.source !== window.parent || !e.data) return;
     if (e.data.__artifact === 'present') setPresent(!!e.data.on, false);
+    // the app's new theme, taken as it is: a reload would lose an edit under way
+    if (e.data.__artifact === 'theme') { document.body.classList.toggle('dark', !!e.data.dark); document.body.classList.toggle('light', !e.data.dark); }
     if (e.data.__artifact === 'print') {
       const p = $('#print');
       p.innerHTML = '';

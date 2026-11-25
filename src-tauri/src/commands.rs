@@ -1069,8 +1069,19 @@ pub async fn get_project(state: St<'_>, id: String) -> AppResult<Value> {
     let st = state.inner().clone();
     let p = st.db.project_get(&id)?;
     // with their contents: base64 PDFs and images can be many megabytes
-    let files = blocking(move || st.db.project_files(&id)).await?;
+    let (files, sources) = blocking(move || Ok((st.db.project_files(&id)?, st.db.project_file_sources(&id)?))).await?;
     let total_chars: usize = files.iter().filter(|f| f.kind == "text").map(|f| f.data.len()).sum();
+    // a file added from GitHub carries where from, for "Sync from GitHub"
+    let files: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let mut v = json!(f);
+            if let Some(s) = sources.iter().find(|s| s.file_id == f.id) {
+                v["github"] = json!(s);
+            }
+            v
+        })
+        .collect();
     Ok(json!({"project": p, "files": files, "knowledge_chars": total_chars}))
 }
 
@@ -1545,6 +1556,18 @@ fn open_failed(e: impl std::fmt::Display) -> AppError {
     AppError::coded("open_failed", Value::Null, e.to_string())
 }
 
+/// Hand `what` (a link, a file, a folder) to the system's opener with `open`.
+/// A copy a test harness drives (display::automation) only logs it: a test's
+/// click must never open a browser or an app on the person's screen. Every
+/// use of the opener goes through here (tests/window_setup.rs checks).
+pub fn os_open<E: std::fmt::Display>(what: &str, open: impl FnOnce() -> Result<(), E>) -> AppResult<()> {
+    if crate::display::automation() {
+        log::info!("automated copy: not handing {what} to the system");
+        return Ok(());
+    }
+    open().map_err(open_failed)
+}
+
 #[tauri::command]
 pub async fn open_external(app: AppHandle, url: String) -> AppResult<()> {
     let lower = url.to_ascii_lowercase();
@@ -1552,14 +1575,14 @@ pub async fn open_external(app: AppHandle, url: String) -> AppResult<()> {
         return Err(AppError::coded("link_not_web", Value::Null, "Only web links can be opened."));
     }
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_url(url, None::<&str>).map_err(open_failed)
+    os_open(&url, || app.opener().open_url(&url, None::<&str>))
 }
 
 #[tauri::command]
 pub async fn open_path(app: AppHandle, state: St<'_>, path: String) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
     crate::pathguard::openable(&path, &state.data_dir, &state.mcp.config_path)?;
-    app.opener().open_path(path, None::<&str>).map_err(open_failed)
+    os_open(&path, || app.opener().open_path(&path, None::<&str>))
 }
 
 #[tauri::command]
@@ -1574,7 +1597,7 @@ pub async fn reveal_path(app: AppHandle, state: St<'_>, path: String) -> AppResu
     })
     .await
     .map_err(|e| AppError::msg(e.to_string()))??;
-    app.opener().reveal_item_in_dir(path).map_err(open_failed)
+    os_open(&path, || app.opener().reveal_item_in_dir(&path))
 }
 
 #[tauri::command]
@@ -3651,6 +3674,11 @@ pub fn editor_args(editor: &str, path: &str, line: Option<u32>) -> Option<(Strin
 #[tauri::command]
 pub async fn open_in_editor(app: AppHandle, state: St<'_>, path: String, line: Option<u32>) -> AppResult<String> {
     let editor = state.settings.read().editor.clone();
+    // (an editor's window is as unwelcome on the person's screen as a browser's: see os_open)
+    if crate::display::automation() {
+        log::info!("automated copy: not opening {path} in an editor");
+        return Ok("system".into());
+    }
     crate::shellenv::ready().await;
     if let Some((bin, args)) = editor_args(&editor, &path, line) {
         let mut cmd = crate::shellenv::command(&bin, &args);
@@ -3660,7 +3688,7 @@ pub async fn open_in_editor(app: AppHandle, state: St<'_>, path: String, line: O
         }
     }
     use tauri_plugin_opener::OpenerExt;
-    app.opener().open_path(&path, None::<&str>).map_err(open_failed)?;
+    os_open(&path, || app.opener().open_path(&path, None::<&str>))?;
     Ok("system".into())
 }
 

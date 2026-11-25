@@ -257,7 +257,7 @@ pub async fn attachment_open(app: AppHandle, state: St<'_>, staged_id: Option<St
         write_for_open(&dir, &s)
     })
     .await?;
-    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| AppError::coded("open_failed", Value::Null, e.to_string()))
+    crate::commands::os_open(&path.to_string_lossy(), || app.opener().open_path(path.to_string_lossy(), None::<&str>))
 }
 
 #[cfg(test)]

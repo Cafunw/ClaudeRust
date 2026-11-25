@@ -41,6 +41,7 @@ test('a narrow Sessions page keeps its head on one row (Routines and Import as i
 });
 
 test('a narrow chat keeps a gap under the composer\'s note', () => {
-  const narrow = css.slice(css.indexOf('@media (max-width: 760px) {'));
+  // (the block of rules, not a one-line query before it: the slice ends at the block's own close)
+  const narrow = css.slice(css.indexOf('@media (max-width: 760px) {\n'));
   assert.match(narrow.slice(0, narrow.indexOf('}\n}') + 3), /\.chat-bottom \{ padding: 0 12px 6px; \}/);
 });

@@ -45,7 +45,39 @@ export function pickSummary(files, limits) {
 }
 
 const show = (el, on) => { el.style.display = on ? '' : 'none'; };
-const filesN = (n) => t(n === 1 ? 'ghsrc_files_one' : 'ghsrc_files_n', { n });
+export const filesN = (n) => t(n === 1 ? 'ghsrc_files_one' : 'ghsrc_files_n', { n });
+
+/** "owner/repo", and the branch and folder after it, of an address like https://github.com/owner/repo/tree/main/src. */
+export function repoLabel(url) {
+  const [owner, repo, , ...rest] = new URL(url).pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  return rest.length ? `${owner}/${repo} · ${rest.join('/')}` : `${owner}/${repo}`;
+}
+
+/** A project's `files` in order, the ones added from one GitHub address (their
+ *  `github.url`) together under a `{ group, repo, files }` heading where the first was. */
+export function knowledgeRows(files) {
+  const groups = new Map();
+  for (const f of files) if (f.github) groups.set(f.github.url, [...(groups.get(f.github.url) || []), f]);
+  const rows = [];
+  for (const f of files) {
+    const g = f.github && groups.get(f.github.url);
+    if (!g) rows.push(f);
+    else if (g[0] === f) rows.push({ group: f.github.url, repo: repoLabel(f.github.url), files: g }, ...g);
+  }
+  return rows;
+}
+
+/** What a "Sync from GitHub" did (github_sync's answer), as toasts: `[text, kind]`. Nothing that was kept goes unsaid. */
+export function syncSummary(r) {
+  const names = (list) => list.slice(0, 3).join(', ') + (list.length > 3 ? ', …' : '');
+  const out = [];
+  if (r.up_to_date) out.push([t('ghsync_current', { repo: r.repo }), '']);
+  else if (r.updated.length) out.push([t(r.updated.length === 1 ? 'ghsync_updated_one' : 'ghsync_updated', { repo: r.repo, n: r.updated.length, names: names(r.updated) }), '']);
+  else if (r.unchanged) out.push([t('ghsync_unchanged', { repo: r.repo }), '']);
+  if (r.missing.length) out.push([t(r.missing.length === 1 ? 'ghsync_missing_one' : 'ghsync_missing', { n: r.missing.length, names: names(r.missing) }), '']);
+  if (r.errors.length) out.push([t('ghsync_failed_some', { n: r.errors.length, first: sourceError(r.errors[0], r.errors[0].name) }), 'error']);
+  return out;
+}
 
 /** The picker. Each file staged for the composer goes to `onAdd(attachment)`;
  *  with `projectId` the files go to that project's knowledge, then `onDone()`. */
@@ -98,7 +130,8 @@ export function openGithubSource({ onAdd, projectId, onDone } = {}) {
       if (urlIn.value.trim()) load();
     } catch (e) { toast(sourceError(e), 'error'); }
   }
-  call('github_token_status').then(showToken).catch(() => show(clearBtn, false));
+  // a store that can't be read says so, rather than an empty line
+  call('github_token_status').then(showToken).catch((e) => { show(clearBtn, false); $('[data-f=token-state]', tokenBox).textContent = sourceError(e); });
   $('[data-act=save-token]', tokenBox).onclick = () => { if (tokenIn.value.trim()) saveToken(tokenIn.value); else tokenIn.focus(); };
   clearBtn.onclick = () => saveToken(null);
 

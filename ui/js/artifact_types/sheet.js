@@ -384,6 +384,11 @@ function boot(content) {
   let sort = { col: -1, dir: 0 };
   let sel = { r: 0, c: 0 };
   let dirty = false;
+  // the app's new theme, taken as it is: a reload would lose the changes not saved yet
+  window.addEventListener('message', (e) => {
+    if (e.source !== window.parent || !e.data) return;
+    if (e.data.__artifact === 'theme') { document.body.classList.toggle('dark', !!e.data.dark); document.body.classList.toggle('light', !e.data.dark); }
+  });
   document.body.insertAdjacentHTML('afterbegin', `<div class="tb"><button data-a="row"></button><button data-a="col"></button><span class="grow"></span><span class="status" role="status"></span><button data-a="discard" hidden></button><button data-a="save" class="primary" disabled></button></div>
     <div class="fbar"><span class="ref"></span><input aria-label="${S.cell}" spellcheck="false"></div><div class="sheet-wrap"><table class="grid" role="grid"></table></div>`);
   const $ = (q) => document.querySelector(q);
@@ -490,7 +495,8 @@ function boot(content) {
     const k = e.key;
     const moves = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
     if (moves[k]) { e.preventDefault(); move(...moves[k]); }
-    else if (k === 'Tab') { e.preventDefault(); move(0, e.shiftKey ? -1 : 1); }
+    // Tab goes cell to cell along the row, and on out of the grid at its ends (it could never leave it)
+    else if (k === 'Tab') { const c = sel.c + (e.shiftKey ? -1 : 1); if (c < 0 || c >= width()) return; e.preventDefault(); move(0, e.shiftKey ? -1 : 1); }
     else if (k === 'Enter' || k === 'F2') { e.preventDefault(); edit(); }
     else if ((k === 'Delete' || k === 'Backspace') && editable) { e.preventDefault(); set(sel.r, sel.c, ''); draw(); focusSel(); }
     else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && editable) { e.preventDefault(); edit(k); }

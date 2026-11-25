@@ -57,6 +57,11 @@ onBackend('update-available', (info) => {
 
 const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 
+/** What a check that found nothing to install says: up to date, or no signed update published yet. */
+export function noneText(info) {
+  return t(info.no_manifest ? 'upd_unsigned' : 'upd_none', { v: info.current });
+}
+
 /** The Updates block for Settings → About; it redraws itself as the state changes. */
 export function updatesSection() {
   // sections that were shown and are gone (Settings closed, another tab):
@@ -74,8 +79,9 @@ export function updatesSection() {
     if (phase === 'checking') {
       html = `<div class="upd-line"><span class="spinner tiny"></span> ${esc(t('upd_checking'))}</div>`;
     } else if (phase === 'none') {
-      html = `<div class="upd-line">${icon('check', 14)} ${esc(t('upd_none', { v: info.current }))}</div>
-        <div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_check'))}</button></div>`;
+      // a release published without the signing key: its installers are on the release page
+      html = `<div class="upd-line">${icon(info.no_manifest ? 'info' : 'check', 14)} ${esc(noneText(info))}</div>
+        <div class="row-btns"><button class="btn sm" data-a="check">${esc(t('upd_check'))}</button>${info.no_manifest && releases ? `<button class="btn sm ghost" data-a="page">${icon('external', 13)} ${esc(t('upd_page'))}</button>` : ''}</div>`;
     } else if (phase === 'available') {
       html = `<div class="upd-line"><b>${esc(t('upd_available', { v: info.version }))}</b> <span class="muted">${esc(t('upd_have', { v: info.current }))}</span></div>
         ${info.notes ? `<pre class="upd-notes">${esc(info.notes)}</pre>` : ''}

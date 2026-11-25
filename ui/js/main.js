@@ -52,7 +52,8 @@ const mq = window.matchMedia('(prefers-color-scheme: dark)');
 function applyAppearance() {
   const s = store.settings;
   const theme = s.theme === 'light' || s.theme === 'dark' ? s.theme : (mq.matches ? 'dark' : 'light');
-  document.documentElement.dataset.theme = theme;
+  // (only a change: what watches data-theme redraws its frames, and every settings save comes here)
+  if (document.documentElement.dataset.theme !== theme) document.documentElement.dataset.theme = theme;
   saveLocal({ theme: s.theme }); // index.html paints the next start's first frame with it
   document.documentElement.dataset.font = s.chat_font || 'default';
   document.documentElement.dataset.width = s.chat_width || 'normal';

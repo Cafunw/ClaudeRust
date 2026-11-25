@@ -1096,7 +1096,8 @@ fn a_web_search_shows_its_links_as_sources_and_the_answer_cites_them() {
         assert_eq!(search["results"], json!([{"title": "Announcing Rust 1.80.0", "url": url, "domain": "blog.rust-lang.org", "page_age": null}]));
         let answer = &t["parts"][1];
         let html = answer["html"].as_str().unwrap();
-        assert!(html.contains(&format!("in July<a class=\"cite\" href=\"{url}\" title=\"Announcing Rust 1.80.0\">blog.rust-lang.org</a>")), "{html}");
+        // (its title for the citation's card, ui/js/cite_card.js; no passage: the CLI gives none)
+        assert!(html.contains(&format!("in July<a class=\"cite\" href=\"{url}\" data-title=\"Announcing Rust 1.80.0\">blog.rust-lang.org</a>")), "{html}");
         assert_eq!(answer["sources"], json!([{"url": url, "title": "Announcing Rust 1.80.0", "domain": "blog.rust-lang.org"}]));
     });
 }

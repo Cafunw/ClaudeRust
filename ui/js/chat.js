@@ -11,6 +11,7 @@ import { store, emit, on as onUi, modelInfo, displayName, saveLocal } from './st
 import { $, esc, h, showMenu, toast, errorToast, initials, attachmentSub, lightbox, confirmDialog, promptDialog, fmtTokens, fmtUsd, snapshot, sameSnapshot, scrollBehavior, convTitle } from './util.js';
 import { createComposer, researchOffered } from './composer.js';
 import { renderParts, turnPlainText, copyText, unifiedDiffHtml, errorMessage, resumable } from './parts.js';
+import { revealAll } from './stream_reveal.js';
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
@@ -459,6 +460,7 @@ export async function reload() {
   document.title = cur.conv.title || 'ClaudeRust';
   cur.running = data.running;
   cur.composer.setRunning(!!data.running, !!data.waiting);
+  cur.colEl.querySelectorAll('[data-busy]').forEach((b) => showBusy(b, !!data.running));
   scrollToBottom(false);
 }
 
@@ -749,7 +751,7 @@ function upsertTurn(turn, live = true, before = null) {
     el.classList.remove('parked');
     el.style.height = '';
   }
-  if (turn.role === 'user') renderUserTurn(el, turn); else renderAssistantTurn(el, turn);
+  if (turn.role === 'user') renderUserTurn(el, turn); else renderAssistantTurn(el, turn, live);
   if (live && stick) scrollToBottom(true);
 }
 
@@ -759,13 +761,37 @@ function attachmentsHtml(items) {
     : `<div class="att"${a.missing ? '' : ' role="button" tabindex="0" aria-haspopup="dialog"'}><div class="ficon">${a.kind === 'pdf' ? 'PDF' : esc((a.name || '').split('.').pop().slice(0, 4) || 'TXT')}</div><div class="info"><div class="n">${esc(a.name)}</div><div class="s">${a.missing ? esc(t('att_missing')) : attachmentSub(a)}</div></div></div>`).join('')}</div>`;
 }
 
+/** Whether `what` (a message action: busy_* in i18n.js) has to wait for the
+ *  response under way here, which the backend refuses it during: then a toast
+ *  says so, with Stop. */
+function waitForIdle(what) {
+  if (!cur || !cur.running) return false;
+  const id = cur.id;
+  toast(t(`busy_${what}`), '', { action: t('stop'), onAction: () => stopTurn(id) });
+  return true;
+}
+
+/** Button `b` of message action `what` (see `waitForIdle`): while Claude
+ *  responds, it shows it can't be used now, and its tooltip says why. */
+function idleOnly(b, what) {
+  b.dataset.busy = what;
+  b.dataset.tip = b.title;
+  showBusy(b, !!(cur && cur.running));
+  return b;
+}
+
+function showBusy(b, busy) {
+  if (busy) b.setAttribute('aria-disabled', 'true'); else b.removeAttribute('aria-disabled');
+  b.title = busy ? t(`busy_${b.dataset.busy}`) : b.dataset.tip;
+}
+
 function branchNav(turn) {
   const s = turn.siblings;
   if (!s || s.count <= 1) return null;
   const nav = h(`<span class="branch-nav" role="group" aria-label="${esc(t('a11y_version_of', { n: s.index + 1, total: s.count }))}"><button class="icon-btn sm" data-d="-1" aria-label="${esc(t('a11y_prev_version'))}" title="${esc(t('a11y_prev_version'))}" ${s.index === 0 ? 'disabled' : ''}>${icon('chevLeft', 14)}</button><span class="count" aria-hidden="true">${s.index + 1} / ${s.count}</span><button class="icon-btn sm" data-d="1" aria-label="${esc(t('a11y_next_version'))}" title="${esc(t('a11y_next_version'))}" ${s.index >= s.count - 1 ? 'disabled' : ''}>${icon('chevRight', 14)}</button></span>`);
-  nav.querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
+  nav.querySelectorAll('button').forEach((b) => idleOnly(b, 'versions').addEventListener('click', async () => {
     const target = s.ids[s.index + Number(b.dataset.d)];
-    if (!target) return;
+    if (!target || waitForIdle('versions')) return;
     try {
       await call('switch_branch', { conversationId: cur.id, messageId: target });
       await reload();
@@ -857,12 +883,12 @@ function renderUserTurn(el, turn) {
   const nav = branchNav(turn);
   if (nav) actions.appendChild(nav);
   if (cur && cur.conv.kind === 'code') {
-    const rb = h(`<button class="icon-btn sm" title="${t('rewind_here')}">${icon('history', 15)}</button>`);
+    const rb = idleOnly(h(`<button class="icon-btn sm" title="${t('rewind_here')}">${icon('history', 15)}</button>`), 'rewind');
     rb.onclick = () => rewindTo(turn, text);
     actions.appendChild(rb);
   }
   if (text) {
-    const eb = h(`<button class="icon-btn sm" title="${t('edit')}">${icon('edit', 15)}</button>`);
+    const eb = idleOnly(h(`<button class="icon-btn sm" title="${t('edit')}">${icon('edit', 15)}</button>`), 'edit');
     eb.onclick = () => startEdit(el, turn, text);
     const cb = h(`<button class="icon-btn sm" title="${t('copy')}">${icon('copy', 15)}</button>`);
     cb.onclick = async () => { await copyText(text); cb.innerHTML = icon('check', 15); setTimeout(() => (cb.innerHTML = icon('copy', 15)), 1400); };
@@ -888,6 +914,7 @@ export function showPendingCompact() {
 }
 
 function rewindTo(turn, text) {
+  if (waitForIdle('rewind')) return;
   const c = cur;
   openRewind({
     conversationId: c.id,
@@ -907,7 +934,7 @@ function rewindTo(turn, text) {
 export function openRewindPicker() {
   if (!cur) return;
   const users = cur.order.map((id) => cur.turns.get(id)).filter((tn) => tn && tn.role === 'user');
-  if (!users.length) return;
+  if (!users.length || waitForIdle('rewind')) return;
   const items = users.slice(-15).reverse().map((tn) => {
     const text = (tn.parts.find((p) => p.kind === 'user_text') || {}).text || '';
     return { label: text.slice(0, 80) || '…', icon: 'history', onClick: () => rewindTo(tn, text) };
@@ -917,7 +944,7 @@ export function openRewindPicker() {
 }
 
 function startEdit(el, turn, text) {
-  if (cur.running) { toast(t('stop')); return; }
+  if (waitForIdle('edit')) return;
   const box = h(`<div class="edit-box"><textarea></textarea><div class="row"><button class="btn sm" data-a="cancel">${t('cancel')}</button><button class="btn sm primary" data-a="save">${t('save')}</button></div></div>`);
   const ta = box.querySelector('textarea');
   ta.value = text;
@@ -1024,12 +1051,16 @@ function turnStats(meta) {
   return h(`<span class="small muted turn-stats" title="${esc(tip)}">· ${esc(bits.join(' · '))}</span>`);
 }
 
-function renderAssistantTurn(el, turn) {
+/** `live`: drawn for a streamed change (its new words are revealed in steps). */
+function renderAssistantTurn(el, turn, live = false) {
   if (!el.querySelector('.assistant-body')) {
     el.innerHTML = `<div class="assistant-body"><div class="parts"></div><div class="streaming-indicator hidden">${spark(18, 'spark-anim')}</div></div><div class="turn-actions"></div>`;
   }
   const partsEl = el.querySelector('.parts');
+  const streaming = !!turn.streaming;
   const ctx = {
+    streaming,
+    live,
     conversationId: cur && cur.id,
     openSettings: (tab) => emit('open-settings', tab),
     onRetry: () => retry(turn),
@@ -1046,7 +1077,8 @@ function renderAssistantTurn(el, turn) {
     // a role=button opens with Space too
     card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   });
-  const streaming = !!turn.streaming;
+  // finished, stopped or failed: the whole text at once
+  if (!streaming) revealAll(partsEl);
   el.querySelector('.streaming-indicator').classList.toggle('hidden', !streaming);
   renderTurnFiles(el, turn, streaming);
   const actions = el.querySelector('.turn-actions');
@@ -1094,10 +1126,10 @@ function renderAssistantTurn(el, turn) {
   };
   up.onclick = () => setFb('up');
   down.onclick = () => setFb('down');
-  const rb = h(`<button class="icon-btn sm" title="${t('retry')}">${icon('retry', 15)}</button>`);
+  const rb = idleOnly(h(`<button class="icon-btn sm" title="${t('retry')}">${icon('retry', 15)}</button>`), 'retry');
   rb.onclick = () => retry(turn);
-  const rm = h(`<button class="icon-btn sm" title="${t('retry_with')}" style="width:18px;margin-left:-4px">${icon('chevDown', 12)}</button>`);
-  rm.onclick = () => showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: tOr(`model_d_${m.id}`, m.description), checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
+  const rm = idleOnly(h(`<button class="icon-btn sm" title="${t('retry_with')}" style="width:18px;margin-left:-4px">${icon('chevDown', 12)}</button>`), 'retry');
+  rm.onclick = () => !waitForIdle('retry') && showMenu(rm, store.models.filter((m) => m.available !== false && (m.featured || m.id === cur.conv.model)).map((m) => ({ label: m.name, sub: tOr(`model_d_${m.id}`, m.description), checked: m.id === cur.conv.model, onClick: () => retry(turn, m.id) })), { width: 260 });
   if (!failed) actions.append(up, down);
   actions.append(rb, rm);
   const model = turn.meta && turn.meta.model;
@@ -1111,7 +1143,7 @@ function renderAssistantTurn(el, turn) {
 
 /** Go on with the last answer from where it was cut short, as the same answer. */
 async function resumeReply() {
-  if (!cur) return;
+  if (!cur || waitForIdle('resume')) return;
   try {
     await call('send_message', { req: { conversation_id: cur.id, text: '', continue_reply: true } });
     emit('conversations-changed', CHATS_ONLY);
@@ -1120,8 +1152,7 @@ async function resumeReply() {
 }
 
 async function retry(turn, model) {
-  if (!cur) return;
-  if (!turn.parent_id) return;
+  if (!cur || !turn.parent_id || waitForIdle('retry')) return;
   try {
     await call('regenerate', { conversationId: cur.id, userMessageId: turn.parent_id, model: model || null });
     if (model) { cur.conv.model = model; cur.composer.setState({ model }); }
@@ -1266,6 +1297,7 @@ export function onStateEvent({ conversation_id, running, error }) {
   if (!cur || cur.id !== conversation_id) return;
   cur.running = running;
   cur.composer.setRunning(running);
+  cur.colEl.querySelectorAll('[data-busy]').forEach((b) => showBusy(b, running));
   if (!running) {
     answerVoice.finish();
     if (error) announce(errorMessage(error), true);

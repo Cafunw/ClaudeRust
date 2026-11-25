@@ -704,7 +704,7 @@ pub async fn mcp_oauth_sign_in(app: tauri::AppHandle, state: St<'_>, server: Str
     let st = state.inner().clone();
     let (url, client_id) = remote(&st, &server)?;
     let client = client_for(&url).await?;
-    let open =|u: &str| app.opener().open_url(u, None::<&str>).map_err(|e| AppError::msg(e.to_string()));
+    let open = |u: &str| crate::commands::os_open(u, || app.opener().open_url(u, None::<&str>));
     let tokens = sign_in(&client, &url, client_id.as_deref(), open, SIGN_IN_TIMEOUT).await?;
     save(&token_key(&server, &url), &tokens)?;
     let disabled = st.settings.read().disabled_mcp_servers.clone();

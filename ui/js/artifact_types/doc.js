@@ -141,7 +141,12 @@ function boot() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
     else if (e.key === 'Escape' && doc.contentEditable === 'true') { e.preventDefault(); doc.innerHTML = before; setEditing(false); count(); }
   }, true);
-  window.addEventListener('message', (e) => { if (e.source === window.parent && e.data && e.data.__artifact === 'print') window.print(); });
+  window.addEventListener('message', (e) => {
+    if (e.source !== window.parent || !e.data) return;
+    if (e.data.__artifact === 'print') window.print();
+    // the app's new theme, taken as it is: a reload would lose an edit under way
+    if (e.data.__artifact === 'theme') { document.body.classList.toggle('dark', !!e.data.dark); document.body.classList.toggle('light', !e.data.dark); }
+  });
   count();
 }
 

@@ -1,9 +1,24 @@
 name: Release
 
-# Push a tag like v0.2.0 (after raising the version in tauri.conf.json and
-# Cargo.toml) to make a draft GitHub release with the installers and the
-# signed update manifest (latest.json). Publishing the draft makes it the
-# "latest" release, which installed apps then offer as an update.
+# Runs for a tag like v0.2.0 (also when started by hand on one). The release
+# session raises the version in tauri.conf.json and Cargo.toml, builds the
+# Windows installers locally and publishes them with `gh release create`,
+# which pushes the tag; this workflow then adds what that build can't make.
+#
+# With the updater signing key set (signed path):
+#   every platform is built here by Tauri's action with signed updater
+#   bundles and the update manifest (latest.json) that installed apps read;
+#   its Windows installers have the local ones' names and take their place
+#   (the manifest's signatures are of the files built here). A last job checks latest.json
+#   and each file and signature it names are on the release. With no release
+#   for the tag yet, the action makes a draft one; publishing it makes it the
+#   "latest" release, which installed apps then offer as an update.
+# Without the key (unsigned path):
+#   macOS (universal) and Linux installers are built unsigned, without
+#   updater bundles, and attached to the tag's existing release; Windows is
+#   not built (the release session uploads the installers it built and
+#   tested, and the names would clash). No latest.json is made, and the run's
+#   summary says so: installed apps report no signed update yet.
 #
 # The signing key can push updates to every installed copy, so it lives in
 # a protected environment rather than in repository secrets:
@@ -13,8 +28,7 @@ name: Release
 #     Environment secrets:
 #       TAURI_SIGNING_PRIVATE_KEY           the updater signing key (file contents)
 #       TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
-# The job runs only for v* tags (also when started by hand), without a build
-# cache and with no third-party action except Tauri's own.
+# No build cache, and no third-party action except Tauri's own.
 on:
   push:
     tags: ["v*"]
@@ -24,31 +38,54 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # signed or unsigned, and which platforms that builds
+  plan:
     if: startsWith(github.ref, 'refs/tags/v')
     environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-latest
-            args: ""
-          - platform: macos-latest
-            args: "--target universal-apple-darwin"
-          - platform: ubuntu-22.04
-            args: ""
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    outputs:
+      signed: ${{ steps.plan.outputs.signed }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Check the signing key is set
+      - name: Signing key
+        id: plan
         shell: bash
         env:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          if [ -z "$KEY" ]; then
-            echo "::error::Set the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets of the \"release\" environment (see the top of release.yml)."
-            exit 1
+          windows='{"platform":"windows-latest","args":"","bundle":"target/release/bundle"}'
+          mac='{"platform":"macos-latest","args":"--target universal-apple-darwin","bundle":"target/universal-apple-darwin/release/bundle"}'
+          linux='{"platform":"ubuntu-22.04","args":"","bundle":"target/release/bundle"}'
+          if [ -n "$KEY" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[$windows,$mac,$linux]}" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "signed=false" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":[$mac,$linux]}" >> "$GITHUB_OUTPUT"
+          echo "::notice::No signing key: unsigned macOS and Linux installers only, and no update manifest (latest.json)."
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### No signed update manifest
+          The \`TAURI_SIGNING_PRIVATE_KEY\` secret of the \`release\` environment isn't set, so this run makes no
+          update manifest (\`latest.json\`) and no update signatures. Installed copies of ClaudeRust keep reporting
+          that no signed update is available; they can still download this release's installers by hand.
+
+          - **macOS** (universal) and **Linux**: built here unsigned and attached to the $GITHUB_REF_NAME release.
+          - **Windows**: not built here. The release session uploads the installers it built and tested with
+            \`gh release create\`; an upload here would clash with them.
+
+          To publish signed updates, set the key (see the top of \`release.yml\`) and run this workflow again on the tag.
+          EOF
+
+  build:
+    needs: plan
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -68,6 +105,7 @@ jobs:
       # the version's section of CHANGELOG.md becomes the release notes (and
       # the notes the app shows when it offers the update)
       - name: Release notes
+        if: needs.plan.outputs.signed == 'true'
         id: notes
         shell: bash
         run: |
@@ -80,6 +118,7 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
       - uses: tauri-apps/tauri-action@v0
+        if: needs.plan.outputs.signed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -95,3 +134,74 @@ jobs:
           # latest.json for the in-app updater (Windows updates use the NSIS installer)
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
+      # unsigned: installers only (updater bundles need the key), as in build.yml
+      - name: Build unsigned installers
+        if: needs.plan.outputs.signed != 'true'
+        run: npx tauri build ${{ matrix.args }} --config src-tauri/tauri.no-updater.conf.json
+      - name: Attach them to the release
+        if: needs.plan.outputs.signed != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ matrix.bundle }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # the release session makes the release right after the tag, which a build outlasts; wait a while in case
+          for try in $(seq 1 30); do
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName > /dev/null 2>&1 && break
+            if [ "$try" = 30 ]; then
+              echo "::error::There is no GitHub release for $tag. Make it (gh release create $tag ...), then re-run the failed jobs."
+              exit 1
+            fi
+            sleep 20
+          done
+          shopt -s nullglob
+          files=("$BUNDLE"/dmg/*.dmg "$BUNDLE"/deb/*.deb "$BUNDLE"/rpm/*.rpm "$BUNDLE"/appimage/*.AppImage)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::The build made no installers in $BUNDLE."
+            exit 1
+          fi
+          # --clobber: a re-run replaces this workflow's own files (never the Windows .exe or .msi)
+          gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          {
+            echo "Attached to $tag, unsigned:"
+            for f in "${files[@]}"; do echo "- \`${f##*/}\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # signed: the manifest installed apps read is on the release, with a signed
+  # entry per platform whose file and signature are there too
+  verify:
+    needs: [plan, build]
+    if: needs.plan.outputs.signed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check latest.json and its signatures are on the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if ! gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir manifest; then
+            echo "::error::The $tag release has no latest.json."
+            exit 1
+          fi
+          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          ok=1
+          for p in windows-x86_64 darwin-aarch64 darwin-x86_64 linux-x86_64; do
+            sig=$(jq -r --arg p "$p" '.platforms[$p].signature // ""' manifest/latest.json)
+            url=$(jq -r --arg p "$p" '.platforms[$p].url // ""' manifest/latest.json)
+            if [ -z "$sig" ] || [ -z "$url" ]; then
+              echo "::error::latest.json has no signed entry for $p."
+              ok=0
+              continue
+            fi
+            name="${url##*/}"
+            for want in "$name" "$name.sig"; do
+              if ! grep -qxF "$want" <<< "$assets"; then
+                echo "::error::$want ($p in latest.json) isn't on the $tag release."
+                ok=0
+              fi
+            done
+          done
+          [ "$ok" = 1 ] || exit 1
+          echo "latest.json on $tag has a signed entry for every platform, and each file and signature it names is on the release." >> "$GITHUB_STEP_SUMMARY"

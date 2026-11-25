@@ -125,7 +125,9 @@ export function copyOf(old, list) {
   return null;
 }
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), iframe';
+// (not the stop after a frame: it only passes the focus on, see frameEnd; a <details>' summary is
+// one, or Tab from it in a dialog would start the dialog over and never reach what follows)
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]):not(.tab-end), iframe';
 
 /** A stop of Tab: shown, and not taken out of the order (a list's rows other than its current one). */
 export const tabStop = (el) => el.tabIndex >= 0 && el.getClientRects().length > 0;
@@ -141,8 +143,46 @@ const openSheet = () => {
   return s ? (s.classList.contains('sidebar-scrim') ? s.previousElementSibling : s.nextElementSibling) : null;
 };
 
+const follows = (a, b) => !!(a.compareDocumentPosition(b) & 4); // b comes after a (DOCUMENT_POSITION_FOLLOWING)
+
+/** Where focus goes from `end`, the stop right after `frame`: back into the frame when it came from a
+ *  control after it (`from`, Shift+Tab), else on to the next of `stops` (the page's tab stops), round to
+ *  the first; inside a dialog or sheet (`box`, whose stops `stops` are), its first. */
+export function frameExit(end, frame, from, stops, box) {
+  if (from && follows(end, from)) return frame;
+  if (box) return stops[0] || null;
+  return stops.find((x) => follows(end, x)) || stops[0] || null;
+}
+
+/** A stop to put right after `frame`: Tab out of a frame (whose keys the page never sees) lands on it,
+ *  and goes on as from the frame's last control, never on to <body> (see frameExit). `scope()`: the
+ *  element Tab keeps to besides a dialog or sheet (a full-screen panel), else null. */
+export function frameEnd(frame, scope) {
+  const end = document.createElement('span');
+  end.className = 'sr-only tab-end';
+  end.tabIndex = 0;
+  end.addEventListener('focus', (e) => {
+    const box = (scope && scope()) || [topDialog(), openSheet()].find((d) => d && d.contains(end)) || null;
+    const to = frameExit(end, frame, e.relatedTarget instanceof Element ? e.relatedTarget : null, focusables(box || document.body).filter(tabStop), box);
+    if (to) to.focus();
+  });
+  return end;
+}
+
+/** Whether Esc on `el` empties it (and the list it filters) rather than closing what it's in: a search field with text in it. */
+export const clearsOnEscape = (el) => !!el && el.tagName === 'INPUT' && el.type === 'search' && !!el.value;
+
 // (not in the Node tests, which have no DOM)
 if (typeof MutationObserver !== 'undefined') {
+  // before anything else sees it (a dialog closes on Esc at the document): the field is emptied, the next Esc closes
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !clearsOnEscape(e.target) || document.querySelector('.popover')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.target.value = '';
+    e.target.dispatchEvent(new Event('input', { bubbles: true }));
+  }, true);
+
   // Tab and Shift+Tab stay inside the top dialog, or a sheet over the dimmed page
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab' || e.defaultPrevented || document.querySelector('.popover')) return;

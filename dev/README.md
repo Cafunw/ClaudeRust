@@ -32,7 +32,9 @@ npm run build:unsigned   # installers in target/release/bundle, no signing key
 in-app updater downloads (`createUpdaterArtifacts` in `tauri.conf.json`), which
 must be signed, so it stops without `TAURI_SIGNING_PRIVATE_KEY` (and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). Only the Release workflow has that key;
-the *Build installers* workflow builds unsigned like `build:unsigned`.
+the *Build installers* workflow builds unsigned like `build:unsigned`, and so
+does the Release workflow when the key isn't set (macOS and Linux only, with no
+`latest.json`; see the top of `release.yml`).
 
 ## Run the app against a local mock of the Claude API
 

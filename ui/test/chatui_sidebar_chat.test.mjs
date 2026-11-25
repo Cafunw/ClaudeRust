@@ -104,6 +104,7 @@ test('a Mermaid frame gets its source as text only, strict, in the app theme', (
   const doc = mermaidDoc('graph TD; A["</pre><script>alert(1)</script>"]-->B', true);
   assert.ok(!doc.includes('<script>alert'), 'the source cannot end the <pre> or open a script');
   assert.ok(doc.includes('&lt;/pre&gt;&lt;script&gt;'));
-  assert.ok(doc.includes("securityLevel: 'strict'") && doc.includes("theme: 'dark'") && doc.includes('color-scheme:dark'));
-  assert.ok(mermaidDoc('graph TD; A-->B', false).includes("theme: 'default'"));
+  // (it draws in the theme it starts with, and again in another: theme_change_redraw.test.mjs)
+  assert.ok(doc.includes("securityLevel: 'strict'") && doc.includes('dark = true,') && doc.includes("theme: dark ? 'dark' : 'default'") && doc.includes('color-scheme:dark'));
+  assert.ok(mermaidDoc('graph TD; A-->B', false).includes('dark = false,'));
 });

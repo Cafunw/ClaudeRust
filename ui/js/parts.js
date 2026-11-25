@@ -9,6 +9,8 @@ import { store, modelInfo, emit } from './store.js';
 import { watchMermaid } from './mermaid_block.js';
 import { mountApp } from './mcp_apps.js';
 import { findTool } from './mcp_tool_info.js';
+import { reveal, revealAll } from './stream_reveal.js';
+import { citeClick } from './cite_card.js';
 
 // ------------------------------------------------------------- decorating
 
@@ -73,6 +75,18 @@ export function decorate(root) {
       sub.textContent = artifactCardSub(sub.textContent, c.dataset.complete);
     }
   });
+  // a task list's box (`- [x] done`) comes with no name: its item's text is it
+  all('li > input[type=checkbox], li > p:first-child > input[type=checkbox]').forEach((c) => {
+    const label = taskLabel(c.parentElement);
+    if (label) c.setAttribute('aria-label', label);
+  });
+}
+
+/** The name of a task list item's checkbox, in `box` (its `li`, or the item's first `p`): the
+ *  item's own text, not its nested lists', on one line and cut short. */
+export function taskLabel(box) {
+  const own = [...box.childNodes].filter((n) => n.nodeName !== 'UL' && n.nodeName !== 'OL').map((n) => n.textContent).join('');
+  return own.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
 /** An artifact card's second line: its kind (artifacts.rs kind_label), then whether it is being written
@@ -139,6 +153,9 @@ document.addEventListener('click', async (e) => {
     if (span) { span.textContent = t('copied'); setTimeout(() => (span.textContent = t('copy_code')), 1500); }
     return;
   }
+  // a tap (or a click before its card is up) shows a citation's card; the next opens the page
+  const cite = e.target.closest('a.cite');
+  if (cite && citeClick(cite)) { e.preventDefault(); return; }
   const a = e.target.closest('a[href]');
   if (a && !a.closest('[data-internal]')) {
     // Never navigate the app window itself; web links open in the browser.
@@ -310,7 +327,7 @@ export function thoughtFor(ms) {
   return sec % 60 ? t('thought_for_m_s', { m, s: sec % 60 }) : t('thought_for_m', { m });
 }
 
-function renderThinking(el, p) {
+function renderThinking(el, p, ctx) {
   if (!el.classList.contains('thinking')) {
     el.className = 'thinking';
     el.innerHTML = `<button class="thinking-head" aria-expanded="false"><span class="ic"></span><span class="lab"></span>${icon('chevRight', 14, 'class="chev"')}</button><div class="thinking-body md"></div>`;
@@ -341,7 +358,10 @@ function renderThinking(el, p) {
     body.innerHTML = `<p class="muted">${esc(t('thought_process'))}</p>`;
   } else {
     morph(body, p.html || '').forEach(decorate);
+    if (p.streaming) reveal(body, !!(ctx && ctx.live));
   }
+  // done thinking: it folds, and what it said shows whole
+  if (!p.streaming) revealAll(el);
   if (p.streaming) body.scrollTop = body.scrollHeight;
 }
 
@@ -579,8 +599,9 @@ export function renderParts(container, parts, ctx) {
       case 'text':
         if (!el.classList.contains('md')) el.className = 'md part-text';
         morph(el, p.html || '').forEach(decorate);
+        if (ctx && ctx.streaming) reveal(el, ctx.live);
         break;
-      case 'thinking': renderThinking(el, p); break;
+      case 'thinking': renderThinking(el, p, ctx); break;
       case 'tool': renderTool(el, p); mountApp(el, p, ctx); break;
       case 'search': renderSearch(el, p); break;
       case 'fetch': renderFetch(el, p); break;

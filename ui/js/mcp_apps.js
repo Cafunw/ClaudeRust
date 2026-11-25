@@ -30,7 +30,7 @@ export function validMessage(d) {
 export function createBridge(env) {
   let ready = false;
   const send = (m) => env.send({ jsonrpc: '2.0', ...m });
-  return async function handle(raw) {
+  const handle = async (raw) => {
     const m = validMessage(raw);
     if (!m) return;
     const { id, method } = m;
@@ -78,6 +78,9 @@ export function createBridge(env) {
       fail(-32000, (e && e.message) || e);
     }
   };
+  /** What changed of the host context (the theme): told to a page once it is initialized. */
+  handle.contextChanged = (ctx) => { if (ready) send({ method: 'ui/notifications/host-context-changed', params: ctx }); };
+  return handle;
 }
 
 /** One question at a time: may the app run `tool` of `server` with `args`? */
@@ -147,6 +150,14 @@ export async function mountApp(el, p, ctx) {
   el.appendChild(frame);
   frame.src = artifactUrl(opened.token);
   return true;
+}
+
+// a new theme reaches every app shown (not in the Node tests, which have no DOM)
+if (typeof MutationObserver !== 'undefined') {
+  new MutationObserver(() => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    for (const [frame, handle] of frames) if (frame.isConnected) handle.contextChanged({ theme });
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 }
 
 // what the apps' pages send: only from a frame of ours, each to its own bridge

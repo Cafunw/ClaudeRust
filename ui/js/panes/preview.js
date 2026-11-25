@@ -5,6 +5,7 @@ import { icon } from '../icons.js';
 import { call, on } from '../api.js';
 import { esc, errorToast } from '../util.js';
 import { registerPane, context, updateTabs, show } from '../workspace.js';
+import { frameEnd } from '../a11y.js';
 
 const state = new Map(); // convId -> { url, found: [] }
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
@@ -30,9 +31,11 @@ function mount(el, ctx) {
       <button class="icon-btn sm" data-a="pick" title="${t('preview_detected')}">${icon('chevDown', 14)}</button>
       <button class="icon-btn sm" data-a="ext" title="${t('open_browser')}">${icon('external', 14)}</button>
     </div>
-    <div class="pv-body"><iframe class="pv-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe><div class="pv-empty pane-empty"></div></div>`;
+    <div class="pv-body"><iframe class="pv-frame" title="${esc(t('ws_preview'))}" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"></iframe><div class="pv-empty pane-empty"></div></div>`;
   const input = el.querySelector('.pv-url');
   const frame = el.querySelector('.pv-frame');
+  // the panel may end the page: Tab out of the site goes on, not to nowhere
+  frame.after(frameEnd(frame));
   const go = (u) => {
     let url = (u || '').trim();
     if (/^\d+$/.test(url)) url = `http://localhost:${url}`;

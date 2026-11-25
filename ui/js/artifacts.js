@@ -16,6 +16,7 @@ import { errorText as failureText } from './neterr.js';
 import { reload as reloadChat } from './chat.js';
 import { renderPreview } from './artifact_preview.js';
 import { panelView } from './artifact_view.js';
+import { frameEnd } from './a11y.js';
 
 let panel = null;
 let renderTimer = null;
@@ -227,7 +228,8 @@ async function render() {
   drawAlert(a);
 
   const body = el.querySelector('.ap-body');
-  const docKey = `${view}|${a.type}|${a.identifier}|${a.version}|${a.complete}|${isDark()}|${a.content.length}|${a.content.slice(-64)}`;
+  // (a doc, sheet or deck shown follows a new theme by itself: see RETHEMED)
+  const docKey = `${view}|${a.type}|${a.identifier}|${a.version}|${a.complete}|${view === 'preview' && RETHEMED.has(a.type) ? '' : isDark()}|${a.content.length}|${a.content.slice(-64)}`;
   if (panel.lastDocKey === docKey) return;
   // while it streams there's a newer version every 120 ms, and each request
   // highlights all of it: one request at a time, and the latest version is
@@ -275,7 +277,8 @@ async function render() {
       // a page whose libraries come from a CDN can take a while: a spinner until it's loaded, not a blank panel
       body.classList.add('loading');
       frame.addEventListener('load', () => body.classList.remove('loading'), { once: true });
-      body.appendChild(frame);
+      // Tab out of the page goes on round the panel (full screen, a sheet) or the app, never to nowhere
+      body.append(frame, frameEnd(frame, () => (full ? aside() : null)));
     } else {
       const code = await call('highlight_code', { code: a.content, language: langFor(a) });
       if (stale()) return;
@@ -484,9 +487,18 @@ function bindResizer(r) {
   });
 }
 
-// re-render previews on theme change
-new MutationObserver(() => { if (panel) { panel.lastDocKey = null; render(); } })
-  .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+// the gallery shown: its pictures drawn again (see renderGallery)
+let redrawGallery = null;
+
+// a doc, sheet or deck takes a new theme where it is (an edit under way stays, see artifact_types/); one
+// still loading, and the rest, are drawn again in it
+const RETHEMED = new Set([SLIDES, DOC, SHEET]);
+new MutationObserver(() => {
+  const f = panel && aside().querySelector('.ap-body:not(.loading) iframe');
+  if (f && f.contentWindow && RETHEMED.has(f.dataset.kind)) f.contentWindow.postMessage({ __artifact: 'theme', dark: isDark() }, '*');
+  else if (panel) { panel.lastDocKey = null; render(); }
+  if (redrawGallery) redrawGallery();
+}).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 // ------------------------------------------------------------------ gallery
 
@@ -537,6 +549,11 @@ export async function renderGallery(view) {
   const shown = new WeakMap();
   let seen = null;
   draw('');
+  // a new theme: each picture is drawn again in it as it comes near the view (the cards, and the focus on one, stay)
+  redrawGallery = () => {
+    if (!grid.isConnected) { redrawGallery = null; return; }
+    for (const box of grid.querySelectorAll('.preview')) { box.__drawing = null; box.replaceChildren(); seen.unobserve(box); seen.observe(box); }
+  };
   $('.search-box input', view).addEventListener('input', (e) => draw(e.target.value));
 }
 
@@ -561,7 +578,7 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // the sheet of a narrow window and the full-screen view keep Tab inside, as a dialog does (the chat behind isn't reachable)
-const sheetControls = () => [...aside().querySelectorAll('button:not(:disabled), a[href], input, select, textarea, iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => x.getClientRects().length);
+const sheetControls = () => [...aside().querySelectorAll('button:not(:disabled), a[href], input, select, textarea, iframe, [tabindex]:not([tabindex="-1"]):not(.tab-end)')].filter((x) => x.getClientRects().length);
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Tab' || !panel || !(sheet.matches || full) || !aside().contains(e.target)) return;
   const all = sheetControls();

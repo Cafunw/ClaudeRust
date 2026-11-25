@@ -9,6 +9,7 @@ import { store, modelInfo, emit, rememberModel, rememberEffort } from './store.j
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast, modal, button } from './util.js';
 import { hookPreview } from './attachment_preview.js';
 import { expandTemplate, templateForm } from './mcp_resources.js';
+import { openDirectory } from './connector_directory.js';
 
 const PASTE_AS_FILE = 6000;
 /** The preset styles (prompts.rs style_prompt), labelled style_<id>. */
@@ -81,6 +82,17 @@ export function attachmentError(e, name) {
   return t(`atterr_${kind}`, { name: n ? `“${n}”` : t('atterr_file') });
 }
 
+/** The connector directory, from the tools menu: a server added there is in the next menu. */
+async function addConnectors() {
+  try { await openDirectory(await call('mcp_status'), (st) => { if (st && st.servers) store.mcpServers = st.servers; }); } catch (e) { errorToast(e); }
+}
+
+/** The tools menu's way to connectors (`servers`: those configured; none for a Claude Code session, whose CLI has its own). */
+export function connectorItems(ccCode, servers, onAdd, onManage) {
+  if (ccCode) return [];
+  return [{ sep: true }, { label: t('add_connectors'), icon: 'plus', onClick: onAdd }, servers.length && { label: t('manage_connectors'), icon: 'settings', onClick: onManage }].filter(Boolean);
+}
+
 /** Say a failure: a refused attachment in the UI's language, anything else as before. */
 function attError(e, name) {
   const said = typeof e === 'string' ? e : attachmentError(e, name);
@@ -138,7 +150,7 @@ export function createComposer(opts) {
   const el = h(`<div class="composer" data-mode="${mode}">
     <div class="attachments hidden"></div>
     <div class="cbox">
-      <textarea rows="1" spellcheck="true" placeholder="${esc(opts.placeholder || t('help_today'))}"></textarea>
+      <textarea rows="1" spellcheck="true" aria-label="${esc(t('composer_label'))}" placeholder="${esc(opts.placeholder || t('help_today'))}"></textarea>
       <button class="send-btn" data-act="send" aria-label="${t('send')}" disabled>${icon('arrowUp', 16)}</button>
     </div>
     <div class="composer-bar">
@@ -487,7 +499,7 @@ export function createComposer(opts) {
           { label: t('tool_access_all'), sub: t('tool_access_all_d'), checked: !deferred, onClick: () => { persist({ tool_access: 'all' }); toast(t('tool_access_set_all')); } });
       }
     }
-    if (!items.length) items.push({ label: t('nothing_here'), disabled: true });
+    items.push(...connectorItems(ccCode, store.mcpServers, addConnectors, () => emit('open-settings', 'developer')));
     showMenu(anchor, items, { placement: 'top-start', width: 280 });
   }
 

@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
-import { $, esc, h, modal, button, toast, errorToast, confirmDialog, menuStep } from './util.js';
+import { $, esc, h, modal, button, toast, errorToast, confirmDialog, menuStep, showMenu } from './util.js';
 import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
@@ -429,16 +429,22 @@ const RENDER = {
         servers.appendChild(card);
       }
       actions.innerHTML = '';
-      actions.appendChild(button(t('cc_title'), 'primary', () => connectorDialog(status, draw)));
-      actions.appendChild(button(t('cd_title'), '', () => openDirectory(status, draw)));
-      actions.appendChild(button(t('edit_config'), '', () => editConfig(status, draw)));
-      actions.appendChild(button(t('open_file'), '', () => call('open_path', { path: status.config_path }).catch(errorToast)));
-      actions.appendChild(button(t('reload'), '', async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } }));
-      actions.appendChild(button(t('install_extension'), '', () => installExtension(draw)));
-      actions.appendChild(button(t('ed_title'), '', () => openExtensionDirectory(draw)));
-      if (status.claude_desktop_config) {
-        actions.appendChild(button(t('import_claude'), '', () => emit('open-settings', 'import')));
-      }
+      // the ways to add a server first (a connector from the directory or by its address, a local one
+      // as an extension); what works on the config file itself under ⋯
+      actions.append(
+        button(t('cd_title'), 'primary', () => openDirectory(status, draw)),
+        button(t('cc_title'), '', () => connectorDialog(status, draw)),
+        button(t('ed_title'), '', () => openExtensionDirectory(draw)),
+      );
+      const more = h(`<button class="btn" aria-haspopup="menu" title="${esc(t('more_actions'))}" aria-label="${esc(t('more_actions'))}">${icon('more', 16)}</button>`);
+      more.onclick = () => showMenu(more, [
+        { label: t('install_extension'), icon: 'download', onClick: () => installExtension(draw) },
+        { label: t('edit_config'), icon: 'edit', onClick: () => editConfig(status, draw) },
+        { label: t('open_file'), icon: 'file', onClick: () => call('open_path', { path: status.config_path }).catch(errorToast) },
+        { label: t('reload'), icon: 'refreshCw', onClick: async () => { try { await draw(await call('mcp_reload')); } catch (e) { errorToast(e); } } },
+        status.claude_desktop_config && { label: t('import_claude'), icon: 'download', onClick: () => emit('open-settings', 'import') },
+      ], { width: 240 });
+      actions.appendChild(more);
       actions.appendChild(h(`<span class="small muted mono ellipsis" style="max-width:100%" title="${esc(status.config_path)}">${esc(status.config_path)}</span>`));
     };
     servers.innerHTML = '<div style="padding:6px 0"><span class="spinner"></span></div>';
@@ -641,8 +647,10 @@ const RENDER = {
 /** A server's card; `redraw(status?)` draws the list again, `status` is the mcp_status reply it came from. */
 function serverCard(s, redraw, status) {
   const disabled = (store.settings.disabled_mcp_servers || []).includes(s.name) || s.status === 'disabled';
-  const card = h(`<div class="server"><div class="head">${iconHtml(s.server_info?.serverInfo?.icons, 16, 'plug')}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
-    <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.title || s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t(s.tools.length === 1 ? 'tools_count_one' : 'tools_count', { n: s.tools.length }) : ''}</div></div>
+  const sub = `${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.title || s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t(s.tools.length === 1 ? 'tools_count_one' : 'tools_count', { n: s.tools.length }) : ''}`;
+  // (a long name or line is cut short, all of it in its tooltip)
+  const card = h(`<div class="server"><div class="head">${iconHtml(s.server_info?.serverInfo?.icons, 16, 'plug')}<div class="grow"><div class="ellipsis" style="font-weight:600" title="${esc(s.name)}">${esc(s.name)}</div>
+    <div class="small muted ellipsis" title="${sub}">${sub}</div></div>
     <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
     ${s.transport === 'http' ? `<button class="icon-btn sm" data-a="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">${icon('edit', 15)}</button><button class="icon-btn sm" data-a="remove" title="${esc(t('cc_remove'))}" aria-label="${esc(t('cc_remove'))}">${icon('trash', 15)}</button>` : ''}
     <label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(t('enabled'))} · ${esc(s.name)}" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);

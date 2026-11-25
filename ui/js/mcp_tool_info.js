@@ -13,12 +13,23 @@ export function pickIcon(icons, theme) {
   return list.find((i) => i.theme === theme) || list.find((i) => !i.theme) || list[0] || null;
 }
 
-/** `icons` as an image of `size` px for the app's theme, else the icons.js icon `fallback`. */
+/** `icons` as an image of `size` px for the app's theme, else the icons.js icon `fallback`;
+ *  one with a picture for each theme keeps both, and follows a theme change (below). */
 export function iconHtml(icons, size, fallback) {
   const theme = document.documentElement.dataset?.theme === 'dark' ? 'dark' : 'light';
   const i = pickIcon(icons, theme);
   if (!i) return icon(fallback, size);
-  return `<img class="mcp-icon" src="${esc(i.src)}" width="${size}" height="${size}" alt="" referrerpolicy="no-referrer" decoding="async">`;
+  const [light, dark] = [pickIcon(icons, 'light'), pickIcon(icons, 'dark')];
+  const both = light.src !== dark.src ? ` data-light="${esc(light.src)}" data-dark="${esc(dark.src)}"` : '';
+  return `<img class="mcp-icon" src="${esc(i.src)}" width="${size}" height="${size}" alt="" referrerpolicy="no-referrer" decoding="async"${both}>`;
+}
+
+// (not in the Node tests, which have no DOM)
+if (typeof MutationObserver !== 'undefined') {
+  new MutationObserver(() => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    document.querySelectorAll('img.mcp-icon[data-dark]').forEach((img) => { img.src = img.dataset[theme]; });
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 }
 
 /** The badges of what `tool` (an MCP tool of mcp_status) says about itself. */

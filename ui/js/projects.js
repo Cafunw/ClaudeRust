@@ -7,6 +7,7 @@ import { $, esc, h, modal, button, relTime, toast, errorToast, confirmDialog, pr
 import { createComposer, attachmentError } from './composer.js';
 import { startConversation, prewarmOnInput } from './home.js';
 import { conversationMenu } from './chat.js';
+import { knowledgeRows, syncSummary, sourceError, filesN } from './github_source.js';
 
 const CAPACITY_CHARS = 2_000_000;
 
@@ -50,8 +51,8 @@ export async function renderProjects(view) {
 }
 
 export function newProjectDialog() {
-  const body = h(`<div><div class="field"><label class="label">${t('project_name')}</label><input class="input" data-f="name" placeholder="${t('name')}"></div>
-    <div class="field"><label class="label">${t('project_desc')}</label><textarea class="textarea" data-f="desc" rows="3" placeholder="${t('description')}"></textarea></div></div>`);
+  const body = h(`<div><div class="field"><label class="label" for="np-name">${t('project_name')}</label><input class="input" id="np-name" data-f="name" placeholder="${t('name')}"></div>
+    <div class="field"><label class="label" for="np-desc">${t('project_desc')}</label><textarea class="textarea" id="np-desc" data-f="desc" rows="3" placeholder="${t('description')}"></textarea></div></div>`);
   const create = button(t('create_project'), 'primary', async () => {
     const name = $('[data-f=name]', body).value.trim();
     if (!name) { $('[data-f=name]', body).focus(); return; }
@@ -141,9 +142,10 @@ function renderKnowledge(el, data, rerender) {
     <div class="k-section files"></div>`;
   const files = $('.files', el);
   if (!data.files.length) files.innerHTML = `<div class="muted small">${t('no_files')}</div>`;
-  for (const f of data.files) {
+  for (const f of knowledgeRows(data.files)) {
+    if (f.group) { files.appendChild(githubGroup(p.id, f, rerender)); continue; }
     const remove = t('proj_file_remove', { name: f.name });
-    const row = h(`<div class="k-file">${icon(f.kind === 'image' ? 'image' : 'fileText', 15)}<div class="grow ellipsis" title="${esc(f.name)}">${esc(f.name)}</div><span class="small muted">${humanSize(f.size)}</span><button class="icon-btn sm x" title="${esc(remove)}" aria-label="${esc(remove)}">${icon('x', 14)}</button></div>`);
+    const row = h(`<div class="k-file" ${f.github ? 'style="padding-left:22px"' : ''}>${icon(f.kind === 'image' ? 'image' : 'fileText', 15)}<div class="grow ellipsis" title="${esc(f.name)}">${esc(f.name)}</div><span class="small muted">${humanSize(f.size)}</span><button class="icon-btn sm x" title="${esc(remove)}" aria-label="${esc(remove)}">${icon('x', 14)}</button></div>`);
     row.querySelector('.x').onclick = async () => { try { await call('remove_project_file', { id: f.id }); } catch (e) { errorToast(e); } rerender(); };
     files.appendChild(row);
   }
@@ -178,6 +180,28 @@ function renderKnowledge(el, data, rerender) {
     }
     rerender();
   });
+}
+
+/** The heading of the files added from one GitHub address `g`, with "Sync from GitHub". */
+function githubGroup(projectId, g, rerender) {
+  const label = t('ghsync_label', { repo: g.repo });
+  const row = h(`<div class="k-file">${icon('branch', 15)}<div class="grow ellipsis" title="${esc(g.group)}">${esc(g.repo)}</div><span class="small muted">${esc(filesN(g.files.length))}</span>
+    <button class="btn sm" data-act="sync" data-url="${esc(g.group)}" title="${esc(t('ghsync_title'))}" aria-label="${esc(label)}">${icon('refreshCw', 13)} ${esc(t('ghsync'))}</button></div>`);
+  const b = row.querySelector('[data-act=sync]');
+  b.onclick = async () => {
+    if (b.disabled) return;
+    b.disabled = true;
+    b.setAttribute('aria-busy', 'true');
+    b.innerHTML = `<span class="spinner tiny"></span> ${esc(t('ghsync_syncing'))}`;
+    try {
+      const r = await call('github_sync', { projectId, url: g.group });
+      for (const [text, kind] of syncSummary(r)) toast(text, kind, { duration: 7000 });
+    } catch (e) { toast(sourceError(e), 'error'); }
+    // the page is drawn anew (sizes, the capacity bar): the keyboard comes back to this button
+    await rerender();
+    [...document.querySelectorAll('.knowledge [data-act=sync]')].find((x) => x.dataset.url === g.group)?.focus();
+  };
+  return row;
 }
 
 /** A file the project's knowledge didn't take: a refused attachment in the UI's language, anything else as before. */

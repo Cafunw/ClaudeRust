@@ -132,6 +132,18 @@ pub struct ProjectFile {
     pub created_at: i64,
 }
 
+/// Where a project file came from on GitHub: the repository's address (with
+/// its branch, tag or commit and folder, as given), the file's path in it,
+/// and the commit its contents are from.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileSource {
+    #[serde(skip_serializing)]
+    pub file_id: String,
+    pub url: String,
+    pub path: String,
+    pub sha: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactRow {
     pub id: String,
@@ -245,6 +257,10 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE artifact_storage (conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
        scope TEXT NOT NULL, shared INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (scope, shared, key));
      CREATE INDEX idx_artifact_storage_conv ON artifact_storage(conversation_id);",
+    // 6: where a project file added from GitHub came from, so it can be synced
+    // again (files added before this, or another way, have no row)
+    "CREATE TABLE project_file_sources (file_id TEXT PRIMARY KEY REFERENCES project_files(id) ON DELETE CASCADE,
+       url TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL);",
 ];
 
 fn conv_from_row(r: &Row) -> rusqlite::Result<Conversation> {
@@ -1229,6 +1245,46 @@ impl Db {
         Ok(())
     }
 
+    pub fn project_file_source_set(&self, s: &FileSource) -> AppResult<()> {
+        self.conn.lock().execute(
+            "INSERT OR REPLACE INTO project_file_sources(file_id,url,path,sha) VALUES(?1,?2,?3,?4)",
+            params![s.file_id, s.url, s.path, s.sha],
+        )?;
+        Ok(())
+    }
+
+    /// The GitHub sources of project `project_id`'s files (those added from GitHub).
+    pub fn project_file_sources(&self, project_id: &str) -> AppResult<Vec<FileSource>> {
+        let c = self.read_conn();
+        let mut st = c.prepare(
+            "SELECT s.* FROM project_file_sources s JOIN project_files f ON f.id = s.file_id WHERE f.project_id=?1 ORDER BY f.created_at, f.rowid",
+        )?;
+        let rows = st.query_map([project_id], |r| Ok(FileSource { file_id: r.get("file_id")?, url: r.get("url")?, path: r.get("path")?, sha: r.get("sha")? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// A synced file that hadn't changed: its contents are now from commit `s.sha`.
+    pub fn project_file_source_sha(&self, s: &FileSource) -> AppResult<()> {
+        self.conn.lock().execute("UPDATE project_file_sources SET sha=?2 WHERE file_id=?1", params![s.file_id, s.sha])?;
+        Ok(())
+    }
+
+    /// New contents for a file synced from `s` (its id, and the commit they're from).
+    pub fn project_file_replace(&self, s: &FileSource, mime: &str, size: i64, kind: &str, data: &str) -> AppResult<()> {
+        let mut c = self.conn.lock();
+        let tx = c.transaction()?;
+        let project: Option<String> = tx
+            .query_row("UPDATE project_files SET mime=?2, size=?3, kind=?4, data=?5 WHERE id=?1 RETURNING project_id", params![s.file_id, mime, size, kind, data], |r| r.get(0))
+            .optional()?;
+        // removed from the project meanwhile: nothing to replace
+        if let Some(p) = project {
+            tx.execute("UPDATE project_file_sources SET sha=?2 WHERE file_id=?1", params![s.file_id, s.sha])?;
+            tx.execute("UPDATE projects SET updated_at=?2 WHERE id=?1", params![p, now_ms()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // --------------------------------------------------------------- artifacts
 
     pub fn artifact_upsert(&self, a: &ArtifactRow) -> AppResult<()> {
@@ -1636,6 +1692,42 @@ mod tests {
         let e = Db::open(&path).err().unwrap().to_string();
         assert!(e.contains("newer version") && e.contains(&format!("version {}", latest + 1)), "{e}");
         assert_eq!(version(&Connection::open(&path).unwrap()), latest + 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn github_sources_of_project_files_survive_an_existing_database() {
+        let dir = std::env::temp_dir().join(format!("cr-src-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let file = |id: &str, p: &str| ProjectFile { id: id.into(), project_id: p.into(), name: format!("b/{id}.md"), mime: "text/markdown".into(), size: 1, kind: "text".into(), data: "x".into(), created_at: 1 };
+        // a database from before sources were kept: version 5, with a project file
+        let p = {
+            let db = Db::open(&path).unwrap();
+            let p = db.project_create("P", "").unwrap();
+            db.project_file_add(&file("old", &p.id)).unwrap();
+            db.conn.lock().execute_batch("DROP TABLE project_file_sources; PRAGMA user_version = 5;").unwrap();
+            p
+        };
+        let db = Db::open(&path).unwrap();
+        assert!(db.project_file_sources(&p.id).unwrap().is_empty(), "an older file has no source");
+        db.project_file_add(&file("new", &p.id)).unwrap();
+        let mut s = FileSource { file_id: "new".into(), url: "https://github.com/a/b".into(), path: "new.md".into(), sha: "1".repeat(40) };
+        db.project_file_source_set(&s).unwrap();
+        assert_eq!(db.project_file_sources(&p.id).unwrap().iter().map(|s| s.file_id.as_str()).collect::<Vec<_>>(), ["new"]);
+        s.sha = "2".repeat(40);
+        db.project_file_replace(&s, "text/plain", 3, "text", "new").unwrap();
+        let f = db.project_files(&p.id).unwrap().into_iter().find(|f| f.id == "new").unwrap();
+        assert_eq!((f.data.as_str(), f.size, f.mime.as_str(), f.name.as_str()), ("new", 3, "text/plain", "b/new.md"), "the name stays");
+        assert_eq!(db.project_file_sources(&p.id).unwrap()[0].sha, s.sha);
+        // removed meanwhile: a sync's write changes nothing and fails nothing
+        db.project_file_delete("new").unwrap();
+        db.project_file_replace(&s, "text/plain", 3, "text", "again").unwrap();
+        db.project_file_source_sha(&s).unwrap();
+        assert!(db.project_file_sources(&p.id).unwrap().is_empty(), "the source went with its file");
+        let left: i64 = db.conn.lock().query_row("SELECT count(*) FROM project_file_sources", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+        drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }
 

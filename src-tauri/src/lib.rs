@@ -726,6 +726,7 @@ pub fn run() {
             commands::reset_onboarding,
             github_source::github_list,
             github_source::github_add,
+            github_source::github_sync,
             github_source::github_token_status,
             github_source::github_token_set,
             link_source::link_add,

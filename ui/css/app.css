@@ -821,9 +821,16 @@ input[type=checkbox]:disabled { opacity: .5; cursor: default; }
 /* the chosen value sits by the caret at the row's end, however long the longest option is */
 .setting-row .select { width: auto; border-color: transparent; background: transparent; padding-right: 8px; text-align-last: right; }
 .setting-row .select:hover { background: var(--row-hover); }
-.server { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; background: var(--surface); }
+.server { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; background: var(--surface); container-type: inline-size; }
 .server .head { display: flex; align-items: center; gap: 10px; }
-.server .st { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+.server .head > .grow { min-width: 0; }
+/* a narrow card: the name keeps the first row, its badge and buttons go to the right of a second one */
+@container (max-width: 480px) {
+  .server .head { flex-wrap: wrap; row-gap: 6px; }
+  .server .head > .grow { flex: 1 1 calc(100% - 44px); }
+  .server .head > .grow + * { margin-left: auto; }
+}
+.server .st { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .server .st.connected { background: var(--ok-soft); color: var(--ok); }
 .server .st.failed { background: var(--danger-soft); color: var(--danger); }
 .server .st.disabled, .server .st.starting, .server .st.reconnecting { background: var(--bg-2); color: var(--text-2); }
@@ -1496,6 +1503,16 @@ mark.find-hit.cur { background: rgba(255, 140, 0, .75); }
 .cd-cat { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 400; padding: 1px 8px; border-radius: 999px; background: var(--bg-2); color: var(--text-2); vertical-align: 1px; }
 .cd-list .server .head { align-items: flex-start; }
 .cd-list .server .mono { word-break: break-all; }
+/* Settings → Skills: a filter, the skills by where they come from, each description two lines until shown in full */
+.sk-filter { margin: 0 0 12px; }
+.sk-filter .input { border-color: var(--border); }
+.sk-group { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--text-1); }
+.sk-list .server .head { align-items: flex-start; }
+.sk-desc { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sk-desc.open { display: block; }
+.sk-more { background: none; border: 0; padding: 2px 0; margin-top: 2px; font: inherit; font-size: 12.5px; color: var(--link); cursor: pointer; border-radius: 4px; }
+.sk-more:hover { text-decoration: underline; }
+.sk-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sk-md { max-height: 34vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg-2); border-radius: 8px; padding: 10px 12px; margin: 4px 0 0; }
 .sk-files { max-height: 20vh; overflow: auto; margin: 4px 0 0; padding-left: 18px; color: var(--text-1); }
 
@@ -1654,3 +1671,20 @@ details.tool-info { display: block; }
   .tool-policy { flex-wrap: wrap; }
   .tool-policy .tool-info { flex-basis: 100%; }
 }
+/* a web citation's card (ui/js/cite_card.js) */
+.cite-card {
+  position: fixed; z-index: 1100; width: max-content; max-width: min(320px, calc(100vw - 16px)); padding: 10px 12px;
+  background: var(--surface); color: var(--text-0); border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow-lg); font-family: var(--font-ui); font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.cite-card .cite-title { font-weight: 600; }
+.cite-card .cite-domain { color: var(--text-2); font-size: 11.5px; margin-top: 2px; }
+.cite-card .cite-quote { margin: 8px 0 0; padding-left: 9px; border-left: 2px solid var(--border-strong); color: var(--text-1); }
+/* a message action the response under way holds up (ui/js/chat.js idleOnly) */
+.turn-actions [aria-disabled="true"] { cursor: default; }
+.turn-actions [aria-disabled="true"]:hover { background: none; }
+/* (as specific as the rule that shows a turn's actions on hover, and after it) */
+.turn:is(:hover, :focus-within, .last) .turn-actions > [aria-disabled="true"], .turn-actions .branch-nav [aria-disabled="true"] { opacity: .45; }
+/* what a streamed batch hasn't uncovered yet (ui/js/stream_reveal.js): its blocks only move, so nothing repaints */
+.reveal-cover { position: absolute; left: 0; top: 0; overflow: hidden; pointer-events: none; z-index: 1; }
+.reveal-cover > div { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: var(--cover); will-change: transform; }
