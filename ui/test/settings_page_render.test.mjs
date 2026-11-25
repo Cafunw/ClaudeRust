@@ -4,10 +4,10 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { setLanguage, t } from '../js/i18n.js';
+import { source } from './source.mjs';
 
-const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+const read = source;
 const SETTINGS = read('../js/settings.js');
 
 test('each Settings page renders into a container of its own, replaced when another page is shown', () => {

@@ -4,9 +4,9 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
-const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+const read = source;
 const css = read('../css/app.css');
 // the declarations of the rule whose selector list is exactly `sel` (the last one wins, as in CSS)
 const rule = (sel) => {

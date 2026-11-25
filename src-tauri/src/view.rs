@@ -117,6 +117,31 @@ pub struct Window {
     pub before: Option<String>,
 }
 
+/// What the UI draws of a page at once (turnwindow.js `PAGE_CHARS`): a page of long turns is cut
+/// there, so the reply it parses on its main thread stays small; the turns before come as it scrolls up.
+const PAGE_CHARS: usize = 250_000;
+
+/// About how much a turn puts on screen: its rendered text (turnwindow.js `weight`).
+fn weight(turn: &Value) -> usize {
+    let parts = turn["parts"].as_array().map_or(&[][..], |p| p.as_slice());
+    200 + parts.iter().map(|p| p["html"].as_str().or(p["text"].as_str()).map_or(0, str::len)).sum::<usize>()
+}
+
+/// Where the part of `turns` to send starts: as many of the last as PAGE_CHARS holds (one at
+/// least), and never an answer without its question (turnwindow.js `pageStart`).
+fn page_cut(turns: &[Value]) -> usize {
+    let mut i = turns.len();
+    let mut chars = 0;
+    while i > 0 && (i == turns.len() || chars + weight(&turns[i - 1]) <= PAGE_CHARS) {
+        i -= 1;
+        chars += weight(&turns[i]);
+    }
+    if i > 0 && turns[i]["role"] == "assistant" && turns[i - 1]["role"] == "user" {
+        i -= 1;
+    }
+    i
+}
+
 impl Window {
     fn range(&self, ids: &[&str]) -> std::ops::Range<usize> {
         let pos = |id: &Option<String>| id.as_deref().and_then(|x| ids.iter().position(|i| *i == x));
@@ -163,17 +188,27 @@ pub async fn conversation_window(st: &AppState, conv_id: &str, window: &Window) 
     };
     let groups = render::turn_groups(&path);
     let ids: Vec<&str> = groups.iter().map(|g| g[0].id.as_str()).collect();
-    let range = window.range(&ids);
+    let mut range = window.range(&ids);
     // numbering goes on after the turns left out above
     let mut tracker = ArtifactTracker::default();
+    for a in artifact_specs(groups[..range.start].iter().flatten().copied()) {
+        tracker.next(&a.identifier);
+    }
+    let mut turns: Vec<Value> = groups[range.clone()].iter().map(|g| render::build_turn(g, &ctx, &mut tracker)).collect();
+    // a page (not a refresh from `since`, nor the whole view) is only what the UI draws of it at once
+    if window.limit.is_some() && window.since.is_none() {
+        let cut = page_cut(&turns);
+        turns.drain(..cut);
+        range.start += cut;
+    }
+    let mut numbers = ArtifactTracker::default();
     let earlier: Vec<Value> = artifact_specs(groups[..range.start].iter().flatten().copied())
         .map(|a| {
-            let v = tracker.next(&a.identifier);
+            let v = numbers.next(&a.identifier);
             render::artifact_json(a, v)
         })
         .collect();
     let more = range.start > 0;
-    let mut turns: Vec<Value> = groups[range].iter().map(|g| render::build_turn(g, &ctx, &mut tracker)).collect();
     let siblings = Siblings::new(&nodes);
     for t in turns.iter_mut() {
         let s = siblings.of(t["id"].as_str().unwrap_or(""));
@@ -203,6 +238,22 @@ pub async fn conversation_window(st: &AppState, conv_id: &str, window: &Window) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_of_long_turns_is_cut_to_what_is_drawn_at_once() {
+        let turn = |role: &str, chars: usize| json!({"role": role, "parts": [{"html": "x".repeat(chars)}]});
+        let short: Vec<Value> = (0..40).map(|i| turn(if i % 2 == 0 { "user" } else { "assistant" }, 1000)).collect();
+        assert_eq!(page_cut(&short), 0, "a page of ordinary turns goes whole");
+        // 27 answers of ~90k characters (120 highlighted code blocks): 2 fit, with their questions
+        let long: Vec<Value> = (0..54).map(|i| if i % 2 == 0 { turn("user", 50) } else { turn("assistant", 90_000) }).collect();
+        assert_eq!(page_cut(&long), 50);
+        assert_eq!(long[50]["role"], "user", "an answer comes with its question");
+        // one turn larger than a page still goes
+        assert_eq!(page_cut(&[turn("assistant", 900_000)]), 0);
+        assert_eq!(page_cut(&[]), 0);
+        // the text of a part that has no html counts too
+        assert_eq!(weight(&json!({"parts": [{"text": "abc"}, {"html": "de"}]})), 205);
+    }
 
     #[test]
     fn indexed_siblings_match_the_search() {

@@ -2,8 +2,8 @@
 // (and parked turns coming back) a frame's worth at a time, so no frame runs long.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { drawWithin, FRAME_BUDGET, OPEN_BUDGET } from '../js/turnwindow.js';
+import { source } from './source.mjs';
 
 /** A clock that `draw` moves on by `costs[i]` ms. */
 const clocked = (costs) => {
@@ -25,7 +25,7 @@ test('draws while the budget lasts, at least one', () => {
 });
 
 test('older turns, the opened page and parked turns are drawn through the budget', () => {
-  const chat = readFileSync(new URL('../js/chat.js', import.meta.url), 'utf8');
+  const chat = source('../js/chat.js');
   const fn = (name) => chat.slice(chat.indexOf(`function ${name}(`), chat.indexOf('\n}\n', chat.indexOf(`function ${name}(`)));
   // each turn laid out as it comes, so the budget counts its layout
   assert.match(fn('drawBefore'), /drawWithin\(c\.shown - start, \(\) => \{[\s\S]*upsertTurn\([\s\S]*void c\.colEl\.offsetHeight;\s*\}, budget\);/);

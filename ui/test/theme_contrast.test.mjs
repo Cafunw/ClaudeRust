@@ -3,10 +3,10 @@
 // the light and the dark theme. (The ratio itself: ui/e2e/contrast.mjs.)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { contrast } from '../e2e/contrast.mjs';
+import { source } from './source.mjs';
 
-const CSS = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8');
+const CSS = source('../css/app.css');
 
 /** The custom properties of the first rule whose selector starts with `sel`. */
 function tokens(sel) {

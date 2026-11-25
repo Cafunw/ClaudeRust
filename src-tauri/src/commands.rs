@@ -1228,6 +1228,62 @@ mod served_tests {
     }
 }
 
+/// Most an artifact keeps with window.storage, its own and shared keys and values together.
+pub const ARTIFACT_STORAGE_BYTES: usize = 20 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageOp {
+    Get,
+    Set,
+    Delete,
+    List,
+}
+
+/// One window.storage call of artifact `scope` ("<conversation>/<artifact>",
+/// checked by artifact_storage.js like `key`): get -> the value or null, set
+/// -> false when the artifact's budget would be exceeded, delete -> whether
+/// it was there, list -> the keys that start with `key`.
+#[tauri::command]
+pub async fn artifact_storage(state: St<'_>, scope: String, op: StorageOp, shared: bool, key: String, value: Option<String>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    blocking(move || {
+        let db = &st.db;
+        Ok(match op {
+            StorageOp::Get => json!(db.storage_get(&scope, shared, &key)?),
+            StorageOp::Set => {
+                let conv = scope.split('/').next().unwrap_or_default();
+                json!(db.storage_set(conv, &scope, shared, &key, value.as_deref().unwrap_or_default(), ARTIFACT_STORAGE_BYTES)?)
+            }
+            StorageOp::Delete => json!(db.storage_delete(&scope, shared, &key)?),
+            StorageOp::List => json!(db.storage_keys(&scope, shared, &key)?),
+        })
+    })
+    .await
+}
+
+/// What one artifact kept in the app's localStorage before its storage moved here.
+#[derive(Deserialize)]
+pub struct StoredScope {
+    scope: String,
+    shared: bool,
+    data: serde_json::Map<String, Value>,
+}
+
+/// Move `scopes` (artifact_storage.js, once) into the database: how many keys were added.
+#[tauri::command]
+pub async fn artifact_storage_import(state: St<'_>, scopes: Vec<StoredScope>) -> AppResult<usize> {
+    let st = state.inner().clone();
+    let rows: Vec<_> = scopes
+        .into_iter()
+        .flat_map(|s| {
+            let conv = s.scope.split('/').next().unwrap_or_default().to_string();
+            s.data.into_iter().filter_map(move |(k, v)| Some((conv.clone(), s.scope.clone(), s.shared, k, v.as_str()?.to_string())))
+        })
+        .collect();
+    blocking(move || st.db.storage_import(&rows)).await
+}
+
 #[tauri::command]
 pub async fn render_markdown(state: St<'_>, text: String) -> AppResult<String> {
     let math = state.settings.read().latex_enabled;
@@ -1303,13 +1359,103 @@ pub async fn mcp_get_prompt(state: St<'_>, server: String, name: String, args: V
     blocking(move || stage_from_bytes(&st, &format!("{name}.txt"), text.as_bytes())).await
 }
 
+/// Read MCP resource `uri` and stage its contents, one attachment each.
 #[tauri::command]
-pub async fn mcp_read_resource(state: St<'_>, server: String, uri: String) -> AppResult<Value> {
+pub async fn mcp_read_resource(state: St<'_>, server: String, uri: String) -> AppResult<Vec<Value>> {
     let st = state.inner().clone();
-    let (uri, text) = st.mcp.read_resource(&server, &uri).await?;
-    let name = uri.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("resource").to_string();
-    // a large resource is digested like a large file
-    blocking(move || stage_from_bytes(&st, &format!("{name}.txt"), text.as_bytes())).await
+    let contents = st.mcp.read_resource(&server, &uri).await?;
+    // a large text is digested like a large file, a large image scaled down
+    blocking(move || {
+        let atts = resource_attachments(&uri, &contents)?;
+        let mut staged = st.staged.lock();
+        atts.into_iter()
+            .map(|a| {
+                let v = serde_json::to_value(&a)?;
+                staged.insert(a.id.clone(), a);
+                Ok(v)
+            })
+            .collect()
+    })
+    .await
+}
+
+/// The attachments made of the contents of MCP resource `uri`: a text as a
+/// text file, a base64 blob by its own bytes (an image, a PDF, an Office
+/// file...), each under the file name of its own URI (`resource_file_name`).
+fn resource_attachments(uri: &str, contents: &[Value]) -> AppResult<Vec<attachments::Attachment>> {
+    use base64::Engine;
+    let unreadable = || AppError::coded("mcp_resource_unreadable", json!({"uri": uri}), format!("The MCP resource {uri} has no text or file to attach."));
+    let atts = contents
+        .iter()
+        .filter(|c| c["text"].is_string() || c["blob"].is_string())
+        .map(|c| {
+            let text = c["text"].as_str();
+            let name = resource_file_name(c["uri"].as_str().unwrap_or(uri), c["mimeType"].as_str(), text.is_some());
+            match text {
+                Some(t) => attachments::from_bytes(&name, t.as_bytes()),
+                None => {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(c["blob"].as_str().unwrap_or_default().trim()).map_err(|_| unreadable())?;
+                    attachments::from_bytes(&name, &bytes)
+                }
+            }
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    if atts.is_empty() {
+        return Err(unreadable());
+    }
+    Ok(atts)
+}
+
+/// The extensions a MIME type is named with first (mime_guess lists some
+/// types' extensions alphabetically: "jfif" before "jpg").
+const USUAL_EXTENSIONS: [&str; 14] = ["png", "jpg", "gif", "webp", "pdf", "txt", "md", "json", "csv", "html", "xml", "docx", "xlsx", "pptx"];
+
+/// The file name an MCP resource is attached as: the last part of its URI
+/// (%-escapes decoded, characters no file name may hold replaced), with the
+/// extension of its MIME type (.txt for a text of no known type) when it has
+/// none of its own.
+fn resource_file_name(uri: &str, mime: Option<&str>, text: bool) -> String {
+    let path = uri.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/');
+    let last = path.rsplit(['/', ':']).next().unwrap_or_default();
+    let name: String = percent_decoded(last).chars().map(|c| if c.is_control() || r#"\/:*?"<>|"#.contains(c) { '_' } else { c }).collect();
+    let name = match name.trim() {
+        "" => "resource".to_string(),
+        n => n.to_string(),
+    };
+    if name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())) {
+        return name;
+    }
+    let mime = mime.and_then(|m| m.split(';').next()).map(|m| m.trim().to_ascii_lowercase()).unwrap_or_default();
+    let ext = USUAL_EXTENSIONS
+        .into_iter()
+        .find(|e| mime_guess::from_ext(e).first().is_some_and(|g| g.essence_str() == mime))
+        .or_else(|| mime_guess::get_mime_extensions_str(&mime)?.first().copied())
+        .or(text.then_some("txt"));
+    match ext {
+        Some(e) => format!("{name}.{e}"),
+        None => name,
+    }
+}
+
+/// `s` with its %XX escapes decoded; an incomplete one stays as it is.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b.get(i + 1..i + 3).filter(|h| b[i] == b'%' && h.iter().all(u8::is_ascii_hexdigit));
+        match hex.and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()) {
+            Some(v) => {
+                out.push(v);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ------------------------------------------------------------- Claude Code
@@ -1526,6 +1672,42 @@ pub async fn reset_onboarding(state: St<'_>) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resource_keeps_its_own_file_name() {
+        let n = |uri: &str, mime: Option<&str>, text: bool| resource_file_name(uri, mime, text);
+        assert_eq!(n("file:///C:/notes/notes.md", Some("text/markdown"), true), "notes.md");
+        assert_eq!(n("file:///home/me/My%20Report.pdf", Some("application/pdf"), false), "My Report.pdf");
+        // no extension of its own: its MIME type's, .txt for a text of no known type
+        assert_eq!(n("db://users", Some("application/json"), true), "users.json");
+        assert_eq!(n("screen://shot/latest", Some("image/jpeg"), false), "latest.jpg");
+        assert_eq!(n("memo://today", None, true), "today.txt");
+        assert_eq!(n("memo://today", Some("text/plain; charset=utf-8"), true), "today.txt");
+        assert_eq!(n("blob://x", None, false), "x");
+        // what a file name can't hold, and an empty last part
+        assert_eq!(n("res://a/b%5Cc%3F.txt?v=2#top", None, true), "b_c_.txt");
+        assert_eq!(n("res://", Some("text/csv"), true), "resource.csv");
+        assert_eq!(percent_decoded("a%20b%zz%4"), "a b%zz%4");
+    }
+
+    #[test]
+    fn resource_blobs_are_attached_as_the_files_they_are() {
+        use base64::Engine;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let contents = [
+            json!({"uri": "file:///p/chart", "mimeType": "image/png", "blob": b64(png.get_ref())}),
+            json!({"uri": "file:///p/notes.md", "mimeType": "text/markdown", "text": "# Notes"}),
+        ];
+        let atts = resource_attachments("file:///p/", &contents).unwrap();
+        let got: Vec<(&str, &str)> = atts.iter().map(|a| (a.name.as_str(), a.kind.as_str())).collect();
+        assert_eq!(got, [("chart.png", "image"), ("notes.md", "text")]);
+        // a blob that isn't base64, or nothing to attach: a coded refusal
+        for bad in [vec![json!({"uri": "x://a", "blob": "%%%"})], vec![json!({"uri": "x://a"})], vec![]] {
+            assert_eq!(resource_attachments("x://a", &bad).unwrap_err().kind(), "mcp_resource_unreadable");
+        }
+    }
 
     #[test]
     fn continue_reply_comes_with_the_send_request() {

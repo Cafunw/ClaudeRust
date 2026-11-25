@@ -50,6 +50,11 @@ function runs() {
 const STARTED = `document.readyState === 'complete' && !!document.querySelector('#sidebar .nav') && !!document.querySelector('#view .composer, #view .chat-col')`;
 
 const turnRuns = () => runs().filter((r) => r.argv.includes('--system-prompt-file'));
+/** The chat CLIs that haven't exited. */
+const liveTurnRuns = () => {
+  const gone = new Set(logLines().filter((l) => 'exit' in l).map((l) => l.pid));
+  return turnRuns().filter((r) => !gone.has(r.pid));
+};
 
 async function newChat(text) {
   await ev(`__e2e.emit('navigate', { name: 'new' })`);
@@ -135,6 +140,28 @@ test('the chat\'s next message goes to its kept CLI', { skip, timeout: 60000 }, 
   assert.equal(turnRuns().length, before, 'no CLI started for it');
 });
 
+test('a new chat\'s CLI starts while its first message is written, in place of the kept one', { skip, timeout: 60000 }, async () => {
+  const [kept] = liveTurnRuns();
+  assert.ok(kept, 'the last chat keeps its CLI');
+  await ev(`__e2e.emit('navigate', { name: 'new' })`);
+  await waitFor('the new chat composer', `!!document.querySelector('#view .welcome .composer textarea')`);
+  const before = turnRuns().length;
+  // typed, not sent yet
+  await ev(`(() => { const ta = document.querySelector('#view .composer textarea'); ta.focus(); ta.value = 'e2e written ahead'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  for (let i = 0; i < 100 && turnRuns().length === before; i++) await sleep(100);
+  // the kept one ends as this one is kept
+  for (let i = 0; i < 100 && liveTurnRuns().length > 1; i++) await sleep(100);
+  const started = turnRuns().slice(before);
+  assert.equal(started.length, 1, `one CLI starts ahead: ${JSON.stringify(started.map((r) => r.argv.slice(0, 3)))}`);
+  assert.deepEqual(liveTurnRuns().map((r) => r.pid), [started[0].pid], 'it takes the kept one\'s place');
+  await ev(`document.querySelector('#view .composer [data-act=send]').click()`);
+  const id = await waitFor('an open conversation', `__e2e.store.route.name === 'chat' && __e2e.store.route.params.id`);
+  made.push(id);
+  await waitFor('the answer', `__e2e.turns().some((t) => t.text.includes('Account answer to e2e written ahead.'))`);
+  await idle();
+  assert.equal(turnRuns().length, before + 1, 'its first message went to that CLI');
+});
+
 test('an artifact it writes is saved and listed', { skip, timeout: 60000 }, async () => {
   await newChat('make an e2e artifact');
   await idle();
@@ -161,6 +188,9 @@ test('a tool call through the CLI waits on the permission card', { skip, timeout
   await idle();
   assert.equal(await ev(`document.querySelectorAll('#view .perm-card').length`), 0);
   assert.deepEqual(mock.mcpCalls, [{ name: 'echo', arguments: { text: 'hi' } }]);
+  // of all the chats so far only the last keeps its CLI
+  for (let i = 0; i < 100 && liveTurnRuns().length > 1; i++) await sleep(100);
+  assert.equal(liveTurnRuns().length, 1, JSON.stringify(liveTurnRuns().map((r) => r.pid)));
 });
 
 test('no uncaught errors in the page', { skip }, () => {

@@ -36,8 +36,12 @@ export function sheetCorner(content, { r = 6, c = 5, lang = 'en' } = {}) {
   return { head: hasHeader(rows), rows: shown };
 }
 
-async function frame(el, a, dark, w, h, contain, scripts = false) {
+// a page `w` wide; `h` tall when it is fitted whole (`contain`), else its window has the box's
+// shape: all of it shows, and a component centred in it lands in the middle of the box
+async function frame(el, a, dark, w, h, contain, scripts = false, current = () => true) {
   const token = await call('serve_artifact', { kind: a.kind, content: a.content, dark });
+  // the box went out of reach meanwhile: a page that runs is not started off screen
+  if (!current()) return;
   const f = document.createElement('iframe');
   f.setAttribute('sandbox', scripts ? 'allow-scripts' : '');
   f.inert = true;
@@ -46,7 +50,8 @@ async function frame(el, a, dark, w, h, contain, scripts = false) {
   f.setAttribute('referrerpolicy', 'no-referrer');
   const fit = () => {
     const k = contain ? Math.min(el.clientWidth / w, el.clientHeight / h) : el.clientWidth / w;
-    f.style.cssText = `position:absolute;left:${contain ? (el.clientWidth - w * k) / 2 : 0}px;top:${contain ? (el.clientHeight - h * k) / 2 : 0}px;width:${w}px;height:${h}px;border:0;transform-origin:0 0;transform:scale(${k});pointer-events:none;background:${a.kind === 'text/html' ? '#fff' : 'transparent'}`;
+    const vh = contain ? h : k > 0 ? Math.round(el.clientHeight / k) : w;
+    f.style.cssText = `position:absolute;left:${contain ? (el.clientWidth - w * k) / 2 : 0}px;top:${contain ? (el.clientHeight - h * k) / 2 : 0}px;width:${w}px;height:${vh}px;border:0;transform-origin:0 0;transform:scale(${k});pointer-events:none;background:${a.kind === 'text/html' ? '#fff' : 'transparent'}`;
   };
   fit();
   f.src = artifactUrl(token);
@@ -77,16 +82,17 @@ function tile(el, a, iconName) {
 }
 
 /** Fill `el`, a card's preview box, with a picture of gallery item `a` ({kind, content, title}). */
-export async function renderPreview(el, a, { dark, lang, iconName }) {
+export async function renderPreview(el, a, { dark, lang, iconName, current }) {
   el.innerHTML = '';
   switch (a.kind) {
     case 'image/svg+xml':
       el.innerHTML = `<img alt="" src="${esc(svgUrl(a.content))}" style="width:100%;height:100%;object-fit:contain;padding:8px;box-sizing:border-box">`;
       return;
-    case 'text/html': return frame(el, a, dark, 1024, 680, false, /<script/i.test(a.content));
-    case 'application/vnd.ant.react': return frame(el, a, dark, 1024, 680, false, true);
-    case 'application/vnd.ant.mermaid': return frame(el, a, dark, 1024, 680, true, true);
-    case SLIDES: return frame(el, a, dark, 1920, 1080, true);
+    // 800 px wide, about the panel's width: a small component still shows at a readable size
+    case 'text/html': return frame(el, a, dark, 800, null, false, /<script/i.test(a.content), current);
+    case 'application/vnd.ant.react': return frame(el, a, dark, 800, null, false, true, current);
+    case 'application/vnd.ant.mermaid': return frame(el, a, dark, 1024, 680, true, true, current);
+    case SLIDES: return frame(el, a, dark, 1920, 1080, true, false, current);
     case 'text/markdown':
     case DOC: {
       const html = await call('render_markdown', { text: a.content.slice(0, 2500) });

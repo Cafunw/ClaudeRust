@@ -26,9 +26,14 @@ pub fn level_for(visible: bool, minimized: bool) -> u8 {
     }
 }
 
-/// Bring the WebView's memory target in line with the window's state.
+/// Bring the WebView's memory target in line with the window's state, and the kept Claude Code CLI's
+/// (`claudecode::window_seen`: it ends when the window stays hidden).
 pub fn sync(w: &tauri::WebviewWindow) {
+    use tauri::Manager;
     let level = level_for(w.is_visible().unwrap_or(true), w.is_minimized().unwrap_or(false));
+    if let Some(st) = w.try_state::<std::sync::Arc<crate::state::AppState>>() {
+        crate::claudecode::window_seen(&st, level == NORMAL);
+    }
     if LEVEL.swap(level, Ordering::SeqCst) != level {
         set_level(w, level);
     }

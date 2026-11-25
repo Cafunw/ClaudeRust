@@ -200,6 +200,38 @@ fn scan_cc_session(path: &Path) -> Option<Value> {
     }))
 }
 
+type ScanCache = HashMap<PathBuf, (i64, u64, Option<Value>)>;
+/// What `scan_cc_session` found in a file, kept while the file's time and size stay the same:
+/// Settings → Import shown again reads only the sessions that changed.
+static SCAN_CACHE: std::sync::LazyLock<std::sync::Mutex<ScanCache>> = std::sync::LazyLock::new(Default::default);
+// one scan at a time: a second one (the page shown again meanwhile) waits, then finds them cached
+static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `scan_cc_session` of each file, in their order, on a few threads, from the cache for a file
+/// that hasn't changed; `on_done(n)` after each of them (`n` done so far).
+fn scan_cc_sessions(files: &[PathBuf], on_done: impl Fn(usize) + Sync) -> Vec<Value> {
+    let _one = SCAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let scan = |f: &PathBuf| {
+        let key = (mtime_ms(f), std::fs::metadata(f).map_or(0, |m| m.len()));
+        let cache = || SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = cache().get(f).filter(|c| (c.0, c.1) == key).map(|c| c.2.clone());
+        let v = hit.unwrap_or_else(|| {
+            let v = scan_cc_session(f);
+            cache().insert(f.clone(), (key.0, key.1, v.clone()));
+            v
+        });
+        on_done(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+        v
+    };
+    let scan = &scan;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = files.chunks(files.len().div_ceil(threads).max(1)).map(|c| s.spawn(move || c.iter().map(scan).collect::<Vec<_>>())).collect();
+        parts.into_iter().flat_map(|p| p.join().unwrap_or_default()).flatten().collect()
+    })
+}
+
 /// A transcripts folder of ClaudeRust's own account chats: the CLI names it
 /// after the cwd, `<data dir>\chat-cli` of any copy (identifier
 /// `dev.clauderust.*`), every other character a '-'. They are chats of this
@@ -931,26 +963,12 @@ pub async fn import_scan(state: St<'_>) -> AppResult<Value> {
     let st = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let ours = crate::mcp::read_config(&st.mcp.config_path);
-        let imported = st.db.imported_keys().unwrap_or_default();
-
         let desktop_cfg = crate::mcp::claude_desktop_config_path().filter(|p| p.exists());
         let desktop_servers = desktop_cfg
             .as_ref()
             .map(|p| crate::mcp::read_config(p)["mcpServers"].as_object().cloned().unwrap_or_default())
             .unwrap_or_default();
         let desktop_dir = claude_desktop_dir().filter(|d| d.is_dir());
-
-        let files = cc_session_files();
-        let total = files.len();
-        let mut sessions: Vec<Value> = files
-            .iter()
-            .take(MAX_SESSIONS_LISTED)
-            .filter_map(|f| scan_cc_session(f))
-            .collect();
-        for s in &mut sessions {
-            let key = format!("claude-code:{}", s["session_id"].as_str().unwrap_or(""));
-            s["imported"] = json!(imported.contains(&key));
-        }
         let cc_dir = claude_code_dir().filter(|d| d.is_dir());
         json!({
             "desktop": {
@@ -963,8 +981,6 @@ pub async fn import_scan(state: St<'_>) -> AppResult<Value> {
             "claude_code": {
                 "found": cc_dir.is_some(),
                 "dir": cc_dir.map(|d| d.display().to_string()),
-                "sessions": sessions,
-                "total_sessions": total,
                 "mcp_servers": server_list(&cc_mcp_servers(), &ours),
             },
             "export_url": EXPORT_URL,
@@ -972,6 +988,30 @@ pub async fn import_scan(state: St<'_>) -> AppResult<Value> {
     })
     .await
     .map_err(|e| AppError::msg(e.to_string()))
+}
+
+/// The Claude Code sessions to offer, the newest first: the slow part of the scan (each file is
+/// read), apart from `import_scan` so the rest shows at once, and told as it goes (`import-scan-progress`).
+#[tauri::command]
+pub async fn import_scan_sessions(app: AppHandle, state: St<'_>) -> AppResult<Value> {
+    let st = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let imported = st.db.imported_keys().unwrap_or_default();
+        let files = cc_session_files();
+        let listed = &files[..files.len().min(MAX_SESSIONS_LISTED)];
+        let mut sessions = scan_cc_sessions(listed, |done| {
+            if done % 20 == 0 || done == listed.len() {
+                let _ = app.emit("import-scan-progress", json!({"done": done, "total": listed.len()}));
+            }
+        });
+        for s in &mut sessions {
+            let key = format!("claude-code:{}", s["session_id"].as_str().unwrap_or(""));
+            s["imported"] = json!(imported.contains(&key));
+        }
+        json!({"sessions": sessions, "total_sessions": files.len()})
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e)))
 }
 
 /// Copy MCP servers from Claude Desktop ("desktop") or Claude Code
@@ -1272,6 +1312,34 @@ mod tests {
         assert!(err.contains("already running"), "{err}");
         drop(first);
         drop(ImportGuard::acquire().unwrap());
+    }
+
+    #[test]
+    fn sessions_are_scanned_in_order_told_as_they_go_and_an_unchanged_file_is_not_read_again() {
+        let dir = std::env::temp_dir().join(format!("cr-scan-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = |text: &str| format!("{}\n", json!({"type": "user", "cwd": "/w", "message": {"content": text}}));
+        let files: Vec<PathBuf> = (0..30).map(|i| dir.join(format!("s{i:02}.jsonl"))).collect();
+        for (i, f) in files.iter().enumerate() {
+            std::fs::write(f, if i == 7 { "{\"type\":\"summary\"}\n".to_string() } else { session(&format!("q{i:02}")) }).unwrap();
+        }
+        let told = std::sync::Mutex::new(vec![]);
+        let titles = |v: &[Value]| v.iter().map(|s| s["title"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let first = scan_cc_sessions(&files, |n| told.lock().unwrap().push(n));
+        let want: Vec<String> = (0..30).filter(|&i| i != 7).map(|i| format!("q{i:02}")).collect();
+        assert_eq!(titles(&first), want, "in the files' order, the one without prompts left out");
+        let mut told = told.into_inner().unwrap();
+        told.sort_unstable();
+        assert_eq!(told, (1..=30).collect::<Vec<_>>(), "each file is told once");
+        // the same size and time: the cached summary, not the file (proof: its new words aren't read)
+        let when = std::fs::metadata(&files[0]).unwrap().modified().unwrap();
+        std::fs::write(&files[0], session("zzz")).unwrap();
+        std::fs::File::options().write(true).open(&files[0]).unwrap().set_modified(when).unwrap();
+        assert_eq!(titles(&scan_cc_sessions(&files[..1], |_| {})), ["q00"]);
+        // changed: read again
+        std::fs::write(&files[0], session("changed")).unwrap();
+        assert_eq!(titles(&scan_cc_sessions(&files[..1], |_| {})), ["changed"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

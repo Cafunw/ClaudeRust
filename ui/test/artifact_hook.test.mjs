@@ -5,9 +5,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
-const HOOK = readFileSync(new URL('../../src-tauri/src/artifact_guard.js', import.meta.url), 'utf8');
+const HOOK = source('../../src-tauri/src/artifact_guard.js');
 
 function frame() {
   const listeners = [];
@@ -75,7 +75,7 @@ test('window.open asks the app and opens nothing itself', () => {
 });
 
 test('the frame gets neither modals nor popups', () => {
-  const src = readFileSync(new URL('../js/artifacts.js', import.meta.url), 'utf8');
+  const src = source('../js/artifacts.js');
   const sandbox = src.match(/setAttribute\('sandbox', '([^']*)'\)/)[1].split(' ');
   for (const flag of ['allow-modals', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-same-origin']) assert.ok(!sandbox.includes(flag), flag);
   // the one exception: a deck or doc prints itself (PDF); its page is the app's runtime and its content runs no script

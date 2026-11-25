@@ -6,10 +6,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { ERROR_TEXT, codedMessage } from '../js/errors.js';
 import { errorText, friendlyError } from '../js/neterr.js';
 import { setLanguage, t } from '../js/i18n.js';
+import { source } from './source.mjs';
 
 const SRC = new URL('../../src-tauri/src/', import.meta.url);
-const rust = readdirSync(SRC).filter((f) => f.endsWith('.rs')).map((f) => [f, readFileSync(new URL(f, SRC), 'utf8')]);
-const i18n = readFileSync(new URL('../js/i18n.js', import.meta.url), 'utf8');
+const rust = readdirSync(SRC).filter((f) => f.endsWith('.rs')).map((f) => [f, source(new URL(f, SRC))]);
+const i18n = source('../js/i18n.js');
 const [enBlock, trBlock] = i18n.split(/\nconst tr = \{/);
 const ALL = { path: 'C:/p', cmd: 'commit', s: 900, n: 2, name: 'x', branch: 'b', repo: 'C:/r', reason: 'r', shell: 'pwsh', line: 3, column: 4, method: 'initialize', tool: 'T', server: 'S', io: 'NotFound', resets_at: 4102444800000 };
 

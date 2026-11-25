@@ -867,6 +867,14 @@ const en = {
   mcp_config_reloaded: 'The MCP config file changed: servers reloaded.',
   art_interrupted: 'Interrupted', art_interrupted_note: 'This artifact was cut off before it was finished, so parts of it may be missing or not work.',
   sc_panes_term: 'In the terminal, these keys go to the shell.',
+  cc_not_at: 'No Claude Code at {path}.', cc_not_cli: '{path} didn’t answer as Claude Code (it gave no version).',
+  tool_hint_read_only: 'Read-only', tool_hint_destructive: 'Destructive', elicit_open: 'Open',
+  elicit_url_note: 'The server asks you to open this page in your browser. It opens only when you click Open.',
+  elicit_url_site: 'Site: {host}', elicit_url_punycode: 'This address uses non-Latin letters, which can imitate the name of another site. Open it only if you expected it.',
+  errk_mcp_protocol_unsupported: 'The MCP server “{name}” speaks protocol version {version}, which ClaudeRust doesn’t support.',
+  errk_mcp_url_required: 'The MCP server needs you to finish a step in your browser first; then ask Claude to try again.',
+  errk_mcp_resource_unreadable: 'The MCP resource {uri} has nothing that can be attached.',
+  imp_cc_reading: 'Reading Claude Code sessions… {done}/{total}',
 };
 
 const tr = {
@@ -1736,6 +1744,14 @@ const tr = {
   mcp_config_reloaded: 'MCP yapılandırma dosyası değişti: sunucular yeniden yüklendi.',
   art_interrupted: 'Yarıda kesildi', art_interrupted_note: 'Bu artifact bitmeden kesildi; bazı kısımları eksik olabilir ya da çalışmayabilir.',
   sc_panes_term: 'Terminaldeyken bu tuşlar kabuğa gider.',
+  cc_not_at: '{path} konumunda Claude Code yok.', cc_not_cli: '{path}, Claude Code gibi yanıt vermedi (sürüm bildirmedi).',
+  tool_hint_read_only: 'Salt okunur', tool_hint_destructive: 'Veri silebilir', elicit_open: 'Aç',
+  elicit_url_note: 'Sunucu bu sayfayı tarayıcınızda açmanızı istiyor. Sayfa yalnızca Aç’a tıkladığınızda açılır.',
+  elicit_url_site: 'Alan adı: {host}', elicit_url_punycode: 'Bu adres, başka bir sitenin adını taklit edebilen Latin dışı harfler içeriyor. Yalnızca bunu bekliyorsanız açın.',
+  errk_mcp_protocol_unsupported: '“{name}” MCP sunucusu, ClaudeRust’ın desteklemediği {version} protokol sürümünü kullanıyor.',
+  errk_mcp_url_required: 'MCP sunucusu önce tarayıcınızda bir adımı tamamlamanızı istiyor; ardından Claude’dan yeniden denemesini isteyin.',
+  errk_mcp_resource_unreadable: '{uri} MCP kaynağında eklenebilecek bir şey yok.',
+  imp_cc_reading: 'Claude Code oturumları okunuyor… {done}/{total}',
 };
 
 const dicts = { en, tr };

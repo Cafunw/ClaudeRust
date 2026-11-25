@@ -99,23 +99,31 @@ export async function renderImport(body) {
   dropListener = listener;
   body.appendChild(chats);
 
-  // --- local data (scan) -------------------------------------------------
-  const scanning = h(`<div class="small muted" style="padding:12px 0">${esc(t('imp_scanning'))}</div>`);
+  // --- local data: each source once it's found; the sessions (each file read) as they're read
+  const scanning = h(`<div class="small muted imp-wait"><span class="spinner"></span><span>${esc(t('imp_scanning'))}</span></div>`);
   body.appendChild(scanning);
   let scan;
   try { scan = await call('import_scan'); } catch (e) { scanning.textContent = errorText(e); return; }
   scanning.remove();
   if (scan.export_url) exportUrl = scan.export_url;
 
-  body.appendChild(ccSessions(scan.claude_code));
-  body.appendChild(desktopConnectors(scan.desktop));
-  body.appendChild(serverImport(t('imp_cc_mcp'), t('imp_cc_mcp_d'), 'claude-code', scan.claude_code.mcp_servers, scan.claude_code.found));
+  const [ccSec, ccBody] = section(t('imp_cc'), t('imp_cc_d'));
+  const reading = scanning.cloneNode(true);
+  ccBody.appendChild(reading);
+  body.append(ccSec, desktopConnectors(scan.desktop), serverImport(t('imp_cc_mcp'), t('imp_cc_mcp_d'), 'claude-code', scan.claude_code.mcp_servers, scan.claude_code.found));
+  const unlisten = await onBackend('import-scan-progress', (p) => {
+    if (p && p.total) reading.lastChild.textContent = t('imp_cc_reading', { done: p.done, total: p.total });
+  });
+  try {
+    const r = await call('import_scan_sessions');
+    reading.remove();
+    ccSessions(r, ccBody);
+  } catch (e) { reading.textContent = errorText(e); } finally { unlisten(); }
 }
 
-function ccSessions(cc) {
-  const [sec, b] = section(t('imp_cc'), t('imp_cc_d'));
+function ccSessions(cc, b) {
   const sessions = cc.sessions || [];
-  if (!sessions.length) { b.appendChild(h(`<div class="small muted">${esc(t('imp_none'))}</div>`)); return sec; }
+  if (!sessions.length) { b.appendChild(h(`<div class="small muted">${esc(t('imp_none'))}</div>`)); return; }
   const list = h('<div class="imp-list"></div>');
   const picked = new Set();
   const go = button('', 'sm accent');
@@ -129,8 +137,8 @@ function ccSessions(cc) {
     const folder = (s.cwd || '').split(/[\\/]/).filter(Boolean).pop() || s.cwd || '';
     const row = h(`<label class="imp-row ${s.imported ? 'done' : ''}">
       <input type="checkbox" ${s.imported ? 'disabled' : ''}>
-      <span class="grow"><span class="n ellipsis">${esc(s.title || s.session_id)}</span>
-        <span class="m small muted ellipsis">${icon('folder', 12)} <span title="${esc(s.cwd || '')}">${esc(folder)}</span> · ${esc(relTime(s.updated_at))} · ${esc(t(s.prompts === 1 ? 'imp_prompt_one' : 'imp_prompts', { n: s.prompts }))}</span></span>
+      <span class="grow"><span class="n ellipsis" title="${esc(s.title || s.session_id)}">${esc(s.title || s.session_id)}</span>
+        <span class="m small muted ellipsis" title="${esc(`${s.cwd || ''} · ${relTime(s.updated_at)} · ${t(s.prompts === 1 ? 'imp_prompt_one' : 'imp_prompts', { n: s.prompts })}`)}">${icon('folder', 12)} <span>${esc(folder)}</span> · ${esc(relTime(s.updated_at))} · ${esc(t(s.prompts === 1 ? 'imp_prompt_one' : 'imp_prompts', { n: s.prompts }))}</span></span>
       ${s.imported ? `<span class="badge">${esc(t('imp_imported'))}</span>` : ''}</label>`);
     const cbx = row.querySelector('input');
     cbx.addEventListener('change', () => { if (cbx.checked) picked.add(s.path); else picked.delete(s.path); sync(); });
@@ -173,7 +181,6 @@ function ccSessions(cc) {
   const actions = h('<div class="imp-actions"></div>');
   actions.append(go, all);
   b.append(actions, status);
-  return sec;
 }
 
 function serverRows(servers) {
@@ -234,7 +241,7 @@ function desktopConnectors(d) {
   for (const x of exts) {
     const row = h(`<label class="imp-row ${x.installed ? 'done' : ''}"><input type="checkbox" ${x.installed ? 'disabled' : 'checked'}>
       <span class="grow"><span class="n">${esc(x.name)} <span class="small muted" style="font-weight:400">${esc(x.version || '')}</span></span>
-      ${x.description ? `<span class="m small muted ellipsis">${esc(x.description)}</span>` : ''}</span>
+      ${x.description ? `<span class="m small muted ellipsis" title="${esc(x.description)}">${esc(x.description)}</span>` : ''}</span>
       ${x.installed ? `<span class="badge">${esc(t('imp_exists'))}</span>` : x.enabled ? '' : `<span class="badge muted">${esc(t('imp_off_there'))}</span>`}</label>`);
     if (!x.installed) picked.add(x.id);
     row.querySelector('input').addEventListener('change', (e) => { if (e.target.checked) picked.add(x.id); else picked.delete(x.id); sync(); });

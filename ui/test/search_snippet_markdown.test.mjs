@@ -5,6 +5,7 @@ import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { snippetHtml } from '../js/util.js';
+import { source } from './source.mjs';
 
 test('emphasis, links, images and code spans become their text', () => {
   assert.equal(snippetHtml('# Heading one\nSome **bold**, *italic*, ~~strike~~, `inline code` and a [link](https…'),
@@ -22,8 +23,7 @@ test('stars and underscores that are not Markdown stay', () => {
 });
 
 test('the match reads at 4.5:1 in both themes, on the selected row too', async () => {
-  const { readFileSync } = await import('node:fs');
-  const css = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8');
+  const css = source('../css/app.css');
   assert.match(css, /\.palette \.res mark, \.list-item \.d mark \{ background: var\(--accent-soft\); color: var\(--text-0\);/);
   const [light, dark] = css.split(':root[data-theme="dark"] {');
   const token = (block, name) => block.split(`${name}: `)[1].split(';')[0].trim();

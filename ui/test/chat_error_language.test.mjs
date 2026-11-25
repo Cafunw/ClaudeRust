@@ -4,9 +4,9 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { setLanguage, t } from '../js/i18n.js';
 import { errorMessage, artifactKindText } from '../js/parts.js';
+import { source } from './source.mjs';
 
 test('a server error is said in Turkish, with its HTTP code', () => {
   setLanguage('tr');
@@ -41,7 +41,7 @@ test('an artifact\'s kind is said in the app\'s language; names stay names', () 
 
 test('no English left in the chat UI\'s user card and copy fallback', () => {
   for (const [file, english] of [['sidebar.js', "|| 'You'"], ['parts.js', "toast('Copy failed'"]]) {
-    const src = readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8');
+    const src = source(`../js/${file}`);
     assert.ok(!src.includes(english), `${file}: ${english}`);
   }
   for (const lang of ['en', 'tr']) {

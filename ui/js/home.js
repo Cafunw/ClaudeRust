@@ -2,7 +2,7 @@
 import { icon, spark } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit, displayName, newChatModel } from './store.js';
+import { store, emit, displayName, newChatModel, newChatEffort } from './store.js';
 import { $, esc, h } from './util.js';
 import { createComposer, researchOffered } from './composer.js';
 import * as keymap from './keymap.js';
@@ -29,14 +29,25 @@ window.addEventListener('keydown', (e) => {
   if (incognitoOk && !e.defaultPrevented && keymap.matches(e, 'incognito')) { e.preventDefault(); newIncognitoChat(); }
 });
 
-export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null, incognito = false }) {
+/** What send_message makes a new chat or code session from: the composer's choices (`st`). */
+export function newConversation(st, { projectId = null, kind = 'chat', cwd = null, engine = null, worktree = null, incognito = false } = {}) {
   const options = { thinking: st.thinking, effort: st.effort, web_search: st.web_search, style: st.style, disabled_servers: st.disabled_servers, disabled_tools: st.disabled_tools, tool_access: st.tool_access, fast: !!st.fast, research: !!st.research };
-  const research = kind === 'chat' && !!st.research && researchOffered();
   if (kind === 'chat' && incognito) options.incognito = true;
   if (kind === 'code') { options.permission_mode = st.permission_mode; options.ultracode = engine === 'claude-code' ? st.ultracode ?? null : null; if (engine) options.engine = engine; if (worktree !== null) options.worktree = worktree; }
+  return { kind, model: st.model, project_id: projectId || null, cwd, options };
+}
+
+/** The first key typed in a new chat's composer starts that chat's Claude Code CLI ahead of the send
+ *  (claudecode::prewarm: nothing on the API engine, for incognito chats or with a spending limit). */
+export function prewarmOnInput(composer, opts) {
+  $('textarea', composer.el).addEventListener('input', () => call('prewarm_chat', { req: newConversation(composer.state, opts) }).catch(() => {}), { once: true });
+}
+
+export async function startConversation({ text, atts, st, projectId, kind = 'chat', cwd = null, engine = null, worktree = null, incognito = false }) {
+  const research = kind === 'chat' && !!st.research && researchOffered();
   const r = await call('send_message', {
     req: {
-      new_conversation: { kind, model: st.model, project_id: projectId || null, cwd, options },
+      new_conversation: newConversation(st, { projectId, kind, cwd, engine, worktree, incognito }),
       text,
       attachment_ids: atts.map((a) => a.id).filter(Boolean),
       research,
@@ -69,9 +80,10 @@ export function renderNewChat(view, { projectId = null, text = '', incognito = f
     placeholder: t('help_today'),
     // nothing typed in an incognito chat is kept
     draftKey: inc ? null : 'new',
-    initial: { model: newChatModel('chat') },
+    initial: { model: newChatModel('chat'), effort: newChatEffort('chat') },
     onSend: (txt, atts, st) => startConversation({ text: txt, atts, st, projectId, incognito: inc }),
   });
+  prewarmOnInput(composer, { projectId, incognito: inc });
   $('.composer-wrap', view).append(limitBanner(), composer.el);
   const pill = $('.project-pill button', view);
   if (pill) pill.onclick = () => emit('navigate', { name: 'project', params: { id: projectId } });

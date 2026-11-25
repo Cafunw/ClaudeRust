@@ -3,10 +3,12 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { source } from './source.mjs';
+import { pathToFileURL } from 'node:url';
 
 // Words that read the same in every language: product and key names, a git
 // term the Turkish UI keeps.
@@ -43,6 +45,6 @@ test('no template literal in ui/js puts visible English beside translated text',
   const walk = (dir) => { for (const e of readdirSync(dir, { withFileTypes: true })) { const p = join(dir, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.js')) files.push(p); } };
   walk(fileURLToPath(new URL('../js/', import.meta.url)));
   assert.ok(files.length > 50, `${files.length} files`);
-  const found = files.flatMap((f) => englishBesideT(readFileSync(f, 'utf8')).map((x) => `${f}:${x}`));
+  const found = files.flatMap((f) => englishBesideT(source(pathToFileURL(f))).map((x) => `${f}:${x}`));
   assert.deepEqual(found, []);
 });

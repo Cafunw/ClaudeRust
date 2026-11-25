@@ -2,10 +2,10 @@
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { call } from './api.js';
-import { store, emit, newChatModel } from './store.js';
+import { store, emit, newChatModel, newChatEffort } from './store.js';
 import { $, esc, h, modal, button, relTime, toast, errorToast, confirmDialog, promptDialog, humanSize, showMenu, fileToBase64, searchToggle, convTitle, hasWords } from './util.js';
 import { createComposer, attachmentError } from './composer.js';
-import { startConversation } from './home.js';
+import { startConversation, prewarmOnInput } from './home.js';
 import { conversationMenu } from './chat.js';
 
 const CAPACITY_CHARS = 2_000_000;
@@ -106,9 +106,10 @@ export async function renderProject(view, id) {
 
   const composer = createComposer({
     mode: 'chat', placeholder: t('start_in_project'), draftKey: 'project-' + id,
-    initial: { model: newChatModel('chat') },
+    initial: { model: newChatModel('chat'), effort: newChatEffort('chat') },
     onSend: (text, atts, st) => startConversation({ text, atts, st, projectId: id }),
   });
+  prewarmOnInput(composer, { projectId: id });
   $('.composer-slot', view).appendChild(composer.el);
 
   const chatsEl = $('.proj-chats', view);

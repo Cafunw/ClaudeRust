@@ -5,9 +5,10 @@ import { attachSuggest } from './suggest.js';
 import { icon } from './icons.js';
 import { t, tOr } from './i18n.js';
 import { call, isMac } from './api.js';
-import { store, modelInfo, emit, rememberModel } from './store.js';
+import { store, modelInfo, emit, rememberModel, rememberEffort } from './store.js';
 import { $, esc, h, showMenu, closeMenu, autoGrow, fileToBase64, attachmentSub, errorToast, toast, modal, button } from './util.js';
 import { hookPreview } from './attachment_preview.js';
+import { expandTemplate, templateForm } from './mcp_resources.js';
 
 const PASTE_AS_FILE = 6000;
 /** The preset styles (prompts.rs style_prompt), labelled style_<id>. */
@@ -159,6 +160,7 @@ export function createComposer(opts) {
   function persist(patch) {
     Object.assign(st, patch);
     if ('model' in patch) rememberModel(mode, patch.model);
+    if ('effort' in patch) rememberEffort(mode, patch.effort);
     refreshBar();
     opts.onOptions && opts.onOptions(patch);
   }
@@ -555,8 +557,8 @@ export function createComposer(opts) {
           try {
             const r = await call('mcp_list_prompts');
             const sub = [];
-            for (const p of r.prompts) sub.push({ label: p.name, sub: `${p.server}${p.description ? ' · ' + p.description : ''}`, icon: 'zap', onClick: () => usePrompt(p) });
-            for (const res of r.resources) sub.push({ label: res.name || res.uri, sub: res.server, icon: 'fileText', onClick: async () => { try { addStaged(await call('mcp_read_resource', { server: res.server, uri: res.uri })); } catch (e) { errorToast(e); } } });
+            for (const p of r.prompts) sub.push({ label: p.title || p.name, sub: `${p.server}${p.description ? ' · ' + p.description : ''}`, icon: 'zap', onClick: () => usePrompt(p) });
+            for (const res of r.resources) sub.push({ label: res.title || res.name || res.uri || res.uriTemplate, sub: res.uriTemplate ? `${res.server} · ${res.uriTemplate}` : res.server, icon: res.uriTemplate ? 'edit' : 'fileText', onClick: () => useResource(res) });
             if (!sub.length) sub.push({ label: t('nothing_here'), disabled: true });
             showMenu(anchor, sub, { placement: 'top-start', width: 300 });
           } catch (e) { errorToast(e); }
@@ -570,6 +572,14 @@ export function createComposer(opts) {
     const args = await promptArgs(p);
     if (!args) return;
     try { addStaged(await call('mcp_get_prompt', { server: p.server, name: p.name, args })); } catch (e) { errorToast(e); }
+  }
+
+  /** Attach MCP resource `res`, one attachment per content; a template's variables are asked for first. */
+  async function useResource(res) {
+    const args = res.uriTemplate ? await promptArgs(templateForm(res)) : {};
+    if (!args) return;
+    const uri = res.uriTemplate ? expandTemplate(res.uriTemplate, args) : res.uri;
+    try { (await call('mcp_read_resource', { server: res.server, uri })).forEach(addStaged); } catch (e) { errorToast(e); }
   }
 
   function modeMenu(anchor) {

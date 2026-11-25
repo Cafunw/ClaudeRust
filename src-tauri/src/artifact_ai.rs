@@ -19,10 +19,9 @@ pub const MAX_PROMPT_CHARS: usize = 20_000;
 /// The app's system prompt for every call: the frame's prompt is only ever the user message.
 pub const SYSTEM_PROMPT: &str = "You answer one request from an artifact: a small interactive app, made by Claude, that the user is running. Do what the request asks and output only the requested content, with no preamble. This is a single-turn call without tools, so you can't ask anything back: if the request is ambiguous, make a reasonable interpretation and proceed.";
 const MAX_OUTPUT_TOKENS: u32 = 2048;
-/// Calls one artifact may make in a minute.
+/// Calls one artifact may make in a minute: a guard against a runaway loop. Beyond it, as on claude.ai, the
+/// account's or key's own limits decide.
 const PER_ARTIFACT_PER_MINUTE: usize = 10;
-/// Calls the artifacts of one conversation may make until the app restarts.
-const PER_CONVERSATION: u32 = 100;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MINUTE: Duration = Duration::from_secs(60);
 
@@ -30,16 +29,11 @@ const MINUTE: Duration = Duration::from_secs(60);
 struct Limits {
     /// (conversation, artifact) -> times of its calls in the last minute
     recent: HashMap<(String, String), VecDeque<Instant>>,
-    /// conversation -> calls so far
-    used: HashMap<String, u32>,
 }
 
 impl Limits {
-    /// Count a call of `artifact` in `conv` at `now`, or say which limit it is over.
+    /// Count a call of `artifact` in `conv` at `now`, or say that it is over the limit.
     fn take(&mut self, conv: &str, artifact: &str, now: Instant) -> Result<(), String> {
-        if self.used.get(conv).copied().unwrap_or(0) >= PER_CONVERSATION {
-            return Err(format!("This conversation's artifacts have asked Claude {PER_CONVERSATION} times, the most until ClaudeRust restarts."));
-        }
         let recent = self.recent.entry((conv.to_string(), artifact.to_string())).or_default();
         while recent.front().is_some_and(|t| now.duration_since(*t) >= MINUTE) {
             recent.pop_front();
@@ -48,7 +42,6 @@ impl Limits {
             return Err(format!("This artifact asked Claude {PER_ARTIFACT_PER_MINUTE} times in a minute: wait a moment and try again."));
         }
         recent.push_back(now);
-        *self.used.entry(conv.to_string()).or_default() += 1;
         Ok(())
     }
 }
@@ -140,19 +133,13 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_has_a_cap_for_all_its_artifacts() {
+    fn a_conversation_has_no_cap_beyond_the_burst_guard() {
         let mut l = Limits::default();
         let t0 = Instant::now();
-        // spread over time and artifacts, so the per-minute limit doesn't apply
-        for i in 0..PER_CONVERSATION {
-            let at = t0 + Duration::from_secs(u64::from(i) * 7);
-            assert!(l.take("c", &format!("a{}", i % 3), at).is_ok(), "call {i}");
+        // a game asking every 7 s for hours, over three artifacts: never refused
+        for i in 0..2000u64 {
+            assert!(l.take("c", &format!("a{}", i % 3), t0 + Duration::from_secs(i * 7)).is_ok(), "call {i}");
         }
-        let later = t0 + Duration::from_secs(3600);
-        assert!(l.take("c", "fresh", later).unwrap_err().contains("restarts"));
-        // a refused call isn't counted, and other conversations are apart
-        assert_eq!(l.used["c"], PER_CONVERSATION);
-        assert!(l.take("d", "a0", later).is_ok());
     }
 
     #[test]
@@ -176,7 +163,7 @@ mod tests {
         assert!(ask(&other_provider.id, "hi").contains("another provider"));
         assert!(check(&other_provider.id).unwrap_err().contains("another provider"));
         for id in [&account.id, &other_provider.id] {
-            assert!(!LIMITS.lock().used.contains_key(id.as_str()), "{id}");
+            assert!(!LIMITS.lock().recent.contains_key(&(id.clone(), "a".to_string())), "{id}");
         }
         st.settings.write().chat_engine = "api".into();
         assert_eq!(check(&account.id).unwrap(), "api");

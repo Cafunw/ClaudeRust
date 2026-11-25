@@ -3,7 +3,7 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
 // what sidebar.js's imports touch when they load
 globalThis.window.matchMedia = () => ({ matches: false, addEventListener() {} });
@@ -27,5 +27,5 @@ test('a refresh after a turn reads the chats only; any other refresh the section
     await refreshSidebar(arg);
     assert.deepEqual(asked.sort(), ['list_conversations', 'sections_list', 'sections_list'], String(arg));
   }
-  assert.match(readFileSync(new URL('../js/sidebar.js', import.meta.url), 'utf8'), /soon = setTimeout\(\(\) => \{ soon = null; refreshSidebar\(\{ sections: false \}\); \}, 250\);/, 'backend events');
+  assert.match(source('../js/sidebar.js'), /soon = setTimeout\(\(\) => \{ soon = null; refreshSidebar\(\{ sections: false \}\); \}, 250\);/, 'backend events');
 });

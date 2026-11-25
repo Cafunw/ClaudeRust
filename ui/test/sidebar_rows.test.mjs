@@ -3,11 +3,11 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { contrast } from '../e2e/contrast.mjs';
+import { source } from './source.mjs';
 
 test('every sidebar nav button has a name and a tooltip, for the folded rail', () => {
-  const src = readFileSync(new URL('../js/sidebar.js', import.meta.url), 'utf8');
+  const src = source('../js/sidebar.js');
   const row = src.match(/const row = \(nav, ic, label, kbd = ''\) => `<button class="nav-item"[^>]*>/);
   assert.ok(row, 'the nav row template');
   assert.match(row[0], /aria-label="\$\{esc\(label\)\}"/);
@@ -15,7 +15,7 @@ test('every sidebar nav button has a name and a tooltip, for the folded rail', (
 });
 
 // --------------------------------------------------- sidebar rows' contrast
-const CSS = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8');
+const CSS = source('../css/app.css');
 function tokens(sel) {
   const at = CSS.indexOf(sel + ' {');
   const body = CSS.slice(CSS.indexOf('{', at) + 1, CSS.indexOf('}', at));

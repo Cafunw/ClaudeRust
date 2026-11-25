@@ -105,6 +105,11 @@ export function rememberModel(mode, model) {
   saveLocal({ [`lastModel_${mode}`]: { model, def: defaultModel(mode) } });
 }
 
+/** The thinking effort a new chat or code session starts at: the one last picked in that mode
+ *  (null: the model's own). A model without that level runs at its own (composer.js effortOf). */
+export const newChatEffort = (mode) => loadLocal()[`lastEffort_${mode}`] ?? null;
+export const rememberEffort = (mode, effort) => saveLocal({ [`lastEffort_${mode}`]: effort });
+
 // a pending draft write must not be lost when the window closes
 window.addEventListener('pagehide', () => store.drafts.flush());
 window.addEventListener('beforeunload', () => store.drafts.flush());

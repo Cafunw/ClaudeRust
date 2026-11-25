@@ -240,6 +240,11 @@ const MIGRATIONS: &[&str] = &[
     // 4: chat memory, one text per scope
     "CREATE TABLE chat_memory (scope TEXT PRIMARY KEY, text TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '[]',
        updated_at INTEGER NOT NULL, synthesized_at INTEGER NOT NULL DEFAULT 0);",
+    // 5: what artifacts keep with window.storage, per artifact (scope "<conversation>/<artifact>"),
+    // its shared keys apart; gone with the conversation (an incognito one's too)
+    "CREATE TABLE artifact_storage (conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+       scope TEXT NOT NULL, shared INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (scope, shared, key));
+     CREATE INDEX idx_artifact_storage_conv ON artifact_storage(conversation_id);",
 ];
 
 fn conv_from_row(r: &Row) -> rusqlite::Result<Conversation> {
@@ -1348,6 +1353,66 @@ impl Db {
         Ok(())
     }
 
+    // -------------------------------------------------------- artifact storage
+
+    /// The value of `key` among what artifact `scope` keeps (its `shared` keys or its own).
+    pub fn storage_get(&self, scope: &str, shared: bool, key: &str) -> AppResult<Option<String>> {
+        let c = self.conn.lock();
+        Ok(c.query_row("SELECT value FROM artifact_storage WHERE scope=?1 AND shared=?2 AND key=?3", params![scope, shared, key], |r| r.get(0)).optional()?)
+    }
+
+    /// Its keys that start with `prefix`, in order.
+    pub fn storage_keys(&self, scope: &str, shared: bool, prefix: &str) -> AppResult<Vec<String>> {
+        let c = self.conn.lock();
+        let mut st = c.prepare("SELECT key FROM artifact_storage WHERE scope=?1 AND shared=?2 ORDER BY key")?;
+        let keys = st.query_map(params![scope, shared], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(keys.into_iter().filter(|k| k.starts_with(prefix)).collect())
+    }
+
+    /// Keep `value` under `key` for artifact `scope` of conversation `conv`, unless
+    /// all its keys and values, own and shared, would then hold more than
+    /// `budget` bytes: false, and nothing changed.
+    pub fn storage_set(&self, conv: &str, scope: &str, shared: bool, key: &str, value: &str, budget: usize) -> AppResult<bool> {
+        let mut c = self.conn.lock();
+        let tx = c.transaction()?;
+        let others: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(length(CAST(key AS BLOB)) + length(CAST(value AS BLOB))), 0) FROM artifact_storage WHERE scope=?1 AND NOT (shared=?2 AND key=?3)",
+            params![scope, shared, key],
+            |r| r.get(0),
+        )?;
+        if others as usize + key.len() + value.len() > budget {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO artifact_storage(conversation_id,scope,shared,key,value) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scope,shared,key) DO UPDATE SET value=excluded.value",
+            params![conv, scope, shared, key, value],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Remove `key`: whether it was there.
+    pub fn storage_delete(&self, scope: &str, shared: bool, key: &str) -> AppResult<bool> {
+        Ok(self.conn.lock().execute("DELETE FROM artifact_storage WHERE scope=?1 AND shared=?2 AND key=?3", params![scope, shared, key])? == 1)
+    }
+
+    /// Add what an older version kept elsewhere: (conversation, scope, shared, key, value)
+    /// rows, a key already here kept as it is, those of a conversation that is gone
+    /// left out. How many were added.
+    pub fn storage_import(&self, rows: &[(String, String, bool, String, String)]) -> AppResult<usize> {
+        let mut c = self.conn.lock();
+        let tx = c.transaction()?;
+        let mut added = 0;
+        for (conv, scope, shared, key, value) in rows {
+            added += tx.execute(
+                "INSERT OR IGNORE INTO artifact_storage(conversation_id,scope,shared,key,value) SELECT ?1,?2,?3,?4,?5 WHERE EXISTS (SELECT 1 FROM conversations WHERE id=?1)",
+                params![conv, scope, shared, key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
     /// The chats a memory is written from, most recently updated first: not
     /// incognito, answered, updated after `since`; those of `project`, or
     /// (None) those outside any project, with `every_project` those of any
@@ -1556,9 +1621,10 @@ mod tests {
         {
             let c = db.conn.lock();
             assert_eq!(version(&c), latest);
-            assert!(has_index(&c, "idx_messages_unfinished") && has_index(&c, "idx_messages_typed"));
+            assert!(has_index(&c, "idx_messages_unfinished") && has_index(&c, "idx_messages_typed") && has_index(&c, "idx_artifact_storage_conv"));
         }
         assert_eq!(db.conv_get("c").unwrap().model, "m");
+        assert!(db.storage_set("c", "c/a", false, "k", "v", 100).unwrap(), "an older chat's artifacts can store");
         assert_eq!(db.mark_interrupted().unwrap(), 1, "the new index finds the old row");
         assert_eq!(db.msg_get("a").unwrap().meta["stopped"], true);
         drop(db);
@@ -1968,5 +2034,45 @@ mod tests {
         assert!(hits[0].snippet.contains('\u{1}') && hits[0].snippet.contains('\u{2}'));
         assert_eq!(ids("GÜNEŞE yaprak"), vec![body]);
         assert!(ids("cicek gezisi").is_empty(), "the words of one title or one message");
+    }
+
+    #[test]
+    fn artifact_storage_is_kept_per_artifact_within_its_budget() {
+        let db = Db::open_in_memory().unwrap();
+        let c = db.conv_create("chat", "m", None, None, &json!({})).unwrap().id;
+        let (a, b) = (format!("{c}/a"), format!("{c}/b"));
+        assert!(db.storage_set(&c, &a, false, "k", "mine", 100).unwrap());
+        assert!(db.storage_set(&c, &a, true, "k", "ours", 100).unwrap());
+        assert!(db.storage_set(&c, &a, false, "k2", "x", 100).unwrap());
+        assert_eq!(db.storage_get(&a, false, "k").unwrap().as_deref(), Some("mine"));
+        assert_eq!(db.storage_get(&a, true, "k").unwrap().as_deref(), Some("ours"));
+        assert_eq!(db.storage_get(&b, false, "k").unwrap(), None);
+        assert_eq!(db.storage_keys(&a, false, "").unwrap(), ["k", "k2"]);
+        assert_eq!(db.storage_keys(&a, false, "k2").unwrap(), ["k2"]);
+        // the budget counts the artifact's own and shared keys and values, a replaced value once
+        assert!(!db.storage_set(&c, &a, false, "big", &"v".repeat(90), 100).unwrap());
+        assert_eq!(db.storage_get(&a, false, "big").unwrap(), None);
+        assert!(db.storage_set(&c, &a, false, "k", &"v".repeat(80), 100).unwrap());
+        // another artifact has a budget of its own
+        assert!(db.storage_set(&c, &b, false, "big", &"v".repeat(90), 100).unwrap());
+        assert!(db.storage_delete(&a, false, "k2").unwrap());
+        assert!(!db.storage_delete(&a, false, "k2").unwrap());
+        // gone with the conversation
+        db.conv_delete(&c).unwrap();
+        assert_eq!(db.storage_get(&a, true, "k").unwrap(), None);
+        assert_eq!(db.conn.lock().query_row("SELECT COUNT(*) FROM artifact_storage", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn artifact_storage_moved_from_an_older_version_skips_what_is_gone_or_already_here() {
+        let db = Db::open_in_memory().unwrap();
+        let c = db.conv_create("chat", "m", None, None, &json!({})).unwrap().id;
+        let scope = format!("{c}/a");
+        db.storage_set(&c, &scope, false, "k", "newer", 1000).unwrap();
+        let row = |conv: &str, key: &str, value: &str| (conv.to_string(), format!("{conv}/a"), false, key.to_string(), value.to_string());
+        let added = db.storage_import(&[row(&c, "k", "older"), row(&c, "k2", "v"), row("deleted-chat", "k", "v")]).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(db.storage_get(&scope, false, "k").unwrap().as_deref(), Some("newer"));
+        assert_eq!(db.storage_get(&scope, false, "k2").unwrap().as_deref(), Some("v"));
     }
 }

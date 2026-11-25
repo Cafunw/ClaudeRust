@@ -16,6 +16,7 @@ use clauderust_lib::util::new_id;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 use tauri::test::MockRuntime;
@@ -32,12 +33,13 @@ use tokio_util::sync::CancellationToken;
 /// output tokens (thinking included) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is lower, and exits. Then, as the CLI
 /// does, it ends when its input does; until then a message or request that comes in (a chat's kept CLI: its next
 /// turn, a title) plays the next list.
-/// Input that isn't JSON (a title's conversation) is logged as its text. Every log line has the process's pid.
+/// Input that isn't JSON (a title's conversation) is logged as its text. Every log line has the process's pid and
+/// the time.
 const FAKE_CLI: &str = r#"
 const fs = require("fs");
 const path = require("path");
 const at = (f) => path.join(__dirname, f);
-const log = (o) => fs.appendFileSync(at("log.jsonl"), JSON.stringify({ pid: process.pid, ...o }) + "\n");
+const log = (o) => fs.appendFileSync(at("log.jsonl"), JSON.stringify({ pid: process.pid, t: Date.now(), ...o }) + "\n");
 const next = () => {
   const runs = JSON.parse(fs.readFileSync(at("script.json"), "utf8"));
   const steps = runs.shift() || [];
@@ -95,6 +97,9 @@ struct Run {
     pid: u32,
     input: Vec<Value>,
     exit: Option<i64>,
+    /// when it started and exited, in ms since the epoch
+    started: u64,
+    ended: Option<u64>,
 }
 
 impl Run {
@@ -143,10 +148,11 @@ impl Cli {
             let pid = v["pid"].as_u64().unwrap_or_default() as u32;
             if let Some(a) = v["argv"].as_array() {
                 let args = a.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect();
-                out.push(Run { args, prompt: v["prompt"].as_str().map(String::from), pid, input: vec![], exit: None });
+                out.push(Run { args, prompt: v["prompt"].as_str().map(String::from), pid, input: vec![], exit: None, started: v["t"].as_u64().unwrap_or_default(), ended: None });
             } else if let Some(r) = out.iter_mut().rev().find(|r| r.pid == pid) {
                 if v["in"].is_null() {
                     r.exit = v["exit"].as_i64();
+                    r.ended = v["t"].as_u64();
                 } else {
                     r.input.push(v["in"].clone());
                 }
@@ -385,10 +391,29 @@ fn close(a: Option<f64>, b: f64) -> bool {
 /// Is process `pid` still running?
 fn alive(pid: u32) -> bool {
     #[cfg(windows)]
-    let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+    {
+        let out = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).split_whitespace().any(|w| w == pid.to_string())
+    }
+    // a killed child nobody has waited for yet is a zombie: still listed, no longer running
     #[cfg(not(windows))]
-    let out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "pid="]).output().unwrap();
-    String::from_utf8_lossy(&out.stdout).split_whitespace().any(|w| w == pid.to_string())
+    {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        running_stat(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// What `ps -o stat=` says of a process that still runs: something, and not `Z` (a zombie).
+#[cfg_attr(windows, allow(dead_code))]
+fn running_stat(stat: &str) -> bool {
+    let s = stat.trim();
+    !s.is_empty() && !s.starts_with('Z')
+}
+
+#[test]
+fn a_zombie_is_not_running() {
+    assert!(running_stat("Ss\n") && running_stat(" R+ "));
+    assert!(!running_stat("Z+\n") && !running_stat("Z") && !running_stat(""));
 }
 
 // ------------------------------------------------------------- tests
@@ -715,9 +740,31 @@ fn a_cli_that_stays_after_its_result_is_stopped() {
         h.cli.script(vec![vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Done.")), result(&sid, 0.01), json!(["stay"])]]);
         h.turn("Hi", None).await.unwrap();
         assert_eq!(h.path()[1].content, text("Done."));
-        let run = &h.cli.runs()[0];
-        assert_eq!(run.exit, None, "it didn't end by itself");
-        assert!(run.pid > 0 && !alive(run.pid), "process {} is still running", run.pid);
+        // (beside the turn, which ended with the result)
+        let pid = h.cli.runs()[0].pid;
+        until("the CLI to be stopped", || (pid > 0 && !alive(pid)).then_some(())).await;
+        assert_eq!(h.cli.runs()[0].exit, None, "it didn't end by itself");
+    });
+}
+
+#[test]
+fn a_turn_ends_on_the_clis_result_and_the_next_waits_for_that_cli_to_go() {
+    block_on(async {
+        let h = Harness::new("code");
+        let sid = new_id();
+        // a CLI slow to exit after its result (a busy machine), though it does by itself
+        let first = vec![read_user(), init(&sid), assistant(&sid, "msg_1", "uuid-1", text("Done.")), result(&sid, 0.01), json!(["sleep", 1800])];
+        h.cli.script(vec![first, vec![read_user(), init(&sid), assistant(&sid, "msg_2", "uuid-2", text("Again.")), result(&sid, 0.02)]]);
+        h.turn("Hi", None).await.unwrap();
+        let turn_end = clauderust_lib::util::now_ms() as u64;
+        h.transcript(&sid, 0.01);
+        h.turn("Once more", None).await.unwrap();
+        let runs = h.cli.runs();
+        assert_eq!(runs.len(), 2);
+        let gone = runs[0].ended.expect("the first CLI exited by itself");
+        assert!(turn_end < gone, "the turn ended on the result line, not once its CLI exited ({turn_end} vs {gone})");
+        assert!(runs[1].started >= gone, "two CLIs on one session ({} vs {gone})", runs[1].started);
+        assert_eq!(h.texts().last(), Some(&text("Again.")));
     });
 }
 
@@ -875,7 +922,7 @@ fn a_workflow_keeps_the_cli_open_and_its_stop_reaches_the_cli() {
         assert_eq!(path[1].meta["stop_reason"], "end_turn");
         assert_eq!(path[2].meta["cost_usd"].as_f64(), Some(0.015));
         assert!(path[2].meta["duration_ms"].is_u64(), "the wall time of a turn that waited on a workflow");
-        assert_eq!(h.cli.runs()[0].exit, Some(0));
+        assert_eq!(h.exit_of(0).await, Some(0));
         assert!(!h.st.cc_ctl.lock().contains_key(&h.conv));
     });
 }
@@ -1181,6 +1228,161 @@ fn a_kept_cli_that_went_away_is_replaced() {
         assert_eq!(runs.len(), 2);
         assert!(runs[1].has(&["--resume", &sid]), "{:?}", runs[1].args);
         assert_eq!(h.texts(), vec![text("First"), text("Answer 1"), text("Second"), text("Answer 2")]);
+        claudecode::end_warm(&h.st, &h.conv);
+    });
+}
+
+/// A turn of `sid`'s CLI that reads the message and answers `n`.
+fn answer_n(sid: &str, n: &str) -> Vec<Value> {
+    vec![read_user(), init(sid), assistant(sid, &format!("msg_{n}"), &format!("uuid-{n}"), text(&format!("Answer {n}"))), result(sid, 0.01)]
+}
+
+impl Harness {
+    /// Run a turn of `text_` in `conv`, another chat of this app.
+    async fn turn_in(&self, conv: &str, text_: &str) {
+        let parent = self.st.db.conv_get(conv).unwrap().current_leaf;
+        let m = Message { id: new_id(), conversation_id: conv.into(), parent_id: parent, role: "user".into(), content: text(text_), meta: json!({}), created_at: 1 };
+        self.st.db.msg_insert(&m).unwrap();
+        self.st.db.conv_set_leaf(conv, Some(&m.id)).unwrap();
+        let (app, st, conv) = (self.app.handle().clone(), self.st.clone(), conv.to_string());
+        finish(tauri::async_runtime::spawn(async move { claudecode::run(&app, &st, &conv, m.id, &CancellationToken::new()).await })).await.unwrap();
+    }
+}
+
+#[test]
+fn one_cli_is_kept_for_the_chat_used_last_and_only_while_it_is_idle_a_while() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let other = h.st.db.conv_create("chat", "claude-opus-5-5", None, None, &json!({"engine": "claude-code"})).unwrap().id;
+        let (a, b) = (new_id(), new_id());
+        h.cli.script(vec![answer_n(&a, "1"), answer_n(&b, "2"), answer_n(&b, "3")]);
+        h.turn("In the first chat", None).await.unwrap();
+        h.turn_in(&other, "In the second chat").await;
+        assert_eq!(h.exit_of(0).await, Some(0), "the first chat's CLI ended when the second's was kept");
+        assert!(alive(h.cli.runs()[1].pid));
+        // its next message goes to it; then, idle long enough, it ends
+        h.st.cc_warm.idle_ms.store(300, Ordering::SeqCst);
+        h.turn_in(&other, "More").await;
+        assert_eq!(h.cli.runs().len(), 2);
+        assert_eq!(h.exit_of(1).await, Some(0), "ended once idle");
+    });
+}
+
+#[test]
+fn a_kept_cli_ends_when_the_window_stays_hidden() {
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.cc_warm.hidden_ms.store(300, Ordering::SeqCst);
+        let sid = new_id();
+        h.cli.script(vec![answer_n(&sid, "1"), answer_n(&sid, "2")]);
+        h.turn("Hi", None).await.unwrap();
+        // minimised and back at once: kept
+        claudecode::window_seen(&h.st, false);
+        claudecode::window_seen(&h.st, true);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(alive(h.cli.runs()[0].pid), "ended though the window was soon back");
+        // hidden a while: ended
+        claudecode::window_seen(&h.st, false);
+        assert_eq!(h.exit_of(0).await, Some(0));
+        claudecode::window_seen(&h.st, true);
+        // the chat's next message starts one again where its session is
+        h.transcript(&sid, 0.01);
+        h.turn("Back again", None).await.unwrap();
+        let runs = h.cli.runs();
+        assert!(runs.len() == 2 && runs[1].has(&["--resume", &sid]), "{:?}", runs.last().map(|r| &r.args));
+        claudecode::end_warm(&h.st, &h.conv);
+    });
+}
+
+#[test]
+fn a_new_chats_cli_starts_while_its_first_message_is_written() {
+    // the composer's options as it will send them (the harness's chat is made with these)
+    let options = || json!({"engine": "claude-code"});
+    let cold = block_on(async {
+        let h = Harness::new("chat");
+        h.cli.script(vec![answer_n(&new_id(), "1")]);
+        let ms = first_text_ms(&h, &h.say("Hello", None)).await;
+        claudecode::end_warm(&h.st, &h.conv);
+        ms
+    });
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.settings.write().chat_engine = "claude-code".into();
+        let sid = new_id();
+        // starts: the one ahead, a code session's, one for other options that nothing reads, another chat's own
+        h.cli.script(vec![answer_n(&sid, "1"), answer_n(&new_id(), "c"), vec![read_user()], answer_n(&new_id(), "2")]);
+        claudecode::prewarm(&h.st, Some("claude-opus-5-5".into()), None, options()).await.unwrap();
+        let pid = until("the CLI to start", || h.cli.runs().first().map(|r| r.pid)).await;
+        // asked again for the same, nothing more starts
+        claudecode::prewarm(&h.st, Some("claude-opus-5-5".into()), None, options()).await.unwrap();
+        // a code session's first turn leaves it alone
+        let folder = h.cli.dir.parent().unwrap().join("project").display().to_string();
+        let code = h.st.db.conv_create("code", "claude-opus-5-5", None, Some(&folder), &json!({"engine": "claude-code"})).unwrap().id;
+        h.turn_in(&code, "Code first").await;
+        assert_eq!(h.cli.runs().len(), 2);
+        let ahead = first_text_ms(&h, &h.say("Hello", None)).await;
+        eprintln!("first text of a new chat: {cold} ms, {ahead} ms on the CLI started ahead");
+        let runs = h.cli.runs();
+        assert_eq!((runs.len(), runs[0].pid), (2, pid), "its first message went to the CLI started for it");
+        assert!(ahead < cold, "{ahead} ms ahead, {cold} ms cold");
+        assert_eq!(h.st.db.conv_get(&h.conv).unwrap().options["cc_session"], json!(sid));
+        assert!(alive(pid), "kept as the chat's CLI");
+        // one started for other options takes the kept one's place, and isn't used by a chat it doesn't fit
+        claudecode::prewarm(&h.st, Some("claude-opus-5-5".into()), None, json!({"web_search": true})).await.unwrap();
+        assert_eq!(h.exit_of(0).await, Some(0));
+        until("the CLI for other options to start", || (h.cli.runs().len() == 3).then_some(())).await;
+        let other = h.st.db.conv_create("chat", "claude-opus-5-5", None, None, &options()).unwrap().id;
+        h.turn_in(&other, "Hello there").await;
+        let runs = h.cli.runs();
+        assert!(runs.len() == 4 && runs[2].input.is_empty(), "{:?}", runs.iter().map(|r| &r.input).collect::<Vec<_>>());
+        assert_eq!(h.exit_of(2).await, Some(3), "ended unused");
+        claudecode::end_warm(&h.st, &other);
+    });
+}
+
+#[test]
+fn no_cli_is_started_ahead_of_a_chat_that_wont_run_on_the_account() {
+    block_on(async {
+        let h = Harness::new("chat");
+        let opus = || Some("claude-opus-5-5".to_string());
+        h.cli.script(vec![vec![read_user()]]);
+        // the API engine, an incognito chat, a spending limit (the chat's or every chat's)
+        h.st.settings.write().chat_engine = "api".into();
+        claudecode::prewarm(&h.st, opus(), None, json!({})).await.unwrap();
+        h.st.settings.write().chat_engine = "claude-code".into();
+        claudecode::prewarm(&h.st, opus(), None, json!({"incognito": true})).await.unwrap();
+        claudecode::prewarm(&h.st, opus(), None, json!({"budget_usd": 1.0})).await.unwrap();
+        h.st.settings.write().turn_budget_usd = 2.0;
+        claudecode::prewarm(&h.st, opus(), None, json!({})).await.unwrap();
+        // then one that does: the only CLI started
+        h.st.settings.write().turn_budget_usd = 0.0;
+        claudecode::prewarm(&h.st, opus(), None, json!({})).await.unwrap();
+        until("the CLI to start", || h.cli.runs().first().map(|r| r.pid)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(h.cli.runs().len(), 1);
+        claudecode::end_all_warm(&h.st).await;
+        assert_eq!(h.exit_of(0).await, Some(3), "an unused one ends, never having read a message");
+    });
+}
+
+#[test]
+fn a_slow_title_gives_the_kept_cli_back_to_the_next_turn() {
+    block_on(async {
+        let h = Harness::new("chat");
+        h.st.settings.write().chat_engine = "claude-code".into();
+        let sid = new_id();
+        // the kept CLI takes the title request and never answers it
+        let title = vec![read(json!({"type": "control_request", "request": {"subtype": "generate_session_title"}}))];
+        h.cli.script(vec![answer_n(&sid, "1"), title, answer_n(&sid, "2")]);
+        h.turn("Hi", None).await.unwrap();
+        let (st, conv) = (h.st.clone(), h.st.db.conv_get(&h.conv).unwrap());
+        let asked = tauri::async_runtime::spawn(async move { claudecode::title(&st, &conv, "Hi", "Answer 1").await });
+        until("the title to be asked", || h.cli.runs()[0].input.iter().any(|l| l["request"]["subtype"] == "generate_session_title").then_some(())).await;
+        // the next message waits for the CLI the title has, and gets it
+        h.turn("More", None).await.unwrap();
+        assert_eq!(asked.await.unwrap(), None, "no title from it, nor from another CLI");
+        assert_eq!(h.cli.runs().len(), 1, "one CLI for the title and both turns");
+        assert_eq!(h.texts().last(), Some(&text("Answer 2")));
         claudecode::end_warm(&h.st, &h.conv);
     });
 }

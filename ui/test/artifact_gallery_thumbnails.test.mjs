@@ -5,7 +5,7 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
 let onMessage = null;
 window.addEventListener = (type, fn) => { if (type === 'message') onMessage = fn; };
@@ -56,9 +56,32 @@ test('a thumbnail that throws becomes an error tile, and its page is told', asyn
 });
 
 test('the gallery lets a running thumbnail go once it is out of reach', () => {
-  const js = readFileSync(new URL('../js/artifacts.js', import.meta.url), 'utf8');
-  assert.match(js, /if \(!en\.isIntersecting\) \{\s*if \(en\.target\.querySelector\('iframe\[sandbox="allow-scripts"\]'\)\) en\.target\.replaceChildren\(\);\s*return;\s*\}\s*if \(en\.target\.childElementCount\) return;/);
-  const css = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8');
+  const js = source('../js/artifacts.js');
+  assert.match(js, /if \(!en\.isIntersecting\) \{[^}]*box\.__drawing = null;\s*if \(box\.querySelector\('iframe\[sandbox="allow-scripts"\]'\)\) box\.replaceChildren\(\);\s*return;\s*\}\s*if \(box\.childElementCount \|\| box\.__drawing\) return;/);
+  // one picture on its way at a time, and only the latest may land (in, out and in again: one frame)
+  assert.match(js, /const mine = box\.__drawing = \{\};\s*renderPreview\(box, a, \{[^}]*current: \(\) => box\.__drawing === mine \}\)/);
+  const css = source('../css/app.css');
   // danger on the tile's own background: a tint under it would take the light theme below 4.5:1
   assert.match(css, /\.art-thumb-error \{[^}]*color: var\(--danger\); \}/);
+});
+
+test('a page is drawn 800 px wide in a window of the tile’s shape, so a small component is seen', async () => {
+  for (const kind of ['application/vnd.ant.react', 'text/html']) {
+    const el = box();
+    await renderPreview(el, { kind, content: '<script>x()</script>', title: 't' }, opts);
+    const css = el.kids[0].style.cssText;
+    // a 300 x 104 px tile: scale 300/800, a window 104/0.375 px tall
+    assert.match(css, /width:800px;height:277px;/, kind);
+    assert.match(css, /transform:scale\(0\.375\)/, kind);
+  }
+  // a deck is still fitted whole, 1920 x 1080
+  const deck = box();
+  await renderPreview(deck, { kind: 'application/vnd.ant.slides', content: '<section></section>', title: 'd' }, opts);
+  assert.match(deck.kids[0].style.cssText, /width:1920px;height:1080px;/);
+});
+
+test('a tile that went out of reach while its page was on its way gets no frame', async () => {
+  const el = box();
+  await renderPreview(el, { kind: 'application/vnd.ant.react', content: 'x', title: 't' }, { ...opts, current: () => false });
+  assert.equal(el.kids.length, 0);
 });

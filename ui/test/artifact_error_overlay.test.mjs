@@ -5,10 +5,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
 import { errorText } from '../js/artifact_bridge.js';
+import { source } from './source.mjs';
 
-const HOOK = readFileSync(new URL('../../src-tauri/src/artifact_hook.js', import.meta.url), 'utf8');
+const HOOK = source('../../src-tauri/src/artifact_hook.js');
 
 function frame() {
   const listeners = {};
@@ -85,6 +85,6 @@ test('a blocked request says where it went, for the banner to say in the app\'s 
 });
 
 test('the panel acknowledges every error its frame reports', () => {
-  const src = readFileSync(new URL('../js/artifacts.js', import.meta.url), 'utf8');
+  const src = source('../js/artifacts.js');
   assert.match(src, /d\.__artifact === 'error'\) \{ e\.source\.postMessage\(\{ __artifact: 'error-ack' \}, '\*'\); frameError/);
 });

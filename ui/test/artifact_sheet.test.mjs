@@ -3,8 +3,8 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { reopenId, wrapTab } from '../js/artifact_sheet.js';
+import { source } from './source.mjs';
 
 test('the toggle reopens the artifact shown last in this chat, while it is still there', () => {
   const ids = ['a', 'b', 'c'];
@@ -15,7 +15,7 @@ test('the toggle reopens the artifact shown last in this chat, while it is still
   assert.equal(reopenId([], 'chat1', null), null);
 });
 
-const CSS = readFileSync(new URL('../css/app.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const CSS = source('../css/app.css').replace(/\r\n/g, '\n');
 const media = (q) => { const at = CSS.indexOf(`@media (${q}) {\n  .artifact-panel`); assert.ok(at >= 0, q); return CSS.slice(at, CSS.indexOf('\n}', at)); };
 
 test('under 900 px the panel is a sheet over the dimmed chat, with "Back to chat" in place of Close', () => {
@@ -29,7 +29,7 @@ test('under 900 px the panel is a sheet over the dimmed chat, with "Back to chat
 });
 
 test('the panel\'s Esc and scrim close it, and the toggle keeps what was shown', () => {
-  const src = readFileSync(new URL('../js/artifacts.js', import.meta.url), 'utf8');
+  const src = source('../js/artifacts.js');
   assert.match(src, /scrim\.onclick = close/);
   assert.match(src, /back\.onclick = close/);
   assert.match(src, /e\.key !== 'Escape'/);

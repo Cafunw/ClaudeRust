@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -244,13 +244,14 @@ pub async fn title(st: &Arc<AppState>, conv: &crate::db::Conversation, user_text
     crate::engine::clean_title(&one_shot(st, crate::prompts::TITLE_PROMPT, &text, TITLE_MAX_TOKENS, Duration::from_secs(45)).await.ok()?)
 }
 
-/// The title the chat's kept process writes: Some(None) when it answered without one, None when there is no
-/// such process or it gave no answer (a CLI without the request).
+/// The title the chat's kept process writes: Some(None) when it answered without one or not within `LEND` (the
+/// chat's next turn waits that long for it, never for a second CLI), None when there is no such process or it
+/// gave no answer (a CLI without the request).
 async fn warm_title(st: &Arc<AppState>, conv_id: &str, description: &str) -> Option<Option<String>> {
     let mut w = st.cc_warm.lend(conv_id)?;
     let id = new_id();
     write_line(&mut w.proc.stdin, &json!({"type": "control_request", "request_id": id, "request": {"subtype": "generate_session_title", "description": description, "persist": false}})).await;
-    let answer = tokio::time::timeout(Duration::from_secs(45), async {
+    let answer = tokio::time::timeout(LEND, async {
         while let Some(l) = w.proc.out.recv().await {
             let v: Value = serde_json::from_str(&l).unwrap_or_default();
             if v["type"] == "control_response" && v["response"]["request_id"] == id.as_str() {
@@ -259,11 +260,10 @@ async fn warm_title(st: &Arc<AppState>, conv_id: &str, description: &str) -> Opt
         }
         None
     })
-    .await
-    .ok()
-    .flatten();
+    .await;
     give_back(st, conv_id, w);
-    let r = answer?;
+    let Ok(r) = answer else { return Some(None) };
+    let r = r?;
     // (the CLI says `"title": null` when it has none)
     let answered = r["subtype"] == "success" && r["response"].as_object().is_some_and(|o| o.contains_key("title"));
     answered.then(|| r["response"]["title"].as_str().map(String::from))
@@ -703,31 +703,49 @@ pub struct Warm {
     key: String,
     /// the chat tools it was started with, as they are now (`load_tools` adds to them)
     tools: Arc<SdkTools>,
+    /// empty for one started ahead of a new chat (`prewarm`), which gets its session with its first turn
     session: String,
     /// the row the session ends at
     tip: String,
+    /// the prompt file of one started ahead of a new chat, until its first turn has begun
+    prompt: Option<PromptFile>,
 }
 
 enum Slot {
     Idle(Box<Warm>, u64),
-    /// in use beside a turn (a title, the end of a Stop): a turn waits for it
+    /// in use beside a turn (a title, the end of a Stop or of a turn): a turn waits for it
     Busy,
 }
 
-/// The chats' kept CLIs: at most `WARM_MAX`, each until it has been idle `WARM_IDLE`.
-#[derive(Default)]
+/// The kept CLI (some 300-450 MB each): at most one, that of the chat used last or of a new chat being
+/// written (`SPARE`), until it has been idle `idle_ms`, or `hidden_ms` with the window hidden or minimised.
 pub struct WarmPool {
     slots: parking_lot::Mutex<HashMap<String, Slot>>,
-    gen: std::sync::atomic::AtomicU64,
+    gen: AtomicU64,
+    /// the main window can't be seen, and how many times it has been hidden
+    hidden: AtomicBool,
+    hides: AtomicU64,
+    pub idle_ms: AtomicU64,
+    pub hidden_ms: AtomicU64,
 }
 
-const WARM_IDLE: Duration = Duration::from_secs(300);
-const WARM_MAX: usize = 2;
+impl Default for WarmPool {
+    fn default() -> Self {
+        WarmPool { slots: Default::default(), gen: AtomicU64::new(0), hidden: AtomicBool::new(false), hides: AtomicU64::new(0), idle_ms: AtomicU64::new(90_000), hidden_ms: AtomicU64::new(30_000) }
+    }
+}
+
+/// The longest a title or the end of a Stop or turn holds a chat's CLI, which the chat's next turn waits for.
+const LEND: Duration = Duration::from_secs(10);
+
+/// The pool's key for the CLI started ahead of a new chat's first message (no chat has an empty id).
+const SPARE: &str = "";
 
 impl WarmPool {
-    /// The chat's kept CLI, once a title or a Stop that has it is done (waiting at most 10 s).
+    /// The chat's kept CLI, once a title or a Stop that has it is done (waiting `LEND`, with room for a busy
+    /// machine: the one that has it gives it back by then).
     async fn take(&self, conv_id: &str) -> Option<Warm> {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + LEND + Duration::from_secs(5);
         loop {
             {
                 let mut slots = self.slots.lock();
@@ -773,29 +791,24 @@ impl WarmPool {
         busy
     }
 
-    /// Keep `w` for the chat's next turn; the oldest other beyond `WARM_MAX` ends.
+    /// Keep `w` for the chat's next turn (or, `SPARE`, a new chat's first): any other kept one ends.
     fn put(st: &Arc<AppState>, conv_id: &str, w: Warm) {
-        let gen = st.cc_warm.gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut gone = vec![];
-        {
-            let mut slots = st.cc_warm.slots.lock();
-            if let Some(Slot::Idle(old, _)) = slots.insert(conv_id.to_string(), Slot::Idle(Box::new(w), gen)) {
-                gone.push(*old);
-            }
-            let mut idle: Vec<(u64, String)> = slots.iter().filter_map(|(k, s)| if let Slot::Idle(_, g) = s { Some((*g, k.clone())) } else { None }).collect();
-            idle.sort_unstable();
-            for (_, k) in idle.iter().take(idle.len().saturating_sub(WARM_MAX)) {
-                if let Some(Slot::Idle(old, _)) = slots.remove(k) {
-                    gone.push(*old);
-                }
-            }
-        }
+        let pool = &st.cc_warm;
+        let gen = pool.gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let gone = {
+            let mut slots = pool.slots.lock();
+            let gone = pool.idle_in(&mut slots);
+            slots.insert(conv_id.to_string(), Slot::Idle(Box::new(w), gen));
+            gone
+        };
         for w in gone {
             end(w);
         }
+        let ms = if pool.hidden.load(Ordering::SeqCst) { &pool.hidden_ms } else { &pool.idle_ms };
+        let idle = Duration::from_millis(ms.load(Ordering::SeqCst));
         let (st, conv_id) = (st.clone(), conv_id.to_string());
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(WARM_IDLE).await;
+            tokio::time::sleep(idle).await;
             let mut slots = st.cc_warm.slots.lock();
             if matches!(slots.get(&conv_id), Some(Slot::Idle(_, g)) if *g == gen) {
                 if let Some(Slot::Idle(w, _)) = slots.remove(&conv_id) {
@@ -804,6 +817,39 @@ impl WarmPool {
             }
         });
     }
+
+    /// The idle CLIs, taken out of `slots` (one lent out is given back, and kept or ended, as usual).
+    fn idle_in(&self, slots: &mut HashMap<String, Slot>) -> Vec<Warm> {
+        slots.extract_if(|_, s| matches!(s, Slot::Idle(..))).filter_map(|(_, s)| if let Slot::Idle(w, _) = s { Some(*w) } else { None }).collect()
+    }
+
+    /// Whether the CLI started ahead of a new chat is one started with `key`.
+    fn spare_is(&self, key: &str) -> bool {
+        matches!(self.slots.lock().get(SPARE), Some(Slot::Idle(w, _)) if w.key == key)
+    }
+}
+
+/// The main window was hidden or minimised (`seen` false), or shown again. Hidden for `hidden_ms`, the kept CLI
+/// ends: nobody is about to write in a chat.
+pub fn window_seen(st: &Arc<AppState>, seen: bool) {
+    let pool = &st.cc_warm;
+    let was_hidden = pool.hidden.swap(!seen, Ordering::SeqCst);
+    if seen || was_hidden {
+        return;
+    }
+    let hide = pool.hides.fetch_add(1, Ordering::SeqCst) + 1;
+    let wait = Duration::from_millis(pool.hidden_ms.load(Ordering::SeqCst));
+    let st = st.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(wait).await;
+        let pool = &st.cc_warm;
+        if pool.hidden.load(Ordering::SeqCst) && pool.hides.load(Ordering::SeqCst) == hide {
+            let gone = pool.idle_in(&mut pool.slots.lock());
+            for w in gone {
+                end(w);
+            }
+        }
+    });
 }
 
 /// End a kept CLI: its input closes and it exits by itself (or is stopped).
@@ -831,12 +877,13 @@ pub fn end_warm(st: &AppState, conv_id: &str) {
 /// End every chat's kept CLI: on a sign-in or sign-out (they run on the account they started with), and when
 /// the app quits.
 pub async fn end_all_warm(st: &AppState) {
-    let idle: Vec<Box<Warm>> = st.cc_warm.slots.lock().extract_if(|_, s| matches!(s, Slot::Idle(..))).filter_map(|(_, s)| if let Slot::Idle(w, _) = s { Some(w) } else { None }).collect();
+    let idle = st.cc_warm.idle_in(&mut st.cc_warm.slots.lock());
     futures_util::future::join_all(idle.into_iter().map(|w| w.proc.stop(false))).await;
 }
 
 /// What a chat's CLI is started with, apart from where its session resumes: the program, its folder, its
-/// arguments, its prompt and its tools, and the sign-in it runs on. Two turns with the same key can share one.
+/// arguments, its prompt (the text, wherever its file is) and its tools, and the sign-in it runs on. Two turns
+/// with the same key can share one.
 fn warm_key(cli: &std::path::Path, cwd: &str, args: &[String], system: &str, tools: &SdkTools) -> String {
     let mut kept = vec![];
     let mut skip = false;
@@ -845,7 +892,7 @@ fn warm_key(cli: &std::path::Path, cwd: &str, args: &[String], system: &str, too
             continue;
         }
         match a.as_str() {
-            "--resume" | "--resume-session-at" => skip = true,
+            "--resume" | "--resume-session-at" | "--system-prompt-file" => skip = true,
             "--fork-session" => {}
             _ => kept.push(a.as_str()),
         }
@@ -1451,6 +1498,166 @@ fn track_workflows(bg: &mut HashSet<String>, ev: &Value) -> bool {
     bg.len() < n
 }
 
+/// What a conversation's CLI is started with, but for a chat's prompt file and where its session resumes: a
+/// turn's CLI and one started ahead of a new chat's first message (`prewarm`) are started alike.
+struct Launch {
+    /// the arguments before those of the prompt file and the session, and those after them (variadic flags last)
+    args: Vec<String>,
+    tail: Vec<String>,
+    /// a chat's prompt (its prompt file's text), its project's PDFs and images, and its tools
+    system: String,
+    project_files: Vec<Value>,
+    sdk_tools: Arc<SdkTools>,
+    budget: f64,
+}
+
+async fn launch(st: &AppState, conv: &crate::db::Conversation, settings: &crate::settings::Settings, cli: &std::path::Path) -> AppResult<Launch> {
+    let chat = conv.kind != "code";
+    let mode = conv.options["permission_mode"].as_str().unwrap_or("default");
+    let mut args: Vec<String> = [
+        "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+        "--include-partial-messages", "--permission-prompt-tool=stdio", "--permission-mode",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // Auto mode is ours: the CLI asks (default mode) and we answer safe requests ourselves.
+    args.push(if mode == "auto" { "default" } else { mode }.to_string());
+    if !conv.model.trim().is_empty() && conv.model != "default" {
+        args.push("--model".into());
+        args.push(conv.model.clone());
+    }
+    if let Some(fb) = crate::models::overload_fallback(&conv.model, &settings.overload_fallback) {
+        args.push("--fallback-model".into());
+        args.push(fb);
+    }
+    args.extend(cli_session_flags(&conv.options, &conv.model, chat, !chat || settings.thinking_default, &st.data_dir));
+    // without it a print-mode CLI gets the API's default for newer models: thinking with no text ("omitted")
+    if !OLD_CLIS.lock().iter().any(|c| c == cli) {
+        args.extend(["--thinking-display".to_string(), "summarized".to_string()]);
+    }
+    let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
+    let mut sdk_tools: Arc<SdkTools> = Arc::default();
+    let mut chat_allowed: Vec<String> = vec![];
+    let mut project_files: Vec<Value> = vec![];
+    let mut system = String::new();
+    if chat {
+        // our chat prompt (instructions, style, project knowledge) replaces the coding one
+        let rc = crate::engine::build_request_context(st, conv, settings).await?;
+        system = rc.system.clone();
+        project_files = rc.prefix_blocks;
+        // past chats while searching them is on, first (of two tools that end up with one name the first stays), then
+        // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
+        let mut all = if settings.chat_search && !conv.incognito { crate::past_chats::mcp_tools() } else { vec![] };
+        // a project too large for the prompt: its index is in the prompt file, its search a tool of ours
+        let offered = |name: &str| rc.tools.iter().any(|t| t["name"] == name);
+        if offered(crate::project_search::SEARCH_TOOL) {
+            all.extend(crate::project_search::mcp_tools());
+        }
+        // tools loaded when needed: the request context offers `load_tools` and leaves the others' schemas out
+        if offered(crate::tool_load::LOAD_TOOL) {
+            all.extend(crate::tool_load::mcp_tools());
+        }
+        all.extend(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)));
+        let tools = chat_tools(all);
+        let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
+        let (f, allowed) = chat_flags(web, &tools, &settings.tool_policies, &opt_strs("allowed_tools"));
+        args.extend(f);
+        chat_allowed = allowed;
+        let unloaded = rc.mcp_names.keys().filter(|n| !offered(n)).cloned().collect();
+        sdk_tools = Arc::new(SdkTools { tools, mcp: rc.mcp_names.keys().cloned().collect(), unloaded: parking_lot::Mutex::new(unloaded), ..Default::default() });
+    } else if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
+        args.push("--append-system-prompt".into());
+        args.push(block);
+    }
+    let budget = crate::engine::turn_budget(conv, settings);
+    if budget > 0.0 {
+        args.push("--max-budget-usd".into());
+        args.push(budget.to_string());
+    }
+    // Grants from "allow for this session" (kept in this chat, not written
+    // to the project's Claude Code settings). Variadic flags go last.
+    let mut tail = vec![];
+    let dirs = opt_strs("cc_add_dirs");
+    if !dirs.is_empty() {
+        tail.push("--add-dir".into());
+        tail.extend(dirs);
+    }
+    let mut rules = opt_strs("cc_allowed_tools");
+    rules.extend(chat_allowed);
+    if !rules.is_empty() {
+        tail.push("--allowedTools".into());
+        tail.extend(rules);
+    }
+    // the conversation's switched-off servers and tools (`server__tool`), as the API engine leaves them out: a chat's
+    // aren't in its tool list either, a code session's are those of the CLI's own MCP servers
+    let mut off: Vec<String> = opt_strs("disabled_servers").iter().map(|s| format!("mcp__{}", cli_safe(s))).collect();
+    off.extend(opt_strs("disabled_tools").iter().map(|t| format!("mcp__{t}")));
+    if !off.is_empty() {
+        tail.push("--disallowedTools".into());
+        tail.extend(off);
+    }
+    Ok(Launch { args, tail, system, project_files, sdk_tools, budget })
+}
+
+fn cli_command(cli: &std::path::Path, args: &[String], cwd: &str) -> tokio::process::Command {
+    let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), args);
+    cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // Don't make the CLI think it's nested inside another Claude Code session.
+    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
+        cmd.env_remove(k);
+    }
+    // Own process group, so the CLI and everything it started (background
+    // shells, MCP servers) can be stopped together.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
+/// Start the kept CLI for a new chat on the account while its first message is being written (`model`,
+/// `project_id` and `options` as the composer will send them), so that message goes to a CLI that is up already
+/// (it takes some 3 s to start). Nothing when the chat wouldn't keep its CLI, or one started alike waits already;
+/// otherwise it takes the place of the kept one, and ends as that does (idle, the window hidden, another chat).
+pub async fn prewarm(st: &Arc<AppState>, model: Option<String>, project_id: Option<String>, options: Value) -> AppResult<()> {
+    crate::shellenv::ready().await;
+    let settings = st.settings.read().clone();
+    let mut options = if options.is_object() { options } else { json!({}) };
+    // as send_message makes the chat (commands.rs, create_conversation_inner)
+    options["date"] = json!(crate::engine::today());
+    let model = model.filter(|m| !m.is_empty()).unwrap_or_else(|| settings.default_model.clone());
+    let conv = crate::db::Conversation { id: new_id(), kind: "chat".into(), model, project_id, incognito: options["incognito"] == true, options, ..Default::default() };
+    let Some(cli) = find_cli(&settings.claude_code_path) else { return Ok(()) };
+    if conv.incognito || !uses_cli(st, &conv).await {
+        return Ok(());
+    }
+    let l = launch(st, &conv, &settings, &cli).await?;
+    if l.budget > 0.0 {
+        return Ok(());
+    }
+    let cwd = chat_dir(st);
+    let prompt = write_prompt(std::path::Path::new(&cwd), &conv.id, &l.system)?;
+    let mut args = l.args;
+    args.extend(["--system-prompt-file".to_string(), prompt.0.display().to_string()]);
+    args.extend(l.tail);
+    let key = warm_key(&cli, &cwd, &args, &l.system, &l.sdk_tools);
+    if st.cc_warm.spare_is(&key) {
+        return Ok(());
+    }
+    let proc = Proc::start(&mut cli_command(&cli, &args, &cwd))?;
+    WarmPool::put(st, SPARE, Warm { proc, key, tools: l.sdk_tools, session: String::new(), tip: String::new(), prompt: Some(prompt) });
+    Ok(())
+}
+
+/// A new chat on the account is being written: its CLI starts (`prewarm`). `req` is the `new_conversation` the
+/// composer will send.
+#[tauri::command]
+pub async fn prewarm_chat(state: tauri::State<'_, Arc<AppState>>, req: crate::commands::NewConversation) -> AppResult<()> {
+    if req.kind.as_deref().is_some_and(|k| k != "chat") {
+        return Ok(());
+    }
+    prewarm(state.inner(), req.model, req.project_id, req.options).await
+}
+
 #[allow(unused_assignments)]
 async fn run_once<R: Runtime>(
     app: &AppHandle<R>,
@@ -1498,90 +1705,35 @@ async fn run_once<R: Runtime>(
 
     // Resume the CLI session at the right point in our tree.
     let prev_at = path[..before].iter().rposition(|m| m.meta["cc_uuid"].is_string());
-    let mode = conv.options["permission_mode"].as_str().unwrap_or("default").to_string();
-    let mut args: Vec<String> = [
-        "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
-        "--include-partial-messages", "--permission-prompt-tool=stdio", "--permission-mode",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    // Auto mode is ours: the CLI asks (default mode) and we answer safe
-    // requests ourselves. The CLI writes files itself: whatever changed since
-    // the conversation began counts as written by it.
-    args.push(if mode == "auto" { "default".to_string() } else { mode.clone() });
+    // The CLI writes files itself: whatever changed since the conversation began counts as written by it.
     let auto_since = crate::codetools::CodeSession::conversation_start(conv.created_at);
-    if !conv.model.trim().is_empty() && conv.model != "default" {
-        args.push("--model".into());
-        args.push(conv.model.clone());
-    }
-    if let Some(fb) = crate::models::overload_fallback(&conv.model, &st.settings.read().overload_fallback) {
-        args.push("--fallback-model".into());
-        args.push(fb);
-    }
-    args.extend(cli_session_flags(&conv.options, &conv.model, chat, !chat || settings.thinking_default, &st.data_dir));
-    // without it a print-mode CLI gets the API's default for newer models: thinking with no text ("omitted")
-    if !OLD_CLIS.lock().contains(&cli) {
-        args.extend(["--thinking-display".to_string(), "summarized".to_string()]);
-    }
     let ultracode_asked = conv.options["ultracode"] == true && !chat && crate::models::info(&conv.model).ultracode;
     let fast_asked = conv.options["fast"] == true && crate::models::info(&conv.model).fast_price.is_some();
-    let opt_strs = |key: &str| -> Vec<String> { conv.options[key].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)).collect() };
-    let mut sdk_tools: Arc<SdkTools> = Arc::default();
-    let mut chat_allowed: Vec<String> = vec![];
-    // a project's PDFs and images, and the chat prompt file (kept until the turn ends)
-    let mut project_files: Vec<Value> = vec![];
+    let Launch { mut args, tail, system, project_files, mut sdk_tools, budget } = launch(st, &conv, &settings, &cli).await?;
+    // the chat prompt file, kept until the turn ends
     let mut _prompt_file: Option<PromptFile> = None;
-    let mut system = String::new();
     if chat {
-        // our chat prompt (instructions, style, project knowledge) replaces the coding one
-        let rc = crate::engine::build_request_context(st, &conv, &settings).await?;
-        system = rc.system.clone();
-        let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &rc.system) {
+        let file = match write_prompt(std::path::Path::new(&cwd), conv_id, &system) {
             Ok(f) => f,
             Err(e) => return fail(AppError::coded("prompt_write_failed", json!({"path": cwd}), format!("Could not write the chat prompt (in {cwd}): {e}"))),
         };
-        project_files = rc.prefix_blocks;
-        // past chats while searching them is on, first (of two tools that end up with one name the first stays), then
-        // the conversation's servers and tools, as the request context leaves them (disabled servers and Block out)
-        let mut all = if settings.chat_search && !conv.incognito { crate::past_chats::mcp_tools() } else { vec![] };
-        // a project too large for the prompt: its index is in the prompt file, its search a tool of ours
-        let offered = |name: &str| rc.tools.iter().any(|t| t["name"] == name);
-        if offered(crate::project_search::SEARCH_TOOL) {
-            all.extend(crate::project_search::mcp_tools());
-        }
-        // tools loaded when needed: the request context offers `load_tools` and leaves the others' schemas out
-        if offered(crate::tool_load::LOAD_TOOL) {
-            all.extend(crate::tool_load::mcp_tools());
-        }
-        all.extend(st.mcp.tools().await.into_iter().filter(|t| rc.mcp_names.contains_key(&t.api_name)));
-        let tools = chat_tools(all);
-        let web = conv.options["web_search"].as_bool().unwrap_or(settings.web_search_default);
-        let (f, allowed) = chat_flags(web, &tools, &settings.tool_policies, &opt_strs("allowed_tools"));
-        args.extend(f);
-        chat_allowed = allowed;
-        let unloaded = rc.mcp_names.keys().filter(|n| !offered(n)).cloned().collect();
-        sdk_tools = Arc::new(SdkTools { tools, mcp: rc.mcp_names.keys().cloned().collect(), unloaded: parking_lot::Mutex::new(unloaded), ..Default::default() });
-        args.push("--system-prompt-file".into());
-        args.push(file.0.display().to_string());
+        args.extend(["--system-prompt-file".to_string(), file.0.display().to_string()]);
         _prompt_file = Some(file);
-    } else if let Some(block) = crate::engine::conversation_instructions(&conv.options) {
-        args.push("--append-system-prompt".into());
-        args.push(block);
     }
-    let budget = crate::engine::turn_budget(&conv, &st.settings.read());
-    if budget > 0.0 {
-        args.push("--max-budget-usd".into());
-        args.push(budget.to_string());
+    // a new chat's first message goes to the CLI started for it while it was written, if that is the same CLI
+    let ahead = chat && !conv.incognito && warm.is_none() && before == 0 && start == Start::Resume;
+    if ahead {
+        warm = st.cc_warm.take(SPARE).await;
     }
+    let mut _spare_prompt: Option<PromptFile> = None;
     // earlier messages but no CLI session to resume (a fork into another
     // folder, or a conversation begun with the built-in engine): replay them
     let mut with_history = prev_at.is_none() && path.len() > 1;
     let mut cost_before = 0.0;
     // the messages the CLI session already holds: those up to where it resumes
     let mut held: &[Message] = &[];
-    // the kept CLI holds the session where this turn resumes it
-    let mut warm_here = false;
+    // the kept CLI holds the session where this turn resumes it (a new chat's: no session yet)
+    let mut warm_here = ahead;
     if let Some(i) = prev_at {
         let p = &path[i];
         if let Some(sid) = p.meta["cc_session"].as_str() {
@@ -1610,27 +1762,7 @@ async fn run_once<R: Runtime>(
             m.remove("cc_tip");
         }
     });
-    // Grants from "allow for this session" (kept in this chat, not written
-    // to the project's Claude Code settings). Variadic flags go last.
-    let dirs = opt_strs("cc_add_dirs");
-    if !dirs.is_empty() {
-        args.push("--add-dir".into());
-        args.extend(dirs);
-    }
-    let mut rules = opt_strs("cc_allowed_tools");
-    rules.extend(chat_allowed);
-    if !rules.is_empty() {
-        args.push("--allowedTools".into());
-        args.extend(rules);
-    }
-    // the conversation's switched-off servers and tools (`server__tool`), as the API engine leaves them out: a chat's
-    // aren't in its tool list either, a code session's are those of the CLI's own MCP servers
-    let mut off: Vec<String> = opt_strs("disabled_servers").iter().map(|s| format!("mcp__{}", cli_safe(s))).collect();
-    off.extend(opt_strs("disabled_tools").iter().map(|t| format!("mcp__{t}")));
-    if !off.is_empty() {
-        args.push("--disallowedTools".into());
-        args.extend(off);
-    }
+    args.extend(tail);
 
     // the earlier conversation for a new session: as the messages it was (`replay`), or, on a CLI too old for
     // them, as text
@@ -1661,9 +1793,15 @@ async fn run_once<R: Runtime>(
         Some((true, mut w)) if warm_here && w.key == key => {
             // what it wrote while it waited (the end of the turn before)
             while w.proc.out.try_recv().is_ok() {}
-            session_id = Some(w.session);
+            session_id = Some(w.session).filter(|s| !s.is_empty());
             sdk_tools = w.tools;
+            _spare_prompt = w.prompt;
             Some(w.proc)
+        }
+        // one started ahead of the chat holds no session: it ends beside the turn
+        Some((_, w)) if ahead => {
+            end(w);
+            None
         }
         Some((_, w)) => {
             // ended before the new one starts: two CLIs never write one session
@@ -1678,21 +1816,7 @@ async fn run_once<R: Runtime>(
     let proc = match reused {
         Some(p) => p,
         None => {
-            let mut cmd = crate::shellenv::command(&cli.to_string_lossy(), &args);
-            cmd.current_dir(&cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            // Don't make the CLI think it's nested inside another Claude Code session.
-            for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"] {
-                cmd.env_remove(k);
-            }
-            // Own process group, so the CLI and everything it started (background
-            // shells, MCP servers) can be stopped together.
-            #[cfg(unix)]
-            cmd.process_group(0);
-            match Proc::start(&mut cmd) {
+            match Proc::start(&mut cli_command(&cli, &args, &cwd)) {
                 Ok(p) => p,
                 Err(e) => return fail(AppError::coded("cli_start_failed", json!({"path": cli}), format!("Could not start Claude Code ({}): {e}", cli.display()))),
             }
@@ -1706,7 +1830,8 @@ async fn run_once<R: Runtime>(
     let mut servers: Vec<&str> = sdk_tools.tools.iter().map(|(s, ..)| s.as_str()).collect();
     servers.sort_unstable();
     servers.dedup();
-    if !servers.is_empty() && !was_warm {
+    // (one started ahead of a new chat gets it now: nobody answers its tool listing while it waits)
+    if !servers.is_empty() && (!was_warm || ahead) {
         write_line(&mut stdin, &json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "initialize", "sdkMcpServers": servers}})).await;
     }
     for l in replay_lines.pop_front().unwrap_or_default() {
@@ -1756,8 +1881,9 @@ async fn run_once<R: Runtime>(
     let math = settings.latex_enabled;
     let mut result: Option<Value> = None;
     let mut interrupted = false;
-    // the turn ended with the CLI waiting for the chat's next message: it is kept for it
-    let mut kept = false;
+    // the turn ended on a clean result with nothing more to come: the turn ends on that line, and the CLI, waiting
+    // for a next message, is kept for the chat's next turn or ends beside it
+    let mut clean = false;
     // When the CLI reported its result, and how long it then gets to exit. It
     // can stay alive afterwards (a background shell, say); the turn still ends
     // then, unless a workflow (ultracode) runs: those report in a later turn.
@@ -2183,8 +2309,9 @@ async fn run_once<R: Runtime>(
                     idle = true;
                     // the spending limit ends the turn, workflows or not
                     let over_budget = ev["subtype"].as_str().is_some_and(|t| t.contains("budget"));
-                    if keep_warm && !over_budget && bg.is_empty() && !report_due && pending_say.is_empty() && ev["is_error"] != true {
-                        kept = true;
+                    if !over_budget && bg.is_empty() && !report_due && pending_say.is_empty() && ev["is_error"] != true {
+                        result_at = Some(Instant::now());
+                        clean = true;
                         break;
                     }
                     if interrupted || over_budget || (bg.is_empty() && !report_due) {
@@ -2229,9 +2356,9 @@ async fn run_once<R: Runtime>(
     // the earlier conversation didn't all go in: the CLI ended, or answered what it was only to take in
     let replay_cut = !replay_lines.is_empty() && !interrupted && ts.rows.len() == seeded;
     // Let the CLI exit on its own, then stop it and everything it started (what it last wrote, why it
-    // exited or a lost session, is read before it's looked at). A kept one goes on; a stopped one ends
-    // beside the next turn.
-    if events.is_err() || replay_cut || !(interrupted || kept) {
+    // exited or a lost session, is read before it's looked at). One that ended its turn cleanly is kept or
+    // ends beside the next turn, as does a stopped one; an incognito chat's is gone before its sweep can run.
+    if events.is_err() || replay_cut || !(interrupted || clean) || (clean && conv.incognito) {
         if let Some(p) = proc.take() {
             p.stop(events.is_err() || replay_cut).await;
         }
@@ -2322,10 +2449,16 @@ async fn run_once<R: Runtime>(
             st.cc_warm.busy(conv_id);
             let row = ts.rows.iter().rev().find(|r| r.role == "assistant").map(|r| r.id.clone());
             tauri::async_runtime::spawn(after_stop(app.clone(), st.clone(), conv_id.to_string(), p, row, ts.cost_before));
-        } else if let (true, Some(session), Some(tip)) = (kept, session_id, tip_id) {
-            WarmPool::put(st, conv_id, Warm { proc: p, key, tools: sdk_tools.clone(), session, tip });
+        } else if let (true, Some(session), Some(tip)) = (keep_warm, session_id, tip_id) {
+            WarmPool::put(st, conv_id, Warm { proc: p, key, tools: sdk_tools.clone(), session, tip, prompt: None });
         } else {
-            tauri::async_runtime::spawn(p.stop(false));
+            // the chat's next turn waits for its end: two CLIs never write one session
+            st.cc_warm.busy(conv_id);
+            let (st, conv_id) = (st.clone(), conv_id.to_string());
+            tauri::async_runtime::spawn(async move {
+                p.stop(false).await;
+                st.cc_warm.done(&conv_id);
+            });
         }
     }
     // a message that came in as the CLI went away (it is stored, but no turn took it): its own run

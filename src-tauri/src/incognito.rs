@@ -62,4 +62,22 @@ mod tests {
         assert!(closable(&db, "gone").is_err());
         assert!(closable(&db, &inc.id).is_ok());
     }
+
+    #[test]
+    fn what_an_incognito_chats_artifacts_stored_is_swept() {
+        let db = Db::open_in_memory().unwrap();
+        let chat = db.conv_create("chat", "m", None, None, &json!({})).unwrap().id;
+        let inc = db.conv_create("chat", "m", None, None, &json!({"incognito": true})).unwrap().id;
+        for c in [&chat, &inc] {
+            for shared in [false, true] {
+                assert!(db.storage_set(c, &format!("{c}/a"), shared, "k", "v", 100).unwrap());
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("cr-inc-{}", crate::util::new_id()));
+        assert_eq!(sweep(&db, &dir), 1);
+        for shared in [false, true] {
+            assert_eq!(db.storage_get(&format!("{inc}/a"), shared, "k").unwrap(), None);
+            assert_eq!(db.storage_get(&format!("{chat}/a"), shared, "k").unwrap().as_deref(), Some("v"));
+        }
+    }
 }

@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { t, LANGUAGES, currentLanguage } from './i18n.js';
 import { call, isMac, on as onBackend } from './api.js';
 import { store, emit, on } from './store.js';
-import { $, esc, h, modal, button, toast, errorToast, confirmDialog } from './util.js';
+import { $, esc, h, modal, button, toast, errorToast, confirmDialog, menuStep } from './util.js';
 import { renderImport } from './importer.js';
 import * as keymap from './keymap.js';
 import { updatesSection } from './updates.js';
@@ -13,12 +13,13 @@ import { errorNotice } from './neterr.js';
 import { connectorDialog, removeConnector } from './mcp_connector.js';
 import { diagnosticsReport } from './diagnostics.js';
 import { openDirectory } from './connector_directory.js';
+import { iconHtml, toolLabelHtml } from './mcp_tool_info.js';
 import { installExtension, installedExtension, extensionControls, nodeRuntimeRow } from './extensions_page.js';
 import { openExtensionDirectory, updateExtension } from './extension_directory.js';
 import { renderSkills } from './skills_page.js';
 import { renderMemory } from './memory_page.js';
 import { styleEditor } from './style_gen.js';
-import { wholeIn, acceleratorLabel } from './settings_values.js';
+import { wholeIn, acceleratorBinding, acceleratorFromEvent, cliProblem } from './settings_values.js';
 
 const TABS = [
   ['general', 'user', 's_profile'],
@@ -48,20 +49,50 @@ function stopRecording() {
   recorder = null;
 }
 
+/** Records the next key combination into `chip`: `take(e)` makes a shortcut of a keydown (null for
+ *  one that can't be one), `done(b)` gets it: '' for Backspace or Delete (none), undefined for Escape. */
+function recordKeys(chip, take, done) {
+  stopRecording();
+  chip.textContent = t('kb_press');
+  chip.classList.add('rec');
+  const onKey = (e) => {
+    // Settings closed or redrawn since: stop, and let the key through
+    if (!chip.isConnected) { stopRecording(); return; }
+    e.preventDefault();
+    e.stopPropagation();
+    const b = e.key === 'Escape' ? undefined : e.key === 'Backspace' || e.key === 'Delete' ? '' : take(e);
+    if (b === null) { if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) chip.textContent = t('kb_need_mod'); return; }
+    stopRecording();
+    chip.classList.remove('rec');
+    done(b);
+  };
+  window.addEventListener('keydown', onKey, true);
+  recorder = onKey;
+}
+
 export function openSettings(tab = 'general') {
   if (current) { current.show(tab); return; }
-  const root = h(`<div class="settings"><nav class="settings-nav"></nav><div class="settings-body"></div></div>`);
+  const root = h(`<div class="settings"><nav class="settings-nav" role="tablist" aria-orientation="vertical"></nav><div class="settings-body" role="tabpanel"></div></div>`);
   const nav = $('.settings-nav', root);
   const body = $('.settings-body', root);
   const drawNav = () => {
     nav.innerHTML = '';
+    nav.setAttribute('aria-label', t('settings'));
     for (const [id, ic, label] of TABS) {
-      const b = h(`<button class="nav-item" data-tab="${id}" title="${esc(t(label))}" aria-label="${esc(t(label))}">${icon(ic, 16)}<span class="label">${esc(t(label))}</span></button>`);
+      const b = h(`<button class="nav-item" role="tab" id="st-tab-${id}" aria-selected="false" tabindex="-1" data-tab="${id}" title="${esc(t(label))}" aria-label="${esc(t(label))}">${icon(ic, 16)}<span class="label">${esc(t(label))}</span></button>`);
       b.onclick = () => show(id);
       nav.appendChild(b);
     }
   };
   drawNav();
+  // one tab stop: the arrows move between the tabs (and show each), Tab goes on into the page
+  nav.addEventListener('keydown', (e) => {
+    const tabs = [...nav.querySelectorAll('[role=tab]')];
+    const to = menuStep(tabs.length, tabs.indexOf(document.activeElement), e.key);
+    if (to < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    show(tabs[to].dataset.tab);
+  });
   // what the shown tab subscribed to, undone when another tab is shown or Settings closes
   const leaving = [];
   const leave = () => { for (const f of leaving.splice(0)) f(); };
@@ -77,7 +108,15 @@ export function openSettings(tab = 'general') {
     const section = id === 'styles' ? id : null;
     if (!RENDER[id]) id = 'general';
     active = id;
-    nav.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
+    const inNav = nav.contains(document.activeElement);
+    nav.querySelectorAll('[data-tab]').forEach((b) => {
+      const on = b.dataset.tab === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+      if (on && inNav) b.focus({ preventScroll: true });
+    });
+    body.setAttribute('aria-labelledby', `st-tab-${id}`);
     // each showing renders into its own container: what a slow page (the
     // Import scan) adds after another page is shown lands in a detached one
     const page = h('<div class="settings-page"></div>');
@@ -204,8 +243,9 @@ function claudeAccount(body) {
         signInButton('primary', () => draw(true)),
         button(t('acct_terminal'), 'ghost', () => call('claude_code_login')))));
     }
-    box.appendChild(row(t('chat_engine'), t('chat_engine_d'), select('chat_engine', [['auto', t('chat_engine_auto')], ['api', t('api_plan')], ['claude-code', t('acct_plan')]])));
-    box.appendChild(h(`<p class="help" style="margin:-6px 0 18px">${esc(t('acct_chat_note'))}</p>`));
+    const engine = box.appendChild(row(t('chat_engine'), t('chat_engine_d'), select('chat_engine', [['auto', t('chat_engine_auto')], ['api', t('api_plan')], ['claude-code', t('acct_plan')]])));
+    // the note belongs to the row (a paragraph pulled up over its border ran into it)
+    engine.querySelector('.txt').appendChild(h(`<div class="d">${esc(t('acct_chat_note'))}</div>`));
   };
   draw();
 }
@@ -436,16 +476,22 @@ const RENDER = {
     const status = h('<div class="row" style="padding:4px 0 14px;flex-wrap:wrap"></div>');
     body.appendChild(status);
     const drawStatus = async () => {
+      // what the field says now (its save may still be on its way), so the status is never the old path's
+      const want = pathIn.value.trim();
       status.innerHTML = `<span class="spinner"></span>`;
-      const info = await call('claude_code_info', {}).catch(() => ({ found: false }));
-      status.innerHTML = info.found
-        ? `<span class="small">${icon('check', 13)} ${esc(info.version || 'claude')} · <span class="mono muted">${esc(info.path)}</span></span>`
-        : `<span class="small" style="color:var(--danger)">${esc(t('cc_missing'))}</span>`;
+      const info = await call('claude_code_info', { path: want }).catch(() => ({ found: false }));
+      if (pathIn.value.trim() !== want) return; // changed again meanwhile: that look is under way
+      const problem = cliProblem(want, info);
+      const odd = problem && t(problem.key, problem);
+      status.innerHTML = odd
+        ? `<span class="small" style="color:var(--danger);min-width:0;overflow-wrap:anywhere">${esc(odd)}</span>`
+        : `<span class="small" style="min-width:0;overflow-wrap:anywhere">${icon('check', 13)} ${esc(info.version || 'claude')} · <span class="mono muted">${esc(info.path)}</span></span>`;
       const login = button(t('cc_login'), 'sm', () => emit('open-settings', 'account'));
       const detect = button(t('cc_detect'), 'sm ghost', drawStatus);
       const install = button(t('cc_install'), 'sm ghost', () => call('open_external', { url: CC_SETUP_URL }));
-      if (info.found) status.append(login, detect); else status.append(install, detect);
+      if (odd) status.append(install, detect); else status.append(login, detect);
     };
+    pathIn.addEventListener('change', drawStatus);
     drawStatus();
     body.appendChild(h(`<p class="help" style="margin:-6px 0 18px">${esc(t('cc_explain'))}</p>`));
     const modes = ['default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'].map((m) => [m, t('mode_' + m)]);
@@ -465,9 +511,19 @@ const RENDER = {
   desktop(body) {
     body.appendChild(h(`<h3>${t('s_desktop')}</h3>`));
     body.appendChild(row(t('quick_entry'), t('quick_entry_d'), toggle('quick_entry_enabled')));
-    const sc = textField('quick_entry_shortcut', { placeholder: isMac ? 'Alt+Space' : 'CommandOrControl+Alt+Space' });
-    sc.style.width = '260px';
-    body.appendChild(row(t('shortcut'), '', sc));
+    // the global shortcut is recorded like the app's own ones (Settings → Shortcuts); the default is settings.rs'
+    const QE_DEFAULT = isMac ? 'Alt+Space' : 'CommandOrControl+Alt+Space';
+    const qe = h(`<div class="kb-ctl"><span class="chip mono kb-chip"></span><button class="btn sm" data-a="change">${esc(t('kb_change'))}</button><button class="btn sm ghost" data-a="reset">${esc(t('kb_reset'))}</button></div>`);
+    const qeChip = qe.querySelector('.kb-chip');
+    const drawQe = (accel) => {
+      qeChip.textContent = keymap.label(acceleratorBinding(accel)) || t('kb_off');
+      qe.querySelector('[data-a=reset]').classList.toggle('hidden', accel === QE_DEFAULT);
+    };
+    const setQe = (accel) => { save({ quick_entry_shortcut: accel }); drawQe(accel); };
+    qe.querySelector('[data-a=change]').onclick = () => recordKeys(qeChip, (e) => acceleratorFromEvent(e, isMac), (b) => (b === undefined ? drawQe(store.settings.quick_entry_shortcut) : setQe(b)));
+    qe.querySelector('[data-a=reset]').onclick = () => setQe(QE_DEFAULT);
+    drawQe(store.settings.quick_entry_shortcut);
+    body.appendChild(row(t('shortcut'), '', qe));
     body.appendChild(row(t('keep_tray'), t('keep_tray_d'), toggle('keep_in_tray')));
     body.appendChild(row(t('launch_login'), '', toggle('launch_at_login')));
     body.appendChild(row(t('notifications_toggle'), t('notifications_toggle_d'), toggle('notifications')));
@@ -509,30 +565,14 @@ const RENDER = {
         body.insertBefore(r, anchor);
       }
     };
-    const record = (action, chip) => {
-      stopRecording();
-      chip.textContent = t('kb_press');
-      chip.classList.add('rec');
-      const onKey = (e) => {
-        // Settings closed or redrawn since: stop, and let the key through
-        if (!chip.isConnected) { stopRecording(); return; }
-        e.preventDefault();
-        e.stopPropagation();
-        const done = () => { stopRecording(); chip.classList.remove('rec'); };
-        if (e.key === 'Escape') { done(); draw(); return; }
-        if (e.key === 'Backspace' || e.key === 'Delete') { done(); save({ keybindings: { ...user(), [action]: '' } }); setTimeout(draw, 300); return; }
-        const b = keymap.fromEvent(e);
-        if (!b) { if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) chip.textContent = t('kb_need_mod'); return; }
-        const p = keymap.parse(b);
-        const other = keymap.ACTIONS.find((a) => a !== action && keymap.bindings(a).some((x) => { const q = keymap.parse(x); return q.key === p.key && q.mod === p.mod && q.ctrl === p.ctrl && q.alt === p.alt && q.shift === p.shift && q.meta === p.meta; }));
-        done();
-        if (other) { toast(t('kb_conflict', { key: keymap.label(b), action: names[other] || other }), 'error'); draw(); return; }
-        save({ keybindings: { ...user(), [action]: b } });
-        setTimeout(draw, 300);
-      };
-      window.addEventListener('keydown', onKey, true);
-      recorder = onKey;
-    };
+    const record = (action, chip) => recordKeys(chip, keymap.fromEvent, (b) => {
+      if (b === undefined) { draw(); return; }
+      const p = keymap.parse(b);
+      const other = b && keymap.ACTIONS.find((a) => a !== action && keymap.bindings(a).some((x) => { const q = keymap.parse(x); return q.key === p.key && q.mod === p.mod && q.ctrl === p.ctrl && q.alt === p.alt && q.shift === p.shift && q.meta === p.meta; }));
+      if (other) { toast(t('kb_conflict', { key: keymap.label(b), action: names[other] || other }), 'error'); draw(); return; }
+      save({ keybindings: { ...user(), [action]: b } });
+      setTimeout(draw, 300);
+    });
     const fixed = h('<div class="kb-fixed"></div>');
     body.appendChild(fixed);
     const onEnter = store.settings.send_on_enter !== false;
@@ -540,7 +580,7 @@ const RENDER = {
       [t('sc_send'), onEnter ? 'Enter' : `${mod}+Enter`], [t('sc_newline'), onEnter ? 'Shift+Enter' : 'Enter'], [t('sc_stop'), 'Esc'], [t('sc_edit_last'), '↑'],
       [t('sc_switch_conv'), 'Ctrl+Tab'], [t('sc_panes'), 'Alt+1 … Alt+8'],
       [t('sc_zoom'), `${mod} + / − / 0`],
-      [t('quick_entry'), store.settings.quick_entry_enabled && store.settings.quick_entry_shortcut ? acceleratorLabel(store.settings.quick_entry_shortcut, mod) : t('kb_off')],
+      [t('quick_entry'), store.settings.quick_entry_enabled && store.settings.quick_entry_shortcut ? keymap.label(acceleratorBinding(store.settings.quick_entry_shortcut)) : t('kb_off')],
     ];
     for (const [a, b] of list) body.appendChild(row(a, '', h(`<span class="chip mono" style="height:26px">${esc(b)}</span>`)));
     draw();
@@ -601,8 +641,8 @@ const RENDER = {
 /** A server's card; `redraw(status?)` draws the list again, `status` is the mcp_status reply it came from. */
 function serverCard(s, redraw, status) {
   const disabled = (store.settings.disabled_mcp_servers || []).includes(s.name) || s.status === 'disabled';
-  const card = h(`<div class="server"><div class="head">${icon('plug', 16)}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
-    <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t(s.tools.length === 1 ? 'tools_count_one' : 'tools_count', { n: s.tools.length }) : ''}</div></div>
+  const card = h(`<div class="server"><div class="head">${iconHtml(s.server_info?.serverInfo?.icons, 16, 'plug')}<div class="grow"><div style="font-weight:600">${esc(s.name)}</div>
+    <div class="small muted">${esc(s.transport || '')}${s.server_info && s.server_info.serverInfo ? ' · ' + esc(s.server_info.serverInfo.title || s.server_info.serverInfo.name || '') + ' ' + esc(s.server_info.serverInfo.version || '') : ''}${s.tools.length ? ' · ' + t(s.tools.length === 1 ? 'tools_count_one' : 'tools_count', { n: s.tools.length }) : ''}</div></div>
     <span class="st ${esc(s.status)}">${esc(t('st_' + s.status))}</span>
     ${s.transport === 'http' ? `<button class="icon-btn sm" data-a="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">${icon('edit', 15)}</button><button class="icon-btn sm" data-a="remove" title="${esc(t('cc_remove'))}" aria-label="${esc(t('cc_remove'))}">${icon('trash', 15)}</button>` : ''}
     <label class="switch" title="${esc(t('enabled'))}"><input type="checkbox" aria-label="${esc(t('enabled'))} · ${esc(s.name)}" ${disabled ? '' : 'checked'}><span class="track"></span></label></div></div>`);
@@ -624,8 +664,8 @@ function serverCard(s, redraw, status) {
     for (const tool of s.tools) {
       const key = `${s.name}/${tool.name}`;
       const pol = (store.settings.tool_policies || {})[key] || 'ask';
-      const r = h(`<div class="tool-policy"><span class="nm" title="${esc(tool.description)}">${esc(tool.name)}</span>
-        <div class="segmented" role="group" aria-label="${esc(tool.name)}">${['ask', 'allow', 'deny'].map((p) => `<button data-p="${p}" aria-pressed="${p === pol}" class="${p === pol ? 'on' : ''}">${t('policy_' + p)}</button>`).join('')}</div></div>`);
+      const r = h(`<div class="tool-policy">${toolLabelHtml(tool)}
+        <div class="segmented" role="group" aria-label="${esc(tool.title || tool.name)}">${['ask', 'allow', 'deny'].map((p) => `<button data-p="${p}" aria-pressed="${p === pol}" class="${p === pol ? 'on' : ''}">${t('policy_' + p)}</button>`).join('')}</div></div>`);
       r.querySelectorAll('button').forEach((b) => b.onclick = () => {
         r.querySelectorAll('button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
         // just this tool: the backend merges per tool, so an "always allow"

@@ -10,13 +10,14 @@
 //       anything else                  -> "Account answer to <text>. ..." in pieces
 //     a message with shouldQuery false (an earlier conversation) is taken in, unanswered, and a
 //     generate_session_title request gets "E2E account chat"
-// Each start, with its arguments and what it read, is logged to log.jsonl beside it.
+// Each start, with its arguments, what it read and its exit, is logged to log.jsonl beside it, with its pid.
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 
 const argv = process.argv.slice(2);
-const log = (o) => fs.appendFileSync(path.join(__dirname, 'log.jsonl'), JSON.stringify(o) + '\n');
+const log = (o) => fs.appendFileSync(path.join(__dirname, 'log.jsonl'), JSON.stringify({ pid: process.pid, ...o }) + '\n');
+process.on('exit', (code) => log({ exit: code }));
 const write = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const has = (flag) => argv.includes(flag);

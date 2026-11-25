@@ -5,10 +5,10 @@
 import './stub_globals.mjs';
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { announce, clearAnnouncements, SAID_MS, wrapStep, tabStop, controlKey, copyOf } from '../js/a11y.js';
+import { source } from './source.mjs';
 
-const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+const read = source;
 
 test('a live region empties once said, and at once on a language change', () => {
   const made = [];

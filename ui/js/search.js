@@ -20,6 +20,7 @@ export function openSearch() {
     <div class="pinput">${icon('search', 16)}<input placeholder="${t('search_placeholder')}" aria-label="${esc(t('search_placeholder'))}"><span class="small muted" aria-hidden="true">Esc</span></div>
     <div class="ptabs" role="group">${TABS.map(([k, label]) => `<button data-tab="${k}" class="${k === 'all' ? 'on' : ''}" aria-pressed="${k === 'all'}">${esc(label())}</button>`).join('')}</div>
     <div class="results"></div><div class="pal-hint small muted">${esc(t('pal_hint'))}</div></div></div>`);
+  const opener = document.activeElement;
   document.body.appendChild(scrim);
   open = scrim;
   const input = $('input', scrim);
@@ -27,7 +28,11 @@ export function openSearch() {
   let items = [];
   let idx = 0;
   let tab = 'all';
-  const close = () => { scrim.remove(); open = null; };
+  const close = () => {
+    scrim.remove();
+    open = null;
+    if (opener && opener.isConnected && opener !== document.body) opener.focus({ preventScroll: true });
+  };
   // "@ for files" only where there are files: a code session's folder
   chatContext().then((ctx) => { if (!(ctx && ctx.cwd)) $('.pal-hint', scrim).textContent = t('pal_hint_chat'); }, () => {});
   const choose = (it) => {
@@ -105,9 +110,10 @@ export function openSearch() {
     run();
   });
   input.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(run, 120); });
+  // Escape from anywhere in the palette: its field, a filter or a result
+  scrim.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); close(); } });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); close(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); draw(); res.querySelector('.kb')?.scrollIntoView({ block: 'nearest' }); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); draw(); res.querySelector('.kb')?.scrollIntoView({ block: 'nearest' }); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(0, idx - 1); draw(); res.querySelector('.kb')?.scrollIntoView({ block: 'nearest' }); }
     else if (e.key === 'Enter') { e.preventDefault(); choose(items[idx]); }
   });

@@ -102,8 +102,9 @@ export function openFind() {
     input.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => search(input.value.trim()), 150); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); }
     });
+    // from its field or one of its buttons
+    bar.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); } });
     bar.querySelector('[data-a=prev]').onclick = () => step(-1);
     bar.querySelector('[data-a=next]').onclick = () => step(1);
     bar.querySelector('[data-a=close]').onclick = () => closeFind();

@@ -5,9 +5,10 @@ import { esc, h, morph, toast, errorToast, fmtUsd, snapshot, sameSnapshot, relPa
 import { friendlyError } from './neterr.js';
 import { lineDiff } from './diffstat.js';
 import { call } from './api.js';
-import { store, modelInfo } from './store.js';
+import { store, modelInfo, emit } from './store.js';
 import { watchMermaid } from './mermaid_block.js';
 import { mountApp } from './mcp_apps.js';
+import { findTool } from './mcp_tool_info.js';
 
 // ------------------------------------------------------------- decorating
 
@@ -144,6 +145,8 @@ document.addEventListener('click', async (e) => {
     e.preventDefault();
     const href = a.getAttribute('href') || '';
     if (/^(https?:|mailto:)/i.test(href)) call('open_external', { url: href }).catch(() => {});
+    // (only an app notice's own link: a link in an answer never opens Settings)
+    else if (href.startsWith('#settings/') && a.closest('.notice')) emit('open-settings', href.slice('#settings/'.length));
   }
 });
 
@@ -205,7 +208,8 @@ function toolSummary(p) {
     case 'Task': case 'Agent': return { name: i.subagent_type || 'Agent', arg: i.description || '' };
     case 'recent_chats': return { name: t('recent_chats_tool'), arg: '' };
     default:
-      if (p.server && p.server !== 'anthropic') return { name: p.tool, arg: p.server };
+      // an MCP tool by the title its server gives it
+      if (p.server && p.server !== 'anthropic') return { name: findTool(p.server, p.tool)?.title || p.tool, arg: p.server };
       return { name: p.tool || p.name, arg: '' };
   }
 }
@@ -424,8 +428,16 @@ export function errorMessage(err) {
 
 // the help sites the app's own error sentences name: a link's address comes from this list, never from the message
 const HELP_LINK = /\b(?:https:\/\/)?(claude\.com\/claude-code|nodejs\.org|www\.python\.org\/downloads\/|docs\.astral\.sh\/uv\/)/g;
-/** Escaped text with the help sites it names made links (opened in the browser by the click handler above). */
-export const linkHelp = (escaped) => escaped.replace(HELP_LINK, (m, site) => `<a href="https://${site}">${m}</a>`);
+// the Settings pages they send you to ("Settings → Code"), as said in the UI's language
+const SETTINGS_PAGES = [['code', 's_code'], ['developer', 's_developer'], ['account', 's_account']];
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Escaped text with the help sites it names made links (opened in the browser by the click handler
+ *  above), and the Settings pages it names links that open them. */
+export const linkHelp = (escaped) => {
+  const pages = new Map(SETTINGS_PAGES.map(([id, k]) => [esc(`${t('settings')} → ${t(k)}`), id]));
+  const named = new RegExp([...pages.keys()].map(reEsc).join('|'), 'g');
+  return escaped.replace(HELP_LINK, (m, site) => `<a href="https://${site}">${m}</a>`).replace(named, (m) => `<a href="#settings/${pages.get(m)}">${m}</a>`);
+};
 
 function renderNotice(el, p, ctx) {
   el.className = 'notice';

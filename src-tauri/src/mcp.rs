@@ -28,7 +28,14 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
-pub const PROTOCOL_VERSION: &str = "2025-06-18";
+/// The MCP revisions this client speaks, newest first: `initialize` offers the
+/// first, and the server may answer with any of them (it picks; see `handshake`).
+pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+pub const PROTOCOL_VERSION: &str = PROTOCOL_VERSIONS[0];
+/// At most this many icons of a server, tool or resource are kept, each a
+/// data: URI of at most this many bytes or an https: URL.
+const MAX_ICONS: usize = 4;
+const MAX_ICON_DATA_BYTES: usize = 64 * 1024;
 
 /// Longest stdout line (one JSON-RPC message) taken from a stdio server; a
 /// longer one is dropped (and logged) instead of being buffered without end.
@@ -59,6 +66,24 @@ pub struct McpTool {
     pub read_only: bool,
 }
 
+/// The icons the UI may show from an MCP `icons` list: images given as a
+/// data: URI or an https: URL (never another scheme: a server's icon must
+/// not reach the file system or the app's own pages), each with its MIME
+/// type, sizes and theme when given.
+pub fn icons_of(v: &Value) -> Vec<Value> {
+    let image_data = |s: &str| {
+        s.strip_prefix("data:image/")
+            .is_some_and(|r| ["png;", "jpeg;", "gif;", "webp;", "svg+xml;"].iter().any(|t| r.starts_with(t)) && s.len() <= MAX_ICON_DATA_BYTES)
+    };
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["src"].as_str().is_some_and(|s| image_data(s) || (s.starts_with("https://") && s.len() <= 2048)))
+        .take(MAX_ICONS)
+        .map(|i| json!({"src": i["src"], "mimeType": i["mimeType"], "sizes": i["sizes"], "theme": i["theme"]}))
+        .collect()
+}
+
 /// The app's own tools (`definitions` in the API's shape) as an SDK-hosted server lists them to the account
 /// engine's CLI. Their API name is the bare tool name, which no MCP server's tool can have (those are
 /// `server__tool`): that is how a call is told apart from one for a connected server with the same tool name.
@@ -86,7 +111,8 @@ pub struct ServerStatus {
     pub transport: String,
     pub status: String,
     pub error: Option<String>,
-    pub tools: Vec<McpTool>,
+    /// Its tools (`McpTool`) with what only the UI shows of them: `destructive`, `icons`.
+    pub tools: Vec<Value>,
     pub server_info: Value,
     pub logs: Vec<String>,
     pub disabled: bool,
@@ -145,6 +171,9 @@ pub struct McpServer {
     next_id: AtomicI64,
     state: State,
     tools: Mutex<Vec<McpTool>>,
+    /// Tool name -> what the UI shows of it besides the `McpTool`: whether the
+    /// server marks it destructive, and its icons.
+    tool_extras: Mutex<HashMap<String, Value>>,
     info: Mutex<Value>,
     logs: Logs,
     /// Told whenever the server changes by itself (see McpManager::changed).
@@ -324,9 +353,17 @@ impl Drop for InFlight<'_> {
     }
 }
 
+/// The server's JSON-RPC error `e` (the URLs of one that wants the user to
+/// do something in a browser first, MCP 2025-11-25, kept for `McpManager::call`).
 fn rpc_error(e: &Value) -> AppError {
-    AppError::msg(format!("MCP error: {}", e["message"].as_str().map(String::from).unwrap_or_else(|| e.to_string())))
+    let message = format!("MCP error: {}", e["message"].as_str().map(String::from).unwrap_or_else(|| e.to_string()));
+    if e["code"] == URL_ELICITATION_REQUIRED {
+        return AppError::coded("mcp_url_required", json!({"elicitations": e["data"]["elicitations"]}), message);
+    }
+    AppError::msg(message)
 }
+
+const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// The answer to request `id` among JSON-RPC messages (one, or a batch).
 fn find_reply(v: Value, id: i64) -> Option<Value> {
@@ -357,7 +394,6 @@ fn http_post(
         .post(url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", PROTOCOL_VERSION)
         .timeout(timeout)
         .body(body);
     for (k, v) in headers {
@@ -471,7 +507,10 @@ impl McpServer {
                     return self.request_sse(stream, method, &msg, bearer, timeout, &mut flight).await;
                 }
                 let sent_session = session.lock().clone();
-                let resp = match http_post(client, url, headers, bearer.as_deref(), sent_session.as_deref(), msg.to_string(), timeout).send().await {
+                let post = http_post(client, url, headers, bearer.as_deref(), sent_session.as_deref(), msg.to_string(), timeout);
+                // (none on `initialize`, a renewed session's too: the version is settled anew)
+                let post = if method == "initialize" { post } else { self.versioned(post) };
+                let resp = match post.send().await {
                     Ok(r) => r,
                     Err(e) => {
                         // a request that timed out is withdrawn; one that never
@@ -550,7 +589,7 @@ impl McpServer {
                 let Some((to, session)) = self.post_target().filter(|_| notify && !answered) else { return };
                 // no refresh here: a token being refreshed is skipped
                 let bearer = oauth.as_ref().and_then(|o| o.tokens.try_lock().ok()?.as_ref().map(|t| t.access_token.clone()));
-                let req = http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), note.to_string(), Duration::from_secs(15));
+                let req = self.versioned(http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), note.to_string(), Duration::from_secs(15)));
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     rt.spawn(async move {
                         let _ = req.send().await;
@@ -591,6 +630,15 @@ impl McpServer {
                 self.name
             ))),
             Reply::Unauthorized(_) => Err(self.sign_in_needed()),
+        }
+    }
+
+    /// `req` with the protocol version `initialize` settled on, which every
+    /// later request on the streamable HTTP transport carries (none before).
+    fn versioned(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.info.lock()["protocolVersion"].as_str() {
+            Some(v) => req.header("MCP-Protocol-Version", v),
+            None => req,
         }
     }
 
@@ -711,7 +759,7 @@ impl McpServer {
             Transport::Http { client, headers, .. } => {
                 let bearer = self.bearer().await;
                 let Some((to, session)) = self.post_target() else { return };
-                let _ = http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), msg.to_string(), Duration::from_secs(15)).send().await;
+                let _ = self.versioned(http_post(client, &to, headers, bearer.as_deref(), session.as_deref(), msg.to_string(), Duration::from_secs(15))).send().await;
             }
         }
     }
@@ -720,7 +768,8 @@ impl McpServer {
     async fn handshake(&self) -> AppResult<()> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"roots": {"listChanged": true}, "elicitation": {}},
+            // (a server of 2025-06-18 reads `elicitation` as forms only, which it is to that one)
+            "capabilities": {"roots": {"listChanged": true}, "elicitation": {"form": {}, "url": {}}},
             "clientInfo": {"name": "ClaudeRust", "version": env!("CARGO_PKG_VERSION")}
         });
         let r = match self.request_authorized("initialize", &params, Duration::from_secs(60)).await? {
@@ -729,7 +778,19 @@ impl McpServer {
             Reply::SessionExpired(_) => return Err(AppError::msg("the server rejected the new session")),
             Reply::Unauthorized(_) => return Err(self.sign_in_needed()),
         };
-        *self.info.lock() = json!({"serverInfo": r["serverInfo"], "capabilities": r["capabilities"], "instructions": r["instructions"]});
+        let version = r["protocolVersion"].as_str().unwrap_or_default();
+        if !PROTOCOL_VERSIONS.contains(&version) {
+            return Err(AppError::coded(
+                "mcp_protocol_unsupported",
+                json!({"name": self.name, "version": version}),
+                format!("MCP server '{}' speaks protocol version \"{version}\", which ClaudeRust doesn't (it speaks {}).", self.name, PROTOCOL_VERSIONS.join(", ")),
+            ));
+        }
+        let mut server_info = r["serverInfo"].clone();
+        if server_info.is_object() {
+            server_info["icons"] = json!(icons_of(&r["serverInfo"]["icons"]));
+        }
+        *self.info.lock() = json!({"serverInfo": server_info, "capabilities": r["capabilities"], "instructions": r["instructions"], "protocolVersion": version});
         self.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})).await;
         Ok(())
     }
@@ -746,6 +807,7 @@ impl McpServer {
             return Ok(());
         }
         let mut all = vec![];
+        let mut extras = HashMap::new();
         let mut cursor: Option<String> = None;
         for _ in 0..20 {
             let params = match &cursor {
@@ -776,13 +838,17 @@ impl McpServer {
                     if !model_sees {
                         continue;
                     }
+                    let read_only = t["annotations"]["readOnlyHint"].as_bool().unwrap_or(false);
+                    // (the spec's default is "may be destructive"; only a server's own word is shown)
+                    let destructive = !read_only && t["annotations"]["destructiveHint"] == true;
+                    extras.insert(name.clone(), json!({"destructive": destructive, "icons": icons_of(&t["icons"])}));
                     all.push(McpTool {
                         server: self.name.clone(),
                         api_name: api_tool_name(&self.name, &name),
                         title: t["title"].as_str().or(t["annotations"]["title"].as_str()).map(|s| s.to_string()),
                         description: t["description"].as_str().unwrap_or("").to_string(),
                         input_schema: schema,
-                        read_only: t["annotations"]["readOnlyHint"].as_bool().unwrap_or(false),
+                        read_only,
                         name,
                     });
                 }
@@ -793,7 +859,26 @@ impl McpServer {
             }
         }
         *self.tools.lock() = all;
+        *self.tool_extras.lock() = extras;
         Ok(())
+    }
+
+    /// Every item (`key` of the answers) of list request `method`, page after
+    /// page as `nextCursor` names them (at most 20).
+    async fn list_all(&self, method: &str, key: &str) -> AppResult<Vec<Value>> {
+        let mut out = vec![];
+        let mut params = json!({});
+        for _ in 0..20 {
+            let mut r = self.request(method, params, Duration::from_secs(20)).await?;
+            if let Value::Array(items) = r[key].take() {
+                out.extend(items);
+            }
+            match r["nextCursor"].as_str() {
+                Some(c) => params = json!({"cursor": c}),
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     /// Stop the server. A stdio server first gets its stdin closed, the
@@ -824,7 +909,20 @@ impl McpServer {
             },
             status,
             error,
-            tools: self.tools.lock().clone(),
+            tools: {
+                let extras = self.tool_extras.lock();
+                self.tools
+                    .lock()
+                    .iter()
+                    .map(|t| {
+                        let mut v = json!(t);
+                        if let (Some(o), Some(Value::Object(e))) = (v.as_object_mut(), extras.get(&t.name)) {
+                            o.extend(e.clone());
+                        }
+                        v
+                    })
+                    .collect()
+            },
             server_info: self.info.lock().clone(),
             logs: self.logs.lock().iter().cloned().collect(),
             disabled,
@@ -1424,13 +1522,25 @@ impl McpManager {
             .get(&tool.server)
             .cloned()
             .ok_or_else(|| AppError::msg("MCP server not connected"))?;
-        let r = server
+        let r = match server
             .request(
                 "tools/call",
                 json!({"name": tool.name, "arguments": if args.is_object() { args.clone() } else { json!({}) }}),
                 Duration::from_secs(600),
             )
-            .await?;
+            .await
+        {
+            // each URL is offered to the user like a URL elicitation (nothing to answer: the call failed)
+            Err(e) if e.kind() == "mcp_url_required" => {
+                let Value::Array(els) = e.params()["elicitations"].take() else { return Err(e) };
+                for el in els.into_iter().filter(|el| el["mode"] == "url") {
+                    let server = tool.server.clone();
+                    tokio::spawn(async move { elicit::ask(&server, &el).await });
+                }
+                return Err(e);
+            }
+            r => r?,
+        };
         if server.apps.lock().get(&tool.name).is_some_and(|u| u.resource_uri.is_some()) && r.to_string().len() <= apps::MAX_RESULT_BYTES {
             let mut kept = self.app_results.lock();
             if kept.len() >= 32 {
@@ -1501,10 +1611,8 @@ impl McpManager {
             if s.info.lock()["capabilities"]["prompts"].is_null() {
                 continue;
             }
-            if let Ok(r) = s.request("prompts/list", json!({}), Duration::from_secs(20)).await {
-                for p in r["prompts"].as_array().cloned().unwrap_or_default() {
-                    out.push(json!({"server": s.name, "name": p["name"], "description": p["description"], "arguments": p["arguments"]}));
-                }
+            for p in s.list_all("prompts/list", "prompts").await.unwrap_or_default() {
+                out.push(json!({"server": s.name, "name": p["name"], "title": p["title"], "description": p["description"], "arguments": p["arguments"], "icons": icons_of(&p["icons"])}));
             }
         }
         out
@@ -1546,33 +1654,27 @@ impl McpManager {
             if s.info.lock()["capabilities"]["resources"].is_null() {
                 continue;
             }
-            if let Ok(r) = s.request("resources/list", json!({}), Duration::from_secs(20)).await {
-                for res in r["resources"].as_array().cloned().unwrap_or_default() {
-                    out.push(json!({"server": s.name, "uri": res["uri"], "name": res["name"], "mimeType": res["mimeType"], "description": res["description"]}));
-                }
+            let listed = |r: &Value| json!({"server": s.name, "name": r["name"], "title": r["title"], "mimeType": r["mimeType"], "description": r["description"], "icons": icons_of(&r["icons"])});
+            for r in s.list_all("resources/list", "resources").await.unwrap_or_default() {
+                let mut v = listed(&r);
+                v["uri"] = r["uri"].clone();
+                out.push(v);
+            }
+            // read once their arguments are filled in (a server without any answers with an error)
+            for r in s.list_all("resources/templates/list", "resourceTemplates").await.unwrap_or_default() {
+                let mut v = listed(&r);
+                v["uriTemplate"] = r["uriTemplate"].clone();
+                out.push(v);
             }
         }
         out
     }
 
-    pub async fn read_resource(&self, server: &str, uri: &str) -> AppResult<(String, String)> {
-        let s = self
-            .servers
-            .read()
-            .await
-            .get(server)
-            .cloned()
-            .ok_or_else(|| AppError::msg("MCP server not connected"))?;
-        let r = s
-            .request("resources/read", json!({"uri": uri}), Duration::from_secs(60))
-            .await?;
-        let mut text = String::new();
-        for c in r["contents"].as_array().cloned().unwrap_or_default() {
-            if let Some(t) = c["text"].as_str() {
-                text.push_str(t);
-            }
-        }
-        Ok((uri.to_string(), text))
+    /// `resources/read` of `uri` on `server`: its contents, each with its own
+    /// `uri` and `mimeType` and either `text` or a base64 `blob`.
+    pub async fn read_resource(&self, server: &str, uri: &str) -> AppResult<Vec<Value>> {
+        let r = self.server(server).await?.request("resources/read", json!({"uri": uri}), Duration::from_secs(60)).await?;
+        Ok(r["contents"].as_array().cloned().unwrap_or_default())
     }
 }
 
@@ -1797,6 +1899,7 @@ async fn connect(name: &str, conf: &Value, changed: Arc<Notify>, logs: Logs, roo
         next_id: AtomicI64::new(1),
         state,
         tools: Mutex::new(vec![]),
+        tool_extras: Mutex::new(HashMap::new()),
         info: Mutex::new(Value::Null),
         logs: logs.clone(),
         changed,
@@ -2413,6 +2516,8 @@ for line in sys.stdin:
 
     struct HttpReq {
         session: Option<String>,
+        /// Its MCP-Protocol-Version header.
+        version: Option<String>,
         body: Value,
     }
 
@@ -2448,7 +2553,7 @@ for line in sys.stdin:
                         }
                     }
                     let body = serde_json::from_slice(&buf[head_end..head_end + len]).unwrap_or(Value::Null);
-                    let (status, set_session, ctype, text) = handle(HttpReq { session: header("mcp-session-id:"), body });
+                    let (status, set_session, ctype, text) = handle(HttpReq { session: header("mcp-session-id:"), version: header("mcp-protocol-version:"), body });
                     let mut resp = format!("HTTP/1.1 {status} X\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n", text.len());
                     if let Some(sid) = set_session {
                         resp.push_str(&format!("mcp-session-id: {sid}\r\n"));
@@ -2502,7 +2607,7 @@ for line in sys.stdin:
         let url = http_server(move |req| {
             let method = req.body["method"].as_str().unwrap_or("").to_string();
             if method == "initialize" {
-                assert!(req.session.is_none(), "a new session starts without the old id");
+                assert!(req.session.is_none() && req.version.is_none(), "a new session starts without the old id or version");
                 let n = s2.fetch_add(1, Ordering::SeqCst) + 1;
                 e2.store(false, Ordering::SeqCst);
                 let answer = json!({"jsonrpc": "2.0", "id": req.body["id"], "result": http_result(&method, &req.body)});
@@ -2527,6 +2632,89 @@ for line in sys.stdin:
         assert_eq!(sessions.load(Ordering::SeqCst), 2);
         let Transport::Http { session, .. } = &s.transport else { unreachable!() };
         assert_eq!(session.lock().as_deref(), Some("s2"));
+    }
+
+    #[tokio::test]
+    async fn the_newest_protocol_is_offered_and_the_one_the_server_answers_is_spoken() {
+        // each request: {method, version (its header), params}
+        let seen: Arc<Mutex<Vec<Value>>> = Default::default();
+        let answer = Arc::new(Mutex::new("2025-06-18".to_string()));
+        let (log, said) = (seen.clone(), answer.clone());
+        let png = "data:image/png;base64,iVBORw0KGgo=";
+        let url = http_server(move |req| {
+            let method = req.body["method"].as_str().unwrap_or("").to_string();
+            log.lock().push(json!({"method": method, "version": req.version, "params": req.body["params"]}));
+            if req.body["id"].is_null() {
+                return (202, None, "application/json", String::new());
+            }
+            let page = req.body["params"]["cursor"].as_str().map(String::from);
+            let result = match method.as_str() {
+                "initialize" => json!({"protocolVersion": said.lock().clone(), "capabilities": {"tools": {}, "resources": {}},
+                    "serverInfo": {"name": "web", "icons": [{"src": png, "theme": "dark"}, {"src": "file:///C:/x.png"}, {"src": "javascript:alert(1)"}]}}),
+                "tools/list" => json!({"tools": [
+                    {"name": "add", "title": "Add numbers", "annotations": {"readOnlyHint": true, "destructiveHint": true}, "icons": [{"src": "https://example.com/add.svg", "sizes": ["any"]}]},
+                    {"name": "delete_all", "annotations": {"destructiveHint": true}},
+                    {"name": "plain"},
+                ]}),
+                "resources/list" if page.is_none() => json!({"resources": [{"uri": "file:///a.md", "name": "a.md"}], "nextCursor": "p2"}),
+                "resources/list" => json!({"resources": [{"uri": "file:///b.png", "name": "b.png", "mimeType": "image/png"}]}),
+                "resources/templates/list" => json!({"resourceTemplates": [{"uriTemplate": "db://users/{id}", "name": "user", "title": "A user"}]}),
+                m => http_result(m, &req.body),
+            };
+            (200, Some("s1".into()), "application/json", json!({"jsonrpc": "2.0", "id": req.body["id"], "result": result}).to_string())
+        })
+        .await;
+        let dir = temp_dir("versions");
+        let m = manager(&dir, json!({"web": {"url": url}})).await;
+        let status = m.statuses().await.remove(0);
+        assert_eq!(status.status, "connected", "{:?}", status.error);
+        {
+            let seen = seen.lock();
+            let first = &seen[0];
+            assert_eq!((first["method"].as_str(), first["params"]["protocolVersion"].as_str()), (Some("initialize"), Some("2025-11-25")));
+            assert_eq!(first["params"]["capabilities"]["elicitation"], json!({"form": {}, "url": {}}));
+            // no version before it is settled, the server's after
+            assert_eq!(first["version"], Value::Null);
+            assert!(seen[1..].iter().all(|r| r["version"] == "2025-06-18"), "{seen:?}");
+        }
+        assert_eq!(status.server_info["protocolVersion"], "2025-06-18");
+        // only image data and https icons reach the UI
+        assert_eq!(status.server_info["serverInfo"]["icons"], json!([{"src": png, "mimeType": null, "sizes": null, "theme": "dark"}]));
+        let tool = |name: &str| status.tools.iter().find(|t| t["name"] == name).unwrap().clone();
+        let add = tool("add");
+        assert_eq!((add["title"].as_str(), add["read_only"].as_bool(), add["destructive"].as_bool()), (Some("Add numbers"), Some(true), Some(false)));
+        assert_eq!(add["icons"][0]["src"], "https://example.com/add.svg");
+        assert_eq!((tool("delete_all")["destructive"].as_bool(), tool("plain")["destructive"].as_bool()), (Some(true), Some(false)));
+        // both pages of resources, then the templates
+        let res = m.list_resources().await;
+        let got: Vec<(&str, &str)> = res.iter().map(|r| (r["name"].as_str().unwrap(), r["uri"].as_str().or(r["uriTemplate"].as_str()).unwrap())).collect();
+        assert_eq!(got, [("a.md", "file:///a.md"), ("b.png", "file:///b.png"), ("user", "db://users/{id}")]);
+        m.stop_all().await;
+        // a version this client doesn't speak: refused, with the server's word for it
+        *answer.lock() = "2099-01-01".into();
+        let Err((e, _)) = connect("web", &json!({"url": url}), Default::default(), Default::default(), Default::default()).await else { panic!("connected") };
+        assert_eq!((e.kind(), e.params()["version"].as_str()), ("mcp_protocol_unsupported", Some("2099-01-01")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn icons_are_kept_to_images_from_data_or_https() {
+        let big = format!("data:image/png;base64,{}", "A".repeat(MAX_ICON_DATA_BYTES));
+        let kept = icons_of(&json!([
+            {"src": "data:image/svg+xml;base64,PHN2Zy8+"}, {"src": "data:text/html;base64,PGI+"}, {"src": "http://example.com/i.png"},
+            {"src": big}, {"src": 7}, "nope", {"src": "https://a/1.png"}, {"src": "https://a/2.png"}, {"src": "https://a/3.png"}, {"src": "https://a/4.png"},
+        ]));
+        let srcs: Vec<&str> = kept.iter().map(|i| i["src"].as_str().unwrap()).collect();
+        assert_eq!(srcs, ["data:image/svg+xml;base64,PHN2Zy8+", "https://a/1.png", "https://a/2.png", "https://a/3.png"]);
+        assert!(icons_of(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn a_tool_call_that_needs_a_browser_step_keeps_its_urls() {
+        let e = rpc_error(&json!({"code": -32042, "message": "Authorize first", "data": {"elicitations": [{"mode": "url", "url": "https://x.example/auth", "elicitationId": "1", "message": "Connect"}]}}));
+        assert_eq!((e.kind(), e.to_string()), ("mcp_url_required", "MCP error: Authorize first".to_string()));
+        assert_eq!(e.params()["elicitations"][0]["url"], "https://x.example/auth");
+        assert_eq!(rpc_error(&json!({"code": -32603, "message": "boom"})).kind(), "error");
     }
 
     #[test]

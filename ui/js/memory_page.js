@@ -34,23 +34,25 @@ export async function renderMemory(parent) {
   const enabled = switchRow('memory_enabled', t('mem_enable'), t('mem_enable_d'), !!store.settings.memory_enabled);
   const perProject = switchRow('memory_project_scope', t('mem_per_project'), t('mem_per_project_d'), store.settings.memory_project_scope !== false);
 
-  const sel = h(`<select class="select" style="width:auto;min-width:min(200px,100%);max-width:100%" aria-label="${esc(t('mem_scope'))}"></select>`);
+  const sel = h(`<select class="select" style="max-width:100%" aria-label="${esc(t('mem_scope'))}"></select>`);
   const fillScopes = () => {
     const scopes = [['global', t('mem_scope_global')], ...(perProject.checked ? store.projects || [] : []).map((p) => [p.id, t('mem_scope_project', { name: p.name })])];
     const cur = sel.value;
     sel.innerHTML = scopes.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
     sel.value = scopes.some(([v]) => v === cur) ? cur : 'global';
   };
-  const when = h('<span class="small muted"></span>');
-  const excl = h(`<label class="row small" style="gap:6px"><input type="checkbox"> ${esc(t('mem_exclude'))}</label>`);
+  const when = h('<div class="d"></div>');
+  const excl = h(`<label class="row small" style="gap:6px;margin-top:6px"><input type="checkbox"> ${esc(t('mem_exclude'))}</label>`);
   const exclIn = excl.querySelector('input');
   exclIn.addEventListener('change', () => {
     const set = new Set(store.settings.memory_excluded_projects || []);
     if (exclIn.checked) set.add(sel.value); else set.delete(sel.value);
     emit('save-settings', { memory_excluded_projects: [...set] });
   });
-  const head = h('<div class="row" style="gap:12px;margin:16px 0 8px;flex-wrap:wrap"></div>');
-  head.append(sel, when, excl);
+  // a row like every other one in Settings: the name and when it was updated, the picker at the end
+  const head = h(`<div class="setting-row" style="border-bottom:none"><div class="txt"><div class="t">${esc(t('mem_scope'))}</div></div></div>`);
+  head.firstChild.append(when, excl);
+  head.append(sel);
   const ta = h(`<textarea class="textarea" rows="12" spellcheck="false" aria-label="${esc(t('mem_title'))}" placeholder="${esc(t('mem_empty'))}"></textarea>`);
   if (list.max_chars) ta.maxLength = list.max_chars;
   const btns = h('<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center"></div>');

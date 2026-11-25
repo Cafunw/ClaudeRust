@@ -25,6 +25,24 @@ export function filterDirectory(list, q, category = '') {
   });
 }
 
+/** The letters of entry `name`'s tile (no third-party logos are shipped): the initials of its first
+ *  two words, of a single word's capitals ("GitHub" → "GH"), else its first two letters ("Linear" → "Li"). */
+export function monogram(name) {
+  const words = String(name || '').match(/[\p{L}\p{N}]+/gu) || [];
+  if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
+  const w = [...(words[0] || '?')];
+  const cap = w.slice(1).find((c) => /\p{Lu}/u.test(c));
+  return cap ? (w[0] + cap).toUpperCase() : w[0].toUpperCase() + w.slice(1, 2).join('').toLowerCase();
+}
+
+/** Which of the TILE_COLORS colours the tile of `name` gets: the same for a name every time. */
+export const TILE_COLORS = 8;
+export function tileColor(name) {
+  let n = 0;
+  for (const ch of String(name || '')) n = (n * 31 + ch.codePointAt(0)) >>> 0;
+  return n % TILE_COLORS;
+}
+
 /** A name for entry `c` that no configured server has yet. */
 export function freeName(c, status) {
   const taken = new Set(Object.keys(((status && status.config) || {}).mcpServers || {}));
@@ -64,7 +82,7 @@ export async function openDirectory(status, redraw) {
     const shown = filterDirectory(list, input.value, category);
     if (!shown.length) out.appendChild(h(`<div class="empty-state" style="padding:30px">${esc(t('cd_none'))}</div>`));
     for (const c of shown) {
-      const card = h(`<div class="server" role="listitem"><div class="head">${icon('plug', 16)}<div class="grow" style="min-width:0">
+      const card = h(`<div class="server" role="listitem"><div class="head"><span class="cd-tile t${tileColor(c.name)}" aria-hidden="true">${esc(monogram(c.name))}</span><div class="grow" style="min-width:0">
         <div style="font-weight:600">${esc(c.name)} <span class="cd-cat">${esc(c.categoryLabel)}</span></div>
         <div class="small">${esc(c.description)}</div>
         <div class="small muted"><b class="mono">${esc(c.domain)}</b> · ${esc(t('cd_auth_' + (c.auth || 'none')))}</div></div>

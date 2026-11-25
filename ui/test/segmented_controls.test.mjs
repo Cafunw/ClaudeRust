@@ -3,10 +3,10 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { contrast } from '../e2e/contrast.mjs';
+import { source } from './source.mjs';
 
-const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
+const read = source;
 const CSS = read('../css/app.css');
 
 /** The custom properties of the first rule whose selector starts with `sel`. */

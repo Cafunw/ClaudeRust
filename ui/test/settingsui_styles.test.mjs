@@ -2,12 +2,12 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { samplesOf, fitSample, MAX_SAMPLES, MAX_SAMPLE_CHARS } from '../js/style_gen.js';
 import { t } from '../js/i18n.js';
-import { wholeIn, acceleratorLabel } from '../js/settings_values.js';
+import { wholeIn } from '../js/settings_values.js';
+import { source } from './source.mjs';
 
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+const read = source;
 
 test('the samples sent are trimmed, the empty ones left out', () => {
   assert.deepEqual(samplesOf(['  a ', '', '\n ', 'b']), ['a', 'b']);
@@ -42,13 +42,6 @@ test('number fields take whole numbers in their range only', () => {
   for (const bad of ['', '  ', '5.5', 'abc', '1023', '128001']) assert.equal(wholeIn(bad, 1024, 128000), null, bad);
   assert.equal(wholeIn('-1'), null);
   assert.equal(wholeIn('0'), 0);
-});
-
-test('a global shortcut is shown with this system’s key name', () => {
-  assert.equal(acceleratorLabel('CommandOrControl+Alt+Space', 'Ctrl'), 'Ctrl+Alt+Space');
-  assert.equal(acceleratorLabel('CmdOrCtrl+Shift+K', '⌘'), '⌘+Shift+K');
-  assert.equal(acceleratorLabel('Alt+Space', '⌘'), 'Alt+Space');
-  assert.equal(acceleratorLabel(undefined, 'Ctrl'), '');
 });
 
 test('every string Settings shows has an English and a Turkish text', () => {

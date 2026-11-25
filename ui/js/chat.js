@@ -14,7 +14,6 @@ import { renderParts, turnPlainText, copyText, unifiedDiffHtml, errorMessage, re
 import { editedFiles } from './diffstat.js';
 import { questionCard } from './ask_question.js';
 import * as artifacts from './artifacts.js';
-import { forgetConversation } from './artifact_storage.js';
 import { PAGE_TURNS, pageStart, parked, drawWithin, FRAME_BUDGET, OPEN_BUDGET } from './turnwindow.js';
 import { retryLabel } from './retry_ui.js';
 import { panelStep } from './branch_panel.js';
@@ -24,6 +23,7 @@ import { limitBanner } from './usage_limits.js';
 import { researchLine, researchQuery } from './research_ui.js';
 import { orgSupported, setPinned, setUnread, setSection, setArchived, opened } from './sidebar_org.js';
 import { newSection } from './sidebar.js';
+import { permissionInfo } from './mcp_tool_info.js';
 
 let cur = null;
 
@@ -61,8 +61,7 @@ export function incognitoBanner() {
 function discardIncognito(id) {
   workspace.disposeConversation(id);
   store.drafts.delete(id);
-  // what its artifacts stored (window.storage) goes too
-  try { forgetConversation(localStorage, id); } catch { /* no storage here */ }
+  // (what its artifacts stored with window.storage goes with it: db.rs artifact_storage)
   call('close_incognito', { id }).catch(() => {});
 }
 
@@ -949,8 +948,9 @@ function startEdit(el, turn, text) {
   };
   box.querySelector('[data-a=cancel]').onclick = cancel;
   box.querySelector('[data-a=save]').onclick = save;
+  // Esc from the field or its Cancel and Save
+  box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } });
   ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.repeat) { e.preventDefault(); save(); }
   });
 }
@@ -1343,10 +1343,11 @@ function showPermission(p) {
     }
     buttons = [['once', t('allow_once'), 'primary'], ['session', t('allow_session'), ''], ['deny', t('deny'), 'ghost']];
   } else {
-    title = `${icon('plug', 17)} ${t('wants_to_use')} <span class="mono" style="font-size:13px">${esc(p.tool_name || p.tool)}</span>`;
-    desc = t('from_server', { server: p.server });
+    const tool = permissionInfo(p);
+    title = tool.title;
+    desc = tool.desc;
     const j = JSON.stringify(input, null, 2);
-    detail = j && j !== '{}' ? `<pre>${esc(j)}</pre>` : '';
+    detail = `${tool.about}${j && j !== '{}' ? `<pre>${esc(j)}</pre>` : ''}`;
     buttons = [['once', t('allow_once'), 'primary'], ['chat', t('allow_chat'), ''], ['always', t('allow_always'), ''], ['deny', t('deny'), 'ghost']];
   }
   const card = h(`<div class="perm-card" data-req="${esc(p.request_id)}" role="group" tabindex="-1" aria-labelledby="pt-${esc(p.request_id)}">

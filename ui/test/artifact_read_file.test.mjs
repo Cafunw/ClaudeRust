@@ -4,10 +4,10 @@ import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
 import { readFileFor, bytesOf } from '../js/artifact_bridge.js';
+import { source } from './source.mjs';
 
-const SHIM = readFileSync(new URL('../../src-tauri/src/artifact_fs.js', import.meta.url), 'utf8');
+const SHIM = source('../../src-tauri/src/artifact_fs.js');
 
 function frame() {
   const listeners = [];

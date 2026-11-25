@@ -60,8 +60,9 @@ function editorRow(initial, onSave, onCancel) {
   tr.querySelector('[data-a=cancel]').onclick = onCancel;
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onCancel(); }
   });
+  // Esc from the field or its Cancel and Add
+  tr.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onCancel(); } });
   setTimeout(() => ta.focus(), 0);
   return tr;
 }

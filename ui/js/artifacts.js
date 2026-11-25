@@ -510,13 +510,18 @@ export async function renderGallery(view) {
     // a card's picture is drawn once it comes near the view; one whose page
     // runs (each holds its own runtime) is let go once out of reach again
     seen = new IntersectionObserver((entries) => entries.forEach((en) => {
+      const box = en.target;
       if (!en.isIntersecting) {
-        if (en.target.querySelector('iframe[sandbox="allow-scripts"]')) en.target.replaceChildren();
+        // (a picture still on its way is dropped too: back in reach, the box is drawn once again)
+        box.__drawing = null;
+        if (box.querySelector('iframe[sandbox="allow-scripts"]')) box.replaceChildren();
         return;
       }
-      if (en.target.childElementCount) return;
-      const a = shown.get(en.target);
-      renderPreview(en.target, a, { dark: isDark(), lang: currentLanguage(), iconName: iconFor(a.kind) }).catch(() => { en.target.innerHTML = `<pre>${esc(a.content.slice(0, 600))}</pre>`; });
+      if (box.childElementCount || box.__drawing) return;
+      const a = shown.get(box);
+      const mine = box.__drawing = {};
+      renderPreview(box, a, { dark: isDark(), lang: currentLanguage(), iconName: iconFor(a.kind), current: () => box.__drawing === mine })
+        .catch(() => { box.innerHTML = `<pre>${esc(a.content.slice(0, 600))}</pre>`; });
     }), { rootMargin: '200px' });
     for (const a of f) {
       const card = h(`<button class="card artifact-tile"><div class="preview" aria-hidden="true"></div>
@@ -599,5 +604,5 @@ window.addEventListener('message', (e) => {
   if (d.op === 'complete') { complete(frame.dataset, d.args).then((result) => reply({ result }), fail).finally(redraw); return; }
   // as Claude Desktop's artifacts get it: a refusal or failure is a result with isError, never a rejection
   if (d.op === 'callMcpTool') { toolCall({ ...frame.dataset, frame }, d.args).then((result) => reply({ result }), (err) => reply({ result: toolError(err) })).finally(redraw); return; }
-  try { reply({ result: storageCall(localStorage, frame.dataset.scope, d.op, d.args) }); } catch (err) { fail(err); }
+  storageCall(frame.dataset.scope, d.op, d.args).then((result) => reply({ result }), fail);
 });

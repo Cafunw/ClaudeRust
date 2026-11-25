@@ -4,7 +4,7 @@
 import './stub_globals.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
 const handlers = [];
 window.addEventListener = (type, fn, capture) => { if (type === 'keydown' && capture) handlers.push(fn); };
@@ -38,11 +38,11 @@ test('the terminal keeps Alt+digit; elsewhere it switches panes', () => {
 });
 
 test('xterm does not also send a key the app took', () => {
-  assert.match(readFileSync(new URL('../js/panes/terminal.js', import.meta.url), 'utf8'), /term\.attachCustomKeyEventHandler\(\(e\) => !e\.defaultPrevented\)/);
+  assert.match(source('../js/panes/terminal.js'), /term\.attachCustomKeyEventHandler\(\(e\) => !e\.defaultPrevented\)/);
 });
 
 test('the shortcut sheet says the terminal keeps them', async () => {
-  const src = readFileSync(new URL('../js/shortcuts.js', import.meta.url), 'utf8');
+  const src = source('../js/shortcuts.js');
   assert.match(src, /\$\{esc\(workspace\.paneHints\(\)\)\} \$\{esc\(t\('sc_panes_term'\)\)\}/);
   const { t, setLanguage } = await import('../js/i18n.js');
   setLanguage('tr');

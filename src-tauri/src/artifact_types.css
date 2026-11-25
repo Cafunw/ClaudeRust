@@ -89,6 +89,10 @@ body.t-document { overflow: auto; }
 /* a task item (markdown.rs: its checkbox first, in the item or its first paragraph): the box stands where the bullet was */
 .doc li:has(> input[type="checkbox"]:first-child, > p:first-child > input[type="checkbox"]:first-child) { list-style: none; }
 .doc li > input[type="checkbox"]:first-child, .doc li > p:first-child > input[type="checkbox"]:first-child { margin: 0 .5em 0 -1.4em; }
+/* it shows a state rather than being a control turned off: drawn like the chat's (app.css), not the faded native box */
+.doc input[type="checkbox"] { appearance: none; width: 15px; height: 15px; border: 1.5px solid var(--fg2); border-radius: 4px; background: var(--bg); display: inline-grid; place-content: center; vertical-align: -2px; opacity: 1; }
+.doc input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.doc input[type="checkbox"]:checked::before { content: ""; width: 9px; height: 9px; background: #fff; clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%); }
 .doc[contenteditable="true"] { box-shadow: inset 0 0 0 2px var(--sel); border-radius: 8px; }
 @media print { body.t-document { background: #fff; color: #000; } .doc { max-width: none; padding: 0; } }
 

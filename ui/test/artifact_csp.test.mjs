@@ -5,9 +5,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
-const HOOK = readFileSync(new URL('../../src-tauri/src/artifact_hook.js', import.meta.url), 'utf8');
+const HOOK = source('../../src-tauri/src/artifact_hook.js');
 
 function frame() {
   const listeners = {};

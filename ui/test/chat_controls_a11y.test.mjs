@@ -3,9 +3,9 @@
 // and on/off controls say whether they are on.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
-const src = (f) => readFileSync(new URL(`../js/${f}`, import.meta.url), 'utf8');
+const src = (f) => source(`../js/${f}`);
 const FILES = ['chat.js', 'parts.js', 'composer.js', 'findbar.js', 'artifacts.js', 'search.js', 'sidebar.js', 'home.js', 'util.js', 'mermaid_block.js', 'usage_limits.js'];
 
 test('icon buttons in the chat UI carry a label or a tooltip', () => {

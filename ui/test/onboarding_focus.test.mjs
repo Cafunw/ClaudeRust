@@ -3,9 +3,9 @@
 // hasn't started typing; never on the API-key field below them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { source } from './source.mjs';
 
-const src = readFileSync(new URL('../js/onboarding.js', import.meta.url), 'utf8');
+const src = source('../js/onboarding.js');
 
 test('focus starts on the name field, before the account check', () => {
   const at = src.indexOf('nameIn.focus();');
