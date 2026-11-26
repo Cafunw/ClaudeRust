@@ -38,6 +38,8 @@ async function newChat(text) {
 // where the covers over the answer's words not uncovered yet stand (ui/js/stream_reveal.js)
 const CLIPS = `[...document.querySelectorAll('#view .reveal-cover:not([hidden])')].map((c) => c.children[0].style.transform)`;
 const COVERS = `document.querySelectorAll('#view .reveal-cover').length`;
+// the reveal is off under reduced motion or forced colours, which CI's Windows runners report, so pin both
+const MOTION = { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }, { name: 'forced-colors', value: 'none' }] };
 
 before(async () => {
   if (skip) return;
@@ -53,6 +55,7 @@ before(async () => {
   await sleep(500);
   await waitFor('the app to start', `document.readyState === 'complete' && !!document.querySelector('#view .composer, #view .chat-col')`, 30000);
   await ev(PRELUDE);
+  await cdp.send('Emulation.setEmulatedMedia', MOTION);
 });
 
 after(async () => {
@@ -111,7 +114,7 @@ test('Stop shows what had arrived at once, and reduced motion shows every batch 
   assert.equal(clipped, 0, 'no reveal');
   await ev(`document.querySelector('#view .composer [data-act=send].stop').click()`);
   await idle();
-  await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+  await cdp.send('Emulation.setEmulatedMedia', MOTION);
 });
 
 test('Edit while Claude responds says to stop first and offers Stop', { skip, timeout: 60000 }, async () => {
