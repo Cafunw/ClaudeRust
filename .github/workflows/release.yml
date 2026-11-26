@@ -117,7 +117,7 @@ jobs:
             echo "$notes"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         if: needs.plan.outputs.signed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
