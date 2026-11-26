@@ -2,7 +2,7 @@
   "name": "clauderust",
   "private": true,
   "type": "module",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Tooling for building ClaudeRust (the app itself is Rust + static UI; no JS build step).",
   "license": "MIT",
   "scripts": {

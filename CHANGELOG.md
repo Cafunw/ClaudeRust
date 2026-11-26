@@ -3,6 +3,148 @@
 The release notes of each version; the app shows them when it offers an
 update. Newest first.
 
+## [0.1.13] - 2026-11-26
+
+Smoother streaming, cards for web citations, theme changes without a
+reload, a filter for skills, syncing GitHub files in a project, and
+fixes for the keyboard and screen readers.
+
+**Improved**
+- Streamed replies appear smoothly instead of in bursts. With reduced
+  motion or forced colours, text shows as it arrives, as before.
+- Web citations show the cited passage in a card when you hover over
+  them, focus them with the keyboard or tap them.
+- Mermaid diagrams, MCP App frames and Doc, Sheet and Deck artifacts
+  follow a theme change without reloading, and an artifact keeps the
+  edits you haven't saved.
+- The tools menu has *Add connectors…* and *Manage connectors*, and
+  Settings → Developer is easier to scan.
+- Settings → Skills has a filter, groups the skills by where they come
+  from, and shows each description in two lines until you show more.
+- GitHub files in a project can be synced to the latest commit of their
+  branch. Changed files are replaced; files gone from the repository are
+  kept and named.
+- Escape in a search field with text in it clears the field first; the
+  next Escape closes the dialog.
+- Releases also get unsigned macOS (universal) and Linux installers.
+
+**Fixed**
+- Message actions that can't run while Claude responds, such as *Edit*
+  and *Retry*, now look disabled and say why, with a *Stop* button.
+- Keyboard focus no longer gets lost after tabbing through an artifact,
+  and Tab no longer gets stuck in a Sheet.
+- In Settings → Developer, Tab reaches the controls after a server's
+  error details.
+- MCP server card headers no longer overflow at narrow widths.
+- Task-list checkboxes in replies and the New project fields have names
+  for screen readers.
+- Citation numbers no longer end up in copied text.
+- The update check says that no signed update has been published yet
+  instead of showing an error.
+- Claude's "still responding" messages are shown in Turkish in the
+  Turkish interface.
+
+**Known limits**
+- Some features of Claude Desktop can't be offered: Anthropic's own
+  account connectors, publishing an artifact, and picking private Google
+  Drive files (the app has no Google sign-in). MCP sampling is not
+  supported.
+- On your Claude account a reply doesn't go on after the app quits.
+- On your Claude account `window.claude.complete` still starts a Claude
+  Code process of its own for each call.
+- If you send a new chat's first message before its early Claude Code
+  process is up, the message starts its own; the early one then stays
+  idle until another chat's process is kept or 90 seconds pass.
+- Rebuilding a chat whose Claude Code transcript is gone, and finishing
+  an artifact with *Continue* on your Claude account, were tried only
+  with a stand-in for Claude Code.
+- Opening a very long chat with many code blocks still has one short
+  stutter.
+- A very small component that isn't centred on its page still looks
+  small in its gallery tile.
+- The exported chat page's colours and the Turkish desktop notifications
+  were checked by tests, not by hand.
+- An unfinished artifact now ends where the next artifact starts, so an
+  artifact whose own text contains an artifact's opening tag is split
+  there.
+- There is no *Design* artifact, decks are 16:9 only, and the version
+  menu doesn't mark a version you edited as yours.
+- After you edit an artifact in place, the next reply on your Claude
+  account starts a new Claude Code session with the conversation sent
+  again, so that reply doesn't use the prompt cache.
+- In a doc saved as .docx, lists are typed bullets and numbers rather
+  than Word lists, and links are styled text that can't be clicked.
+- Printing decks and docs to PDF, the save dialogs of downloads, *Open*
+  and *Download* in an attachment's preview, and the tray menu itself
+  were not tried by hand, because they open the system's own windows.
+- The window's own memory use while idle is unchanged. Giving memory back
+  when the window is hidden or minimised, and ending the kept Claude Code
+  process 30 seconds after that, were checked in the code and tests, not
+  by hand.
+- An MCP config file edited outside the app that isn't valid JSON is
+  ignored without a notice until it is valid again; the servers keep
+  running as they were.
+- In a form an MCP server asks you to fill in, a choice of several
+  numbers is refused; choices of text work.
+- An MCP resource attached to a message that is never sent stays in
+  memory until the app quits.
+- Searching a large project on your Claude account was tried only with a
+  stand-in for Claude Code, and so was `window.claude.complete` there.
+- What you allow an artifact (a connector, or asking Claude) lasts until
+  the app restarts or the page reloads; then the artifact asks again. An
+  artifact can't be opened in its own window yet.
+- With both an API key and the Claude account as the chat engine, titles
+  are made with the API key first, so they use API credit.
+- The Node.js download was tried only against a local test server, not
+  against nodejs.org. Installing and updating from the extension
+  directory were tried only against local test servers; the listed
+  releases' addresses, sizes and SHA-256 come from GitHub's release API
+  and were not downloaded. Update notices cover only extensions the
+  directory lists.
+- The GitHub and Google link sources, and syncing GitHub files in a
+  project, were tried only against local test servers, and Google's
+  export formats were not checked against Google. Files that aren't
+  shared by link can't be read.
+- GitHub files added to a project before this version can't be synced;
+  add them from GitHub again to sync them.
+- Drafting a style was tried with an API key against a stand-in, not on
+  your Claude account.
+- Some messages are still English in the Turkish interface: the engine's
+  crash text, errors when continuing a reply, the success text when a
+  worktree's changes are applied, the diagnostics' labels, and the error
+  detail in the dialog shown when the database can't be opened.
+- While a reply streams, the window still parses the reply's whole HTML
+  again on every update: about 18 % of a core in a development build
+  during a long reply, and the smooth reveal adds up to about 3 % more.
+  A release build was not measured.
+- While a reply streams, the background of a code block or table appears
+  line by line.
+- On your Claude account a continued reply's repeated start is not
+  trimmed.
+- An MCP App page can reach the hosts its server declares without asking
+  you first. MCP Apps are shown inline only: no side panel or full
+  screen, and an app can't update what Claude knows.
+- A plain `npx tauri build` (or `npm run build`) still needs the updater
+  signing key; use `npm run build:unsigned`.
+- If GitHub answers the update check with a server error, the app also
+  says that no signed update has been published yet; it checks again six
+  hours later.
+- Skills run only in Code sessions on the Claude Code engine; chats and
+  the API-key engine don't use them yet.
+- A PDF over the limits still has no text-only fallback.
+- Mermaid diagrams and the artifact libraries are still loaded from public
+  CDNs (at fixed versions), so they need the internet. Redrawing Mermaid
+  diagrams on a theme change was tried only with a stand-in for Mermaid.
+- The citation card and the keyboard stops around artifacts were not
+  tried with a screen reader.
+- The macOS and Linux installers are unsigned, and the app was not tried
+  by hand on macOS or Linux. Keeping the computer awake on macOS and
+  Linux, and keeping tokens in the config file on Linux, are untested on
+  those systems.
+- Fast mode, replies with thinking switched off, memory written through
+  Claude Code, Research and code execution were tested against stand-ins
+  and at the configuration level, not yet against live replies.
+
 ## [0.1.12] - 2026-11-25
 
 Less memory on your Claude account, support for the newer MCP protocol,
